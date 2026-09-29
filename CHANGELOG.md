@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas.array and pandas.arrays
+
+`firepanda.array` is now available, as `pandas.array`. It infers the masked types for plain numbers and bools and text for strings, keeps the type of a Series, an Index or an array, and refuses a scalar as pandas does. Arrays now carry pandas' class names, `IntegerArray`, `FloatingArray`, `BooleanArray`, `ArrowStringArray`, `NumpyExtensionArray`, `DatetimeArray`, `TimedeltaArray`, `PeriodArray`, `IntervalArray` and `ArrowExtensionArray`, which `firepanda.arrays` exports with `Categorical`. They print as pandas prints them, and have arithmetic, comparisons, `fillna`, `dropna`, `copy`, `astype`, `value_counts`, `to_numpy` and the reductions. `isna` on an array now answers a numpy array of bools. Document 106 describes the design.
+
 ### Added: to_period, to_timestamp and PeriodProperties
 
 `DatetimeIndex.to_period`, `Series.dt.to_period`, and `to_period` and `to_timestamp` on Series and DataFrame labels are now available, as in pandas. With no frequency, `to_period` uses the index's own or an inferred one, read as its period frequency, and refuses as pandas does when there is none. `s.dt` on a period column answers a `PeriodProperties` with the period fields, `start_time`, `end_time`, `freq`, `to_timestamp`, `asfreq` and `strftime`. `PeriodIndex.to_timestamp` now infers the frequency of the starts. Document 105 describes the design.
