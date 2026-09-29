@@ -21891,6 +21891,95 @@ class _GroupedWindow:
         return call
 
 
+class _GroupedResampler:
+    """A resample of each group of a group by, which pandas calls `DatetimeIndexResamplerGroupby`.
+
+    Each reduction resamples every group's rows on their own and stacks the
+    answers under the group's key. With `group_keys=False` or `as_index=False`
+    the answers are stacked without the key, as pandas stacks them. A key
+    column can be picked out too, and is then resampled with the rest.
+    """
+
+    __slots__ = ("_args", "_grouped", "_kwargs", "_selected")
+
+    def __init__(self, grouped: Any, args: Any, kwargs: Any, selected: Any = None) -> None:
+        self._grouped = grouped
+        self._args = args
+        self._kwargs = kwargs
+        self._selected = selected
+        grouped._source().iloc[:0].resample(*args, **kwargs)
+
+    @property
+    def ndim(self) -> int:
+        """1 over one column and 2 over a frame, as pandas counts."""
+        if self._selected is None:
+            return int(self._grouped._source().ndim)
+        return 2 if isinstance(self._selected, list) else 1
+
+    def _columns(self) -> list[Any]:
+        """The columns a column can be picked from, keys and all, or none for a column."""
+        source = self._grouped._source()
+        return [] if source.ndim == 1 else list(self._grouped._frame.columns)
+
+    def __getitem__(self, key: Any) -> _GroupedResampler:
+        """The same resample over one column, or over a list of columns.
+
+        Raises:
+            KeyError: For a column the frame does not have, in pandas' words.
+        """
+        columns = self._columns()
+        single = self._selected is not None and not isinstance(self._selected, list)
+        if single or not columns:
+            raise KeyError(f"Column not found: {key}")
+        for name in key if isinstance(key, list) else [key]:
+            if name not in columns:
+                raise KeyError(f"Column not found: {name}")
+        return _GroupedResampler(self._grouped, self._args, self._kwargs, key)
+
+    def _rows(self) -> Any:
+        """What each group's rows are cut from, which takes in the keys only when picked."""
+        grouped = self._grouped
+        picked = self._selected if isinstance(self._selected, list) else [self._selected]
+        if self._selected is not None and any(name in grouped._by for name in picked):
+            return grouped._frame
+        return grouped._source()
+
+    def __getattr__(self, name: str) -> Any:
+        from ._resample import Resampler
+
+        public = not name.startswith("_")
+        if public and self._selected is None and name in self._columns():
+            return self[name]
+        if not public or not hasattr(Resampler, name):
+            raise AttributeError(
+                f"'DatetimeIndexResamplerGroupby' object has no attribute {name!r}"
+            )
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            if name == "transform":
+                raise NotImplementedError(
+                    "transform on a resample of a group by is not supported yet, because pandas"
+                    " lines its answer up on the original rows without the keys"
+                )
+            grouped = self._grouped
+            rows = self._rows()
+            answers = []
+            members = grouped._members()
+            for key, places in members:
+                resampled = grouped._named_group(rows.iloc[places], key).resample(
+                    *self._args, **self._kwargs
+                )
+                if self._selected is not None:
+                    resampled = resampled[self._selected]
+                answers.append(getattr(resampled, name)(*args, **kwargs))
+            joined = concat(answers)
+            if getattr(grouped, "_group_keys", True) and grouped._as_index:
+                joined = grouped._keyed(joined, [key for key, _ in members], answers)
+            return grouped._renamed(joined)
+
+        return call
+
+
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
@@ -23080,6 +23169,18 @@ class GroupByMixin[Answer]:
             "method": method,
         }
         return _GroupedWindow(self, "rolling", (window,), settings)
+
+    def resample(
+        self, rule: Any, *args: Any, include_groups: bool = False, **kwargs: Any
+    ) -> _GroupedResampler:
+        """Each group resampled on its own, labelled by the group and the new time.
+
+        Raises:
+            ValueError: For `include_groups=True`, which pandas no longer allows.
+        """
+        if include_groups:
+            raise InvalidArgumentError("include_groups=True is no longer allowed.")
+        return _GroupedResampler(self, (rule, *args), kwargs)
 
     def expanding(self, min_periods: int = 1, method: str = "single") -> _GroupedWindow:
         """An expanding window over each group, labelled by the group and the row."""
