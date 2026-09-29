@@ -34,7 +34,9 @@ whichever function they called first.
 
 from __future__ import annotations
 
-from . import _attrs, _firepanda, api, arrays, errors, offsets, testing
+import sys
+
+from . import _attrs, _firepanda, api, arrays, errors, offsets, testing, tseries
 from ._array import array
 from ._arrowtyped import ArrowDtype
 from ._attrs import Flags
@@ -217,11 +219,15 @@ __all__ = [
     "to_numeric",
     "to_pickle",
     "to_timedelta",
+    "tseries",
     "unique",
     "wide_to_long",
 ]
 
 __version__: str = _firepanda.version()
+
+pandas = sys.modules[__name__]
+"""The package itself, as `pandas.pandas` is pandas."""
 """The version, asked of the extension rather than written down here.
 
 There are already three copies of this string, in `pixi.toml`, in
