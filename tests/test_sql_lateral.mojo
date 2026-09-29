@@ -247,5 +247,75 @@ def test_a_fold_correlated_by_an_inequality_is_turned_down() raises:
         )
 
 
+def test_a_limit_keeps_the_first_rows_of_each_left_row() raises:
+    var sql = (
+        "SELECT name, qty FROM shops, LATERAL (SELECT qty FROM sales WHERE"
+        " sales.shop = shops.shop ORDER BY qty DESC LIMIT 1) s ORDER BY name"
+    )
+    assert_equal(shown(sql, "name"), "a,b")
+    assert_equal(shown(sql), "20,5")
+
+
+def test_a_left_join_lateral_with_a_limit_pads_the_empty_rows() raises:
+    var sql = (
+        "SELECT name, qty FROM shops LEFT JOIN LATERAL (SELECT qty FROM sales"
+        " WHERE sales.shop = shops.shop ORDER BY qty LIMIT 1) s ON true"
+        " ORDER BY name"
+    )
+    assert_equal(shown(sql, "name"), "a,b,c")
+    assert_equal(shown(sql), "10,5,null")
+
+
+def test_an_offset_skips_rows_of_each_left_row() raises:
+    var sql = (
+        "SELECT name, qty FROM shops, LATERAL (SELECT qty FROM sales WHERE"
+        " sales.shop = shops.shop ORDER BY qty LIMIT 5 OFFSET 1) s"
+    )
+    assert_equal(shown(sql, "name"), "a")
+    assert_equal(shown(sql), "20")
+
+
+def test_an_uncorrelated_limit_is_the_same_rows_for_all() raises:
+    var sql = (
+        "SELECT name, qty FROM shops, LATERAL (SELECT qty FROM sales ORDER BY"
+        " qty DESC LIMIT 2) s ORDER BY name, qty"
+    )
+    assert_equal(shown(sql, "name"), "a,a,b,b,c,c")
+    assert_equal(shown(sql), "10,20,10,20,10,20")
+
+
+def test_a_limit_orders_by_a_column_it_does_not_hand_out() raises:
+    var sql = (
+        "SELECT name, q2 FROM shops, LATERAL (SELECT qty * 2 AS q2 FROM sales"
+        " WHERE sales.shop = shops.shop ORDER BY qty LIMIT 1) s ORDER BY name"
+    )
+    assert_equal(shown(sql, "q2"), "20,10")
+
+
+def test_a_limit_of_nothing_keeps_nothing() raises:
+    var sql = (
+        "SELECT name FROM shops, LATERAL (SELECT qty FROM sales WHERE"
+        " sales.shop = shops.shop LIMIT 0) s"
+    )
+    assert_equal(shown(sql, "name"), "")
+
+
+def test_a_limit_counts_what_the_filter_left() raises:
+    var sql = (
+        "SELECT name, qty FROM shops, LATERAL (SELECT qty FROM sales WHERE"
+        " sales.shop = shops.shop AND qty > 7 ORDER BY qty LIMIT 1) s"
+    )
+    assert_equal(shown(sql, "name"), "a")
+    assert_equal(shown(sql), "10")
+
+
+def test_a_limit_with_an_inequality_correlation_is_turned_down() raises:
+    with assert_raises(contains="LIMIT inside a LATERAL"):
+        _ = shown(
+            "SELECT name, qty FROM shops, LATERAL (SELECT qty FROM sales WHERE"
+            " sales.shop < shops.shop LIMIT 1) s"
+        )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

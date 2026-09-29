@@ -511,6 +511,7 @@ from firepanda.kernel.framed import (
     WINDOW_LEAD,
     WINDOW_NTH_VALUE,
     WINDOW_NTILE,
+    WINDOW_ROW_NUMBER,
     WindowFrame,
     window_function_named,
 )
@@ -6037,9 +6038,11 @@ def _lateral(
 
     A select list that folds, `LATERAL (SELECT sum(qty) FROM sales WHERE
     sales.shop = shops.shop)`, folds the rows of one left row at a time, which
-    is a group per left row. `_folded_lateral` has how that is built. A `GROUP
-    BY`, an `ORDER BY` or a `LIMIT` on it, a `DISTINCT`, a `WITH` and anything
-    that is not one `SELECT` are refused.
+    is a group per left row. `_folded_lateral` has how that is built. A `LIMIT`
+    or an `OFFSET` picks rows per left row, which is a row number over the
+    subquery's rows partitioned on what it correlates on, and
+    `_limited_lateral` has that. A `GROUP BY`, a `LIMIT` on a fold, a
+    `DISTINCT`, a `WITH` and anything that is not one `SELECT` are refused.
 
     An outer one, `LEFT JOIN LATERAL`, is the same join as a left one, which
     pads a left row the subquery answers nothing for. The padding has to land
@@ -6075,12 +6078,22 @@ def _lateral(
     var top = ast.stmts[Int(source.a)]
     if top.kind != STMT_SELECT:
         raise Error("a LATERAL subquery over a statement that is not a SELECT")
+    var ordering = List[UInt32]()
+    var offset = 0
+    var length = NO_LIMIT
     if top.b != NO_NODE:
-        raise Error(
-            "firepanda does not lower an ORDER BY or a LIMIT inside a LATERAL"
-            " subquery yet, which picks rows per left row rather than over the"
-            " whole join"
-        )
+        var modifiers = ast.stmts[Int(top.b)]
+        ordering = ast.items(modifiers.children)
+        if (modifiers.payload & LIMIT_PERCENT) != 0:
+            raise Error(
+                "firepanda does not lower LIMIT n PERCENT yet, which needs the"
+                " row count before it knows how many rows it keeps"
+            )
+        if modifiers.b != NO_NODE:
+            offset = _constant_count(ast, modifiers.b, "an OFFSET")
+        if modifiers.a != NO_NODE:
+            length = _constant_count(ast, modifiers.a, "a LIMIT")
+    var picks = offset != 0 or length != NO_LIMIT
     if len(read_ctes(ast, source.a)) != 0:
         raise Error(
             "firepanda does not lower a WITH written inside a LATERAL subquery"
@@ -6204,6 +6217,35 @@ def _lateral(
         else:
             names.append(_name_of(ast, grammar, item.a, i, scope))
 
+    # An ORDER BY with no LIMIT orders rows a join then hands out in no order,
+    # so it is only read when a LIMIT or an OFFSET picks rows by it.
+    var sort_keys = List[Int]()
+    var descending = List[Bool]()
+    var nulls_last = List[Bool]()
+    if picks:
+        if folds:
+            raise Error(
+                "firepanda does not lower a LIMIT or an OFFSET on a LATERAL"
+                " subquery that folds yet"
+            )
+        for i in range(len(ordering)):
+            var entry = ast.stmts[Int(ordering[i])]
+            if entry.a == NO_NODE or _sort_place(ast, entry.a) >= 0:
+                raise Error(
+                    "firepanda does not lower ORDER BY ALL or an ORDER BY of a"
+                    " position inside a LATERAL subquery yet"
+                )
+            var key = _lower_expr(ast, entry.a, plan, split, scope, False)
+            var reads = _side(plan, key, left, right)
+            if reads != _RIGHT and reads != _NEITHER:
+                raise Error(
+                    "firepanda does not lower an ORDER BY that reads the left"
+                    " side inside a LATERAL subquery yet"
+                )
+            sort_keys.append(key)
+            descending.append(entry.b == SORT_DESCENDING)
+            nulls_last.append(entry.payload != NULLS_FIRST)
+
     # A subquery inside it is a join this would have to put under the lateral
     # one, and neither walk builds it.
     if (
@@ -6248,6 +6290,18 @@ def _lateral(
 
     for i in range(len(under)):
         right.at = plan.filter(right.at, under[i])
+    if picks:
+        _limited_lateral(
+            plan,
+            right,
+            right_keys,
+            rest,
+            sort_keys^,
+            descending^,
+            nulls_last^,
+            offset,
+            length,
+        )
     var kind = JoinKind.INNER
     if len(left_keys) == 0:
         kind = JoinKind.CROSS
@@ -6284,6 +6338,85 @@ def _lateral(
     if called.byte_length() != 0:
         scope.derive(called^, names^)
     return _From(at_out, schema^, origin^)
+
+
+def _limited_lateral(
+    mut plan: Plan,
+    mut right: _From,
+    right_keys: List[Int],
+    rest: List[Int],
+    var sort_keys: List[Int],
+    var descending: List[Bool],
+    var nulls_last: List[Bool],
+    offset: Int,
+    length: Int,
+) raises:
+    """Keeps the rows a `LIMIT` inside a LATERAL subquery picks per left row.
+
+    The rows one left row sees are the subquery's rows whose correlated
+    columns equal its own, so they are one partition of the subquery's rows
+    keyed on those columns, and the rows a `LIMIT` and an `OFFSET` keep are
+    the ones whose `row_number()` in that partition, ordered by the `ORDER
+    BY`, lands in the window they give. So a row number goes on under the join
+    and a filter keeps the window, and the join then pairs each left row with
+    what is left of its partition. With no correlation there is one partition,
+    and every left row gets the same rows. The number is a column the
+    projection above never reads, so it does not come out.
+
+    This holds when the correlation is equalities alone. A part of the `WHERE`
+    that compares the two sides some other way is a filter over the join,
+    which would drop rows after the limit had counted them.
+
+    Args:
+        plan: Where the nodes go.
+        right: The subquery's rows, with its own filters on. The row number
+            and the filter go on top of it.
+        right_keys: The subquery's side of each correlated equality.
+        rest: The parts of the `WHERE` that go over the join.
+        sort_keys: What the `ORDER BY` sorts by. Consumed.
+        descending: Whether each key sorts high to low. Consumed.
+        nulls_last: Whether each key puts its nulls last. Consumed.
+        offset: How many rows of each partition are skipped.
+        length: How many rows of each partition are kept after that, or
+            `NO_LIMIT`.
+
+    Raises:
+        If the correlation is not equalities alone.
+    """
+    if len(rest) != 0:
+        raise Error(
+            "firepanda lowers a LIMIT inside a LATERAL subquery whose WHERE"
+            " compares the two sides with equalities alone so far"
+        )
+    var partition = List[Int](capacity=len(right_keys))
+    for i in range(len(right_keys)):
+        partition.append(plan.exprs.duplicate(right_keys[i]))
+    var frame = WindowFrame()
+    frame.function = WINDOW_ROW_NUMBER
+    frame.descending = descending^
+    frame.nulls_last = nulls_last^
+    var numbered = plan.exprs.framed(
+        AggKind.SUM, List[Int](), partition^, sort_keys^, frame^
+    )
+    right.at = plan.window(right.at, [numbered], ["__lateral_row"])
+    if offset != 0:
+        right.at = plan.filter(
+            right.at,
+            plan.exprs.binary(
+                BinaryOp.GT,
+                plan.exprs.column("__lateral_row"),
+                plan.exprs.literal(Value(Int64(offset))),
+            ),
+        )
+    if length != NO_LIMIT:
+        right.at = plan.filter(
+            right.at,
+            plan.exprs.binary(
+                BinaryOp.LE,
+                plan.exprs.column("__lateral_row"),
+                plan.exprs.literal(Value(Int64(offset + length))),
+            ),
+        )
 
 
 def _folded_lateral(
