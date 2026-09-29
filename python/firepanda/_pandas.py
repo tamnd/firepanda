@@ -49,6 +49,7 @@ from . import (
     _config,
     _excel_write,
     _firepanda,
+    _hdf,
     _iceberg,
     _interval,
     _masked,
@@ -32699,3 +32700,7 @@ SeriesMixin.to_excel = DataFrameMixin.to_excel = _excel_write.to_excel  # type: 
 # `to_iceberg` is pandas' method, which hands the frame to pyiceberg, and lives with
 # `read_iceberg` in `_iceberg`.
 DataFrameMixin.to_iceberg = _iceberg.to_iceberg  # type: ignore[attr-defined]
+
+# `to_hdf` is pandas' method, which writes the object into an HDF5 store, and lives
+# with `HDFStore` and pandas' storers in `_hdf`.
+SeriesMixin.to_hdf = DataFrameMixin.to_hdf = _hdf._to_hdf  # type: ignore[attr-defined]

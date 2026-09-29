@@ -74,6 +74,7 @@ from ._excel_write import ExcelWriter
 from ._expression import col
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._frequency import infer_freq
+from ._hdf import HDFStore, read_hdf
 from ._html_read import read_html
 from ._iceberg import read_iceberg
 from ._interval import Interval, IntervalDtype, IntervalIndex, interval_range
@@ -157,6 +158,7 @@ __all__ = [
     "Float32Dtype",
     "Float64Dtype",
     "Grouper",
+    "HDFStore",
     "Index",
     "IndexSlice",
     "Int8Dtype",
@@ -229,6 +231,7 @@ __all__ = [
     "read_excel",
     "read_feather",
     "read_fwf",
+    "read_hdf",
     "read_html",
     "read_iceberg",
     "read_json",
