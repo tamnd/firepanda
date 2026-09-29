@@ -24,9 +24,9 @@ import json
 import os
 from typing import Any
 
+from . import _optional
 from ._pandas import NO_DEFAULT
 
-_MISSING = "Missing optional dependency '{}'.  Use pip or conda to install {}."
 _LEVEL = "__index_level_{}__"
 _ATTRS = b"PANDAS_ATTRS"
 # The pandas whose layout of the `pandas` metadata key this writes.
@@ -39,7 +39,7 @@ def _imported(name: str) -> Any:
     try:
         return importlib.import_module(name)
     except ImportError:
-        raise ImportError(_MISSING.format("pyarrow", "pyarrow")) from None
+        raise _optional.missing("pyarrow") from None
 
 
 def _numpy_type(kind: Any) -> str:

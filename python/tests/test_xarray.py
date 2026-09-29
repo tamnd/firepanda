@@ -42,7 +42,7 @@ def test_no_xarray_is_pandas_sentence(monkeypatch: Any) -> None:
     with pytest.raises(ImportError) as raised:
         fp.DataFrame({"a": [1]}).to_xarray()
     assert str(raised.value) == (
-        "Missing optional dependency 'xarray'.  Use pip or conda to install xarray."
+        "`Import xarray` failed.  Use pip or conda to install the xarray package."
     )
 
 
