@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas.tseries
+
+`firepanda.tseries` is now a package with `api`, `frequencies` and `offsets` modules like pandas has. `to_offset` reads the same text as pandas and fails with the same nested words for retired aliases, bad suffixes and unknown names, `get_period_alias` maps offsets to period names, and `guess_datetime_format` is public. `firepanda.pandas` names the package itself.
+
 ### Added: read_html
 
 `read_html` reads the tables of an HTML document into frames the way pandas does, with `match`, `attrs`, `displayed_only`, header inference from `thead` and `th` rows, `colspan` and `rowspan` expansion, `extract_links`, and the `read_csv` options for typing the cells. It parses with the standard library, so it needs neither lxml nor BeautifulSoup.
