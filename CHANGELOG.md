@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: interval_range, and cut by an IntervalIndex
+
+`interval_range` builds an `IntervalIndex` of evenly spaced numbers from three of `start`, `end`, `periods` and `freq`, with whole number ends when every one given is whole, as pandas does. `cut` now takes an `IntervalIndex` as `bins` and answers an ordered category of those intervals, and it refuses intervals that overlap in pandas' words. Ranges of instants or spans still raise.
+
 ### Added: interval columns, and cut and qcut label bins with intervals
 
 A list of `Interval` values that share a side is now an interval column with pandas' `interval[int64, right]` or `interval[float64, right]` type, and it prints, casts to `category`, counts and groups the way pandas' does. `IntervalDtype` and `IntervalIndex` are new, with `from_breaks`, `from_tuples`, `from_arrays`, `left`, `right`, `mid`, `length` and pandas' repr, and `cat.categories` of a category of intervals is an `IntervalIndex`. `cut` and `qcut` without `labels=` now label each bin with an interval, rounded by pandas' precision rule, where they used to refuse. An interval column and a category of intervals or of numbers go to Arrow as pandas sends them, intervals as the `pandas.interval` type. Spec 102 has the details.

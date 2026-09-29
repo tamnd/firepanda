@@ -104,3 +104,52 @@ def test_intervals_export_as_pandas(case: Callable[[ModuleType], Any]) -> None:
         kind, wanted = kind.value_type, wanted.value_type
     assert kind == wanted
     assert mine.to_pylist() == theirs.to_pylist()
+
+
+RANGES: dict[str, Callable[[ModuleType], Any]] = {
+    "start-end": lambda lib: lib.interval_range(0, 5),
+    "start-periods": lambda lib: lib.interval_range(start=0, periods=4),
+    "end-periods": lambda lib: lib.interval_range(end=5, periods=4),
+    "float-step": lambda lib: lib.interval_range(0, 10, freq=2.5),
+    "split": lambda lib: lib.interval_range(0, 1, periods=4),
+    "whole-split": lambda lib: lib.interval_range(0, 8, periods=4),
+    "float-ends": lambda lib: lib.interval_range(0.0, 3.0),
+    "closed-named": lambda lib: lib.interval_range(0, 3, closed="both", name="x"),
+    "step-past-end": lambda lib: lib.interval_range(0, 7, freq=2),
+    "all-four": lambda lib: lib.interval_range(0, 5, periods=2, freq=1),
+    "text-start": lambda lib: lib.interval_range("a", 5),
+    "part-periods": lambda lib: lib.interval_range(0, periods=1.5),
+    "cut-by-range": lambda lib: lib.cut(lib.Series([1, 3, 5]), lib.interval_range(0, 6, freq=2)),
+    "cut-by-left": lambda lib: lib.cut(
+        lib.Series([0, 2, 3.5, 6, None]), lib.interval_range(0, 6, freq=2, closed="left")
+    ),
+    "cut-outside": lambda lib: lib.cut(lib.Series([0, 2, 6, 7]), lib.interval_range(0, 6, freq=2)),
+    "cut-between": lambda lib: lib.cut(
+        lib.Series([1, 5]), lib.IntervalIndex.from_tuples([(0, 1), (4, 6)])
+    ),
+    "cut-open": lambda lib: lib.cut(
+        lib.Series([1, 2, 3]), lib.IntervalIndex.from_tuples([(0, 2), (2, 4)], closed="neither")
+    ),
+    "cut-overlap": lambda lib: lib.cut(
+        lib.Series([1]), lib.IntervalIndex.from_tuples([(0, 2), (1, 4)])
+    ),
+}
+
+
+def plain_outcome(build: Callable[[], Any]) -> str:
+    """The repr, or the mistake as its builtin class and message."""
+    try:
+        return repr(build())
+    except Exception as error:
+        kind = next(k.__name__ for k in type(error).__mro__ if k.__module__ == "builtins")
+        return f"{kind}: {error}"
+
+
+@pytest.mark.parametrize("case", RANGES.values(), ids=RANGES.keys())
+def test_ranges_answer_as_pandas(case: Callable[[ModuleType], Any]) -> None:
+    assert plain_outcome(lambda: case(fp)) == plain_outcome(lambda: case(pd))
+
+
+def test_a_range_of_instants_is_refused() -> None:
+    with pytest.raises(NotImplementedError, match="interval_range"):
+        fp.interval_range(fp.Timestamp("2020-01-01"), periods=2)
