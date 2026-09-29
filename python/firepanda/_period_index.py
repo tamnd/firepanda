@@ -17,6 +17,7 @@ keeps its type in the slot a `DatetimeIndex` keeps its frequency in, is still a
 from __future__ import annotations
 
 import numbers
+import re
 from typing import Any
 
 from . import _objects, _period
@@ -25,7 +26,7 @@ from ._period import Period, PeriodDtype
 from ._scalars import NaT
 from .errors import InvalidArgumentError
 
-__all__ = ["PeriodIndex", "period_range"]
+__all__ = ["PeriodIndex", "PeriodProperties", "period_range"]
 
 
 def _kind_of(values: list[Any], freq: Any, dtype: Any) -> str:
@@ -264,8 +265,15 @@ class PeriodIndex(Index):
         return self._instants(lambda value: value.end_time)
 
     def to_timestamp(self, freq: Any = None, how: str = "start") -> Any:
-        """Each period as an instant, at its start or its end."""
-        return self._instants(lambda value: value.to_timestamp(freq=freq, how=how))
+        """Each period as an instant, at its start or its end.
+
+        Starts keep the frequency they are read to step at, as pandas infers
+        one for them, and ends have none.
+        """
+        found = self._instants(lambda value: value.to_timestamp(freq=freq, how=how))
+        if not _period._how(how):
+            found.freq = found.inferred_freq
+        return found
 
     def _moved(self, move: Any, kind: str | None = None) -> PeriodIndex:
         """Each period changed by `move`, as an index of type `kind`, its own by default."""
@@ -452,6 +460,105 @@ class PeriodIndex(Index):
         return f"PeriodIndex({body}{', '.join(attrs)})"
 
     __str__ = __repr__
+
+
+_ALIASES = {
+    "M": ("MS", "BMS", "BME", "SME", "SMS", "CBME", "CBMS", "EOM"),
+    "Q": ("QS", "BQS", "BQE"),
+    "Y": ("YS", "BYS", "BYE"),
+}
+"""The offsets whose instants read as periods of another name, by that name,
+which is pandas' `get_period_alias` for the ones an index can keep."""
+
+
+def _period_alias(text: str) -> str:
+    """The period frequency an index's own frequency reads as when it has to become one."""
+    found = re.fullmatch(r"(\d*)([A-Za-z]+)(?:-(\w+))?", text)
+    if found is None:
+        return text
+    count, prefix, suffix = found.groups()
+    if prefix in ("ME", "QE", "YE"):
+        return count + prefix[0] + (f"-{suffix}" if suffix else "")
+    for name, prefixes in _ALIASES.items():
+        if prefix in prefixes:
+            return name
+    return text
+
+
+class PeriodProperties:
+    """The `dt` accessor on a column of periods, which is `pandas.PeriodProperties`.
+
+    `s.dt` answers one of these rather than a `DatetimeProperties` when the
+    column holds periods. Every name reads the column as a `PeriodIndex` and
+    hands the answer back as a column with the column's own labels and name.
+    """
+
+    __slots__ = ("_series",)
+    """The series the accessor was reached from."""
+
+    def __init__(self, data: Any) -> None:
+        """Holds the series. Not a public entry point."""
+        self._series = data
+
+    def _index(self) -> PeriodIndex:
+        """The column's periods as an index."""
+        series = self._series
+        return PeriodIndex(series.tolist(), dtype=series.dtype)
+
+    def _wrapped(self, values: Any) -> Any:
+        """Values as a column with the series' labels and name."""
+        from ._frame import Series
+
+        series = self._series
+        return Series(values, index=series.index, name=series.name)
+
+    def _read(self, name: str) -> Any:
+        return self._wrapped(getattr(self._index(), name))
+
+    year = property(lambda self: self._read("year"), doc="The year of each period.")
+    month = property(lambda self: self._read("month"), doc="The month of each period.")
+    day = property(lambda self: self._read("day"), doc="The day of each period.")
+    hour = property(lambda self: self._read("hour"), doc="The hour of each period.")
+    minute = property(lambda self: self._read("minute"), doc="The minute of each period.")
+    second = property(lambda self: self._read("second"), doc="The second of each period.")
+    quarter = property(lambda self: self._read("quarter"), doc="The quarter of each period.")
+    qyear = property(lambda self: self._read("qyear"), doc="The fiscal year of each quarter.")
+    week = weekofyear = property(
+        lambda self: self._read("week"), doc="The week of the year of each period."
+    )
+    dayofweek = day_of_week = weekday = property(
+        lambda self: self._read("dayofweek"), doc="The day of the week, Monday being 0."
+    )
+    dayofyear = day_of_year = property(
+        lambda self: self._read("dayofyear"), doc="The day of the year of each period."
+    )
+    days_in_month = daysinmonth = property(
+        lambda self: self._read("days_in_month"), doc="How many days each period's month has."
+    )
+    is_leap_year = property(
+        lambda self: self._read("is_leap_year"), doc="Whether each period's year is a leap year."
+    )
+    start_time = property(
+        lambda self: self._read("start_time"), doc="The first instant of each period."
+    )
+    end_time = property(lambda self: self._read("end_time"), doc="The last instant of each period.")
+
+    @property
+    def freq(self) -> Any:
+        """The frequency, as the offset that steps by it."""
+        return self._series.dtype.freq
+
+    def to_timestamp(self, freq: Any = None, how: str = "start") -> Any:
+        """Each period as an instant, at its start or its end."""
+        return self._wrapped(self._index().to_timestamp(freq=freq, how=how))
+
+    def asfreq(self, freq: Any = None, how: str = "E") -> Any:
+        """Each period as the one of another frequency at its start or its end."""
+        return self._wrapped(self._index().asfreq(freq, how=how))
+
+    def strftime(self, date_format: str) -> Any:
+        """Each period written by a format, a gap for NaT."""
+        return self._wrapped(self._index().strftime(date_format))
 
 
 def _offset_type() -> Any:
