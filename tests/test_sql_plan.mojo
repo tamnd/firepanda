@@ -2090,13 +2090,29 @@ def test_a_lateral_that_folds_is_a_left_join_to_its_groups() raises:
     assert_true(got.find("coalesce") != -1, got)
 
 
+def test_a_lateral_limit_numbers_the_rows_of_each_left_row() raises:
+    var got = _plan(
+        "SELECT a, k FROM t, LATERAL (SELECT k FROM u WHERE b = t.a ORDER BY k"
+        " LIMIT 2) v"
+    )
+    assert_true(got.find("row_number") != -1, got)
+    assert_true(got.find("__lateral_row") != -1, got)
+
+
 def test_what_a_lateral_subquery_does_not_lower_is_refused_by_name() raises:
     with assert_raises(contains="equalities alone"):
         _ = _plan(
             "SELECT a FROM t, LATERAL (SELECT count(*) FROM u WHERE b < t.a) v"
         )
     with assert_raises(contains="LIMIT inside a LATERAL"):
-        _ = _plan("SELECT a FROM t, LATERAL (SELECT k FROM u LIMIT 1) v")
+        _ = _plan(
+            "SELECT a FROM t, LATERAL (SELECT k FROM u WHERE b < t.a LIMIT 1) v"
+        )
+    with assert_raises(contains="LIMIT or an OFFSET on a LATERAL"):
+        _ = _plan(
+            "SELECT a FROM t, LATERAL (SELECT count(*) FROM u WHERE b = t.a"
+            " LIMIT 1) v"
+        )
     with assert_raises(contains="DISTINCT inside a LATERAL"):
         _ = _plan("SELECT a FROM t, LATERAL (SELECT DISTINCT k FROM u) v")
     with assert_raises(contains="or a left join to a LATERAL"):

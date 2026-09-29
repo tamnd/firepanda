@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: A LIMIT inside a LATERAL subquery
+
+`FROM t, LATERAL (SELECT x FROM s WHERE s.k = t.k ORDER BY x DESC LIMIT 1)` now runs, where an `ORDER BY` or a `LIMIT` inside a lateral subquery used to be refused, and so does `LEFT JOIN LATERAL` over one and an `OFFSET`. The rows of each left row are one partition of the subquery's rows on the columns it correlates on, so they are numbered in the order the `ORDER BY` gives and the ones the `LIMIT` and `OFFSET` keep are joined back, which is DuckDB's answer. A limit whose correlation is not equalities alone, or that sits on a fold, is refused by name.
+
+### Added: A LATERAL subquery that folds runs
+
+`FROM t, LATERAL (SELECT sum(qty) FROM s WHERE s.k = t.k)` and `LEFT JOIN LATERAL (...) ON true` now run when the subquery aggregates, where they used to be refused. The subquery is grouped by the columns its equalities correlate on and left-joined back, so a row with no match still gets its one row: a null sum, and a count of 0 (as DuckDB gives). An uncorrelated fold is one group joined to every row. A correlation other than equalities, or a fold that reads the outer row, is refused by name.
+
 ### Added: StringDtype, DatetimeTZDtype, dt.timetz and selecting a group by's key
 
 `StringDtype` and `DatetimeTZDtype` are pandas' dtype objects with pandas' attributes, repr, equality and mistakes, and each is equal to the text firepanda names the same type by, so either can be passed as `dtype=`. `dt.timetz` gives each instant's time of day with its clock. A group by now lets a key column be selected as a value, as in `df.groupby("a")["a"].sum()`, which used to fail inside the extension, reads its columns as attributes including the keys, and lists them in `dir()`. A key from outside the frame beside another key now keeps its name on the labels.
@@ -19,7 +27,6 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: interval_range, and cut by an IntervalIndex
 
 `interval_range` builds an `IntervalIndex` of evenly spaced numbers from three of `start`, `end`, `periods` and `freq`, with whole number ends when every one given is whole, as pandas does. `cut` now takes an `IntervalIndex` as `bins` and answers an ordered category of those intervals, and it refuses intervals that overlap in pandas' words. Ranges of instants or spans still raise.
-
 ### Added: interval columns, and cut and qcut label bins with intervals
 
 A list of `Interval` values that share a side is now an interval column with pandas' `interval[int64, right]` or `interval[float64, right]` type, and it prints, casts to `category`, counts and groups the way pandas' does. `IntervalDtype` and `IntervalIndex` are new, with `from_breaks`, `from_tuples`, `from_arrays`, `left`, `right`, `mid`, `length` and pandas' repr, and `cat.categories` of a category of intervals is an `IntervalIndex`. `cut` and `qcut` without `labels=` now label each bin with an interval, rounded by pandas' precision rule, where they used to refuse. An interval column and a category of intervals or of numbers go to Arrow as pandas sends them, intervals as the `pandas.interval` type. Spec 102 has the details.
@@ -40,10 +47,6 @@ A frame with a column named with empty text, which `get_dummies` makes from an e
 
 A test suite written against pandas imports `pandas.testing` first, and firepanda had no such module, so every such suite failed on its import line. `firepanda.testing` has pandas' four assertions with pandas' keywords and defaults. Each check runs in pandas' order and raises pandas' message, so a failing test points at the same place under either library: the length, the index, the dtype, the values with the share that differ and the first position that does, the gaps of a text, masked or date column before its values, the name, and for a frame the shape, the columns and then each column by its position and label.
 A LATERAL subquery that folds runs
-### Added: A LATERAL subquery that folds runs
-
-`FROM t, LATERAL (SELECT sum(qty) FROM s WHERE s.k = t.k)` and `LEFT JOIN LATERAL (...) ON true` now run when the subquery aggregates, where they used to be refused. The subquery is grouped by the columns its equalities correlate on and left-joined back, so a row with no match still gets its one row: a null sum, and a count of 0 (as DuckDB gives). An uncorrelated fold is one group joined to every row. A correlation other than equalities, or a fold that reads the outer row, is refused by name.
-
 ### Added: Series.list and Series.struct read off the class answer the accessor class
 
 pandas answers the accessor class for `Series.list` and `Series.struct`, the way it does for `Series.str`, so a program can read the accessor's members without a column. firepanda answered a property object there, which is not callable, so both names now go through the same descriptor as `str` and `dt`, and the accessors take `data=None` as pandas' do.
