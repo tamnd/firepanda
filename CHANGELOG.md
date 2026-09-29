@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_excel and ExcelWriter
+
+`DataFrame.to_excel`, `Series.to_excel` and `ExcelWriter` write workbooks with pandas' signatures through openpyxl, xlsxwriter or odfpy, picking the engine from the extension and the `io.excel.*.writer` options as pandas does. A port of pandas' `ExcelFormatter` lays out the cells, so the header rows, the index names, merged MultiIndex labels, `na_rep`, `inf_rep`, `float_format`, `startrow`, `startcol`, `freeze_panes` and `autofilter` land where pandas puts them, with pandas' number formats for moments and durations. A writer holds several sheets, appends to an existing book with every `if_sheet_exists` choice, and fails with pandas' sentences.
+
 ### Added: read_excel and ExcelFile
 
 `read_excel` and `ExcelFile` read xlsx, xlsm, xls, xlsb and OpenDocument workbooks with pandas' signature and pandas' answers. The engine is picked from the first bytes the way pandas picks it, and openpyxl, xlrd, pyxlsb, odfpy and python-calamine each read the cells as pandas' reader for that engine does. The rows then go through a port of pandas' Python parser, so header rows, `index_col`, `usecols` in all its forms, `skiprows`, `nrows`, `skipfooter`, the missing value options, `true_values` and `false_values`, `thousands`, `converters`, `dtype`, `parse_dates` and `dtype_backend` type a column the way pandas does and fail with pandas' sentence. The engines are optional, and a missing one is named in pandas 3's words.

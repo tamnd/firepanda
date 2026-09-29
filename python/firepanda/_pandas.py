@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any, cast
 from . import (
     _arrowtyped,
     _config,
+    _excel_write,
     _firepanda,
     _interval,
     _masked,
@@ -32574,3 +32575,7 @@ SeriesGroupByMixin.hist = _series_group_hist  # type: ignore[attr-defined]
 # `to_xarray` is pandas' method, which hands the object to xarray, and lives with
 # the conversion it needs in `_xarray`.
 SeriesMixin.to_xarray = DataFrameMixin.to_xarray = _xarray.to_xarray  # type: ignore[attr-defined]
+
+# `to_excel` is pandas' method, which writes the object to a workbook sheet, and lives
+# with `ExcelWriter` and pandas' cell formatter in `_excel_write`.
+SeriesMixin.to_excel = DataFrameMixin.to_excel = _excel_write.to_excel  # type: ignore[attr-defined]
