@@ -12285,6 +12285,65 @@ class DataFrameMixin(_Carries):
         )
         return _text_written(text, buf, encoding)
 
+    def to_latex(
+        self,
+        buf: Any = None,
+        *,
+        columns: Any = None,
+        header: Any = True,
+        index: bool = True,
+        na_rep: str = "NaN",
+        formatters: Any = None,
+        float_format: Any = None,
+        sparsify: Any = None,
+        index_names: bool = True,
+        bold_rows: bool = False,
+        column_format: Any = None,
+        longtable: Any = None,
+        escape: Any = None,
+        encoding: Any = None,
+        decimal: str = ".",
+        multicolumn: Any = None,
+        multicolumn_format: Any = None,
+        multirow: Any = None,
+        caption: Any = None,
+        label: Any = None,
+        position: Any = None,
+    ) -> Any:
+        """The frame as a LaTeX table, written to a file or answered.
+
+        A `tabular` with booktabs rules, inside a `table` float when there is a
+        caption, label or position, or a `longtable` that repeats its header
+        on each page. `sparsify`, `multicolumn`, `multicolumn_format` and
+        `multirow` only matter for a MultiIndex, which firepanda does not have.
+
+        Returns:
+            The text when `buf` is None, and None otherwise.
+        """
+        from ._latex import to_latex
+
+        text = to_latex(
+            self,
+            {
+                "columns": columns,
+                "header": header,
+                "index": index,
+                "na_rep": na_rep,
+                "formatters": formatters,
+                "float_format": float_format,
+                "index_names": index_names,
+                "bold_rows": bold_rows,
+                "column_format": column_format,
+                "longtable": bool(longtable),
+                "escape": bool(escape),
+                "decimal": decimal,
+                "caption": caption,
+                "label": label,
+                "position": position,
+            },
+        )
+        return _text_written(text, buf, encoding)
+
     def to_xml(
         self,
         path_or_buffer: Any = None,
@@ -16412,6 +16471,56 @@ class SeriesMixin(_Carries):
         """The column as a Markdown table, written as the table of the column's frame."""
         return self.to_frame().to_markdown(
             buf, mode=mode, index=index, storage_options=storage_options, **kwargs
+        )
+
+    def to_latex(
+        self,
+        buf: Any = None,
+        *,
+        columns: Any = None,
+        header: Any = True,
+        index: bool = True,
+        na_rep: str = "NaN",
+        formatters: Any = None,
+        float_format: Any = None,
+        sparsify: Any = None,
+        index_names: bool = True,
+        bold_rows: bool = False,
+        column_format: Any = None,
+        longtable: Any = None,
+        escape: Any = None,
+        encoding: Any = None,
+        decimal: str = ".",
+        multicolumn: Any = None,
+        multicolumn_format: Any = None,
+        multirow: Any = None,
+        caption: Any = None,
+        label: Any = None,
+        position: Any = None,
+    ) -> Any:
+        """The column as a LaTeX table, written as the table of the column's frame."""
+        return self.to_frame().to_latex(
+            buf,
+            columns=columns,
+            header=header,
+            index=index,
+            na_rep=na_rep,
+            formatters=formatters,
+            float_format=float_format,
+            sparsify=sparsify,
+            index_names=index_names,
+            bold_rows=bold_rows,
+            column_format=column_format,
+            longtable=longtable,
+            escape=escape,
+            encoding=encoding,
+            decimal=decimal,
+            multicolumn=multicolumn,
+            multicolumn_format=multicolumn_format,
+            multirow=multirow,
+            caption=caption,
+            label=label,
+            position=position,
         )
 
     def to_dict(self, *, into: Any = dict) -> Any:

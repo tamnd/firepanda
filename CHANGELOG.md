@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: CREATE TABLE, CREATE VIEW, INSERT and DROP in SQL
 
 `firepanda.sql.execute` runs one statement against a catalog it may change. `CREATE TABLE` with columns and types, with `NOT NULL`, and `CREATE TABLE ... AS` a query make a frame under the name; `INSERT INTO` adds rows from `VALUES`, a query or `DEFAULT VALUES`, by position, by a column list or `BY NAME`, casts each to the column's type, and answers DuckDB's one-row `Count`; `CREATE VIEW` keeps the query's text, which is parsed again wherever the view is named, so a view sees rows inserted after it; and `DROP TABLE` and `DROP VIEW` take the name away. `OR REPLACE`, `IF NOT EXISTS` and `IF EXISTS` behave as in DuckDB, and every refusal a mismatch earns is DuckDB's message: a name made twice, a count of values that does not fit, a column the table lacks, a null in a `NOT NULL` column, a drop of the wrong kind, and a view that reaches itself. What a frame cannot hold (a key, a default, a check, a generated column, `ON CONFLICT`, `RETURNING`, `CASCADE`) is refused by name rather than read and dropped.
+### Added: to_latex
+
+`DataFrame.to_latex` and `Series.to_latex` write the LaTeX table pandas writes, as a booktabs tabular, inside a table float when there is a caption, label or position, or as a longtable. Cells follow pandas' formatting with six digits for floats, `na_rep`, `float_format`, `formatters`, `decimal` and LaTeX escaping, and the text is written without needing jinja2.
 
 ### Added: pandas.array and pandas.arrays
 
