@@ -134,7 +134,10 @@ def _objectified(column: Any) -> Any:
     if _objects.is_object(column._inner):
         return column
     values = _values_of(column._inner)
-    return Series(_objects.cells(values), index=column.index, name=column.name)
+    # A gap cast from any typed column reads as NaN, and from moments or spans as NaT.
+    letter = "T" if column._inner.dtype().startswith(("datetime64", "timedelta64")) else "N"
+    cells = _objects.cells(values, letter)
+    return Series(cells, dtype="str", index=column.index, name=column.name)
 
 
 def _from_objects(column: Any, dtype: Any, strictly: bool) -> Any:
@@ -337,11 +340,23 @@ def _values_of(inner: Any) -> list[Any]:
     """A column's or an index's values as pandas hands them out, a moment as a `Timestamp`.
 
     A gap is spelled the way pandas spells it for the column's type, which is
-    `_gapped`. An object column hands out its values as they were written, a gap as None.
+    `_gapped`. An object column hands out its values as they were written, and a
+    gap as None, NaN or NaT as its cells say.
     """
     if _objects.is_object(inner):
-        return _held_values(inner)
+        return _objects.spelled(_held_values(inner), _objects.gap_of(inner))
     return _gapped(_held_values(inner), inner.dtype())
+
+
+def _kept_values(column: Any) -> list[Any]:
+    """A column's values to build another column from, an object column's as written.
+
+    Written cells build an object column again with the same gaps, so the
+    values are not read and written a second time.
+    """
+    if _objects.is_object(column._inner):
+        return list(column._inner.to_list())
+    return _held_values(column._inner)
 
 
 def _held_values(inner: Any) -> list[Any]:
@@ -406,7 +421,7 @@ def _cell_of(inner: Any, row: int, column: int | None = None) -> Any:
     if _objects.is_cell(raw):
         return _objects.value(raw)
     if raw is None and _objects.is_object(held):
-        return None
+        return _objects.gap_of(held)
     return _gapped([_outward_one(raw, held.dtype())], held.dtype())[0]
 
 
@@ -864,7 +879,7 @@ def _unwrapped(values: Any) -> Any:
     pays nothing for it.
     """
     if isinstance(values, (SeriesMixin, IndexMixin)):
-        return _held_values(values._inner)
+        return _kept_values(values)
     if not isinstance(values, (list, tuple)):
         return values
     numpy = any(type(value).__module__ == "numpy" for value in values)
@@ -5861,21 +5876,12 @@ def _row_type(types: list[str]) -> str:
     Columns of one type keep it and numbers meet the way numpy's do. A flag next
     to a number, text next to anything else, and every other mix are pandas'
     object column.
-
-    Raises:
-        NotImplementedError: For a mix that pandas answers with object.
     """
     kinds = set(types)
     if len(kinds) == 1:
         return types[0]
     common = None if "bool" in kinds else _numeric_type(kinds)
-    if common is None:
-        raise NotImplementedError(
-            f"reading one row across columns of {' and '.join(sorted(kinds))} is not"
-            " supported yet, because pandas answers it with an object column and"
-            " firepanda has no object column"
-        )
-    return common
+    return "object" if common is None else common
 
 
 def _one_row(owner: Any, inner: Any, position: int, chosen: list[str]) -> Any:
@@ -8806,7 +8812,7 @@ class DataFrameMixin(_Carries):
             elif rows is not None and len(values) != rows:
                 raise _mismatched(len(values), rows)
         held = {
-            name: _held_values(values._inner) if isinstance(values, SeriesMixin) else values
+            name: _kept_values(values) if isinstance(values, SeriesMixin) else values
             for name, values in found.items()
         }
         out = DataFrame._wrap(DataFrameMixin._across(held))
@@ -9466,28 +9472,26 @@ class DataFrameMixin(_Carries):
         type their values share, the wider number when they are all numbers.
 
         Row labels that are not text become names written as `_names` writes them.
-
-        Raises:
-            NotImplementedError: When the columns mix text and numbers, which
-                pandas answers with a column of objects.
+        Columns that mix text and numbers, or flags and numbers, make object
+        columns, whose gaps read as NaN as pandas' do.
         """
-        from .errors import DTypeError
+        from ._frame import Series
 
         labels = self.index.tolist()
         names = _shown_names(self)
         types = {str(self[name].dtype) for name in names}
         columns = [self[name].tolist() for name in names]
         rows = list(zip(*columns, strict=True)) if columns else [() for _ in labels]
-        try:
-            answer = type(self)(
-                {label: _readable(list(row)) for label, row in zip(labels, rows, strict=True)},
-                index=self._inner.names(),
-            )
-        except DTypeError:
-            raise NotImplementedError(
-                "transpose: the columns mix text and numbers, which pandas answers with"
-                " columns of objects, the representation firepanda does not have"
-            ) from None
+        if names and _row_type(sorted(types)) == "object":
+            built = {
+                label: Series(_objects.cells(row, "N"), dtype="str")
+                for label, row in zip(labels, rows, strict=True)
+            }
+            return type(self)(built).set_axis(self.columns)
+        answer = type(self)(
+            {label: _readable(list(row)) for label, row in zip(labels, rows, strict=True)},
+            index=self._inner.names(),
+        )
         if len(types) == 1 and labels:
             answer = answer.astype(types.pop())
         return answer
@@ -11889,9 +11893,9 @@ class DataFrameMixin(_Carries):
 
         With neither `include` nor `exclude` the columns described are the
         numbers and the moments, or every column when there are none of those,
-        and `include="all"` is every column. A column that is not a number is
-        refused as `Series.describe` refuses it, and so are `include` and
-        `exclude` as lists of types.
+        and `include="all"` is every column. A column is described as
+        `Series.describe` describes it, and `include` and `exclude` as lists of
+        types are refused.
         """
         from ._frame import DataFrame
 
@@ -11915,8 +11919,14 @@ class DataFrameMixin(_Carries):
             ]
             columns = kept or columns
         described = [(name, column.describe(asked)) for name, column in columns]
-        labels = described[0][1].index.tolist()
-        return DataFrame({name: answer.tolist() for name, answer in described}, index=labels)
+        # pandas takes the labels of the shortest answers first, so a column of
+        # text puts `unique`, `top` and `freq` between `count` and `mean`.
+        labels: list[Any] = []
+        for _, answer in sorted(described, key=lambda pair: len(pair[1])):
+            labels += [label for label in answer.index.tolist() if label not in labels]
+        return DataFrame(
+            {name: answer.reindex(labels).tolist() for name, answer in described}, index=labels
+        )
 
     def _reduce(
         self,
@@ -15871,14 +15881,15 @@ class SeriesMixin(_Carries):
         The answer is a float64 series labelled `count`, `mean`, `std`, `min`,
         the percentiles and `max`, under the column's name. `include` and
         `exclude` are read by a frame and ignored here, as in pandas. A column
-        of text, flags, moments or spans is described with a mix of numbers and
-        values that only an object column holds, which firepanda does not
-        have, so it is refused by name.
+        of text, flags, categories or objects is described by `_described_values`.
+        Moments and spans are refused by name.
         """
         from ._frame import Series
 
         asked = _percentiles_asked(percentiles)
         printed = self.dtype
+        if str(printed) in ("str", "string", "bool", "category", "object"):
+            return self._described_values()
         if printed not in _SIGNED | _UNSIGNED | _FLOATING:
             raise NotImplementedError(
                 f"describe is not supported yet for a {printed} column, because pandas"
@@ -15897,6 +15908,31 @@ class SeriesMixin(_Carries):
         ]
         labels = ["count", "mean", "std", "min", *_percentile_labels(asked), "max"]
         return Series(values, index=labels, name=self.name, dtype="float64")
+
+    def _described_values(self) -> Series:
+        """How many values, how many distinct, the most common and how often, as pandas answers.
+
+        The answer is an object column labelled `count`, `unique`, `top` and
+        `freq`. The most common value is the first one seen among those tied,
+        or for categories the first category among them, which is the order
+        pandas' `value_counts` leaves them in.
+        """
+        from ._frame import Series
+
+        values = [value for value in self.tolist() if not _objects.is_gap(value)]
+        counts: dict[Any, int] = {}
+        if str(self.dtype) == "category":
+            counts = dict.fromkeys(self.cat.categories.tolist(), 0)
+        for value in values:
+            counts[value] = counts.get(value, 0) + 1
+        seen = [(value, count) for value, count in counts.items() if count]
+        if seen:
+            top, freq = max(seen, key=lambda pair: pair[1])
+            answer = [len(values), len(seen), top, freq]
+        else:
+            answer = [0, 0, math.nan, math.nan]
+        cells = _objects.cells(answer, "N")
+        return Series(cells, index=["count", "unique", "top", "freq"], name=self.name, dtype="str")
 
     def _truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
         """Runs `any` or `all` over the whole column.
@@ -16506,6 +16542,27 @@ class DatetimeMixin:
         except Exception as error:
             raise translate(error) from None
         return found or None
+
+    def _clock_times(self) -> Series:
+        """The time of day of each instant, read on the column's own clock.
+
+        pandas answers an object column of `datetime.time`, with NaT for a gap,
+        and so does this, since there is no column type for a time of day.
+
+        Raises:
+            AttributeError: For a column of spans, which have no time of day.
+        """
+        from ._frame import Series
+
+        column = self._series
+        if not str(column.dtype).startswith("datetime64"):
+            raise AttributeError("'TimedeltaProperties' object has no attribute 'time'")
+        times = [
+            None if _objects.is_gap(value) else value.time()
+            for value in _values_of(column._inner)
+        ]
+        cells = _objects.cells(times, "T")
+        return Series(cells, index=column.index, name=column.name, dtype="str")
 
     def _resolution(self) -> str:
         """Reads how many of the column's integers make a second.
@@ -20156,33 +20213,27 @@ class StringMixin:
         count = -1 if n is None or n == 0 else n
         return [None if row is None else row.split(pattern, count) for row in rows]
 
-    def _split(self, pat: Any, n: Any, expand: Any, regex: Any, from_right: bool) -> DataFrame:
+    def _split(self, pat: Any, n: Any, expand: Any, regex: Any, from_right: bool) -> Any:
         """Every row cut into pieces, one column per piece, padded with gaps.
 
         The width is the most pieces any row was cut into, a row with fewer
         is padded with gaps on the right, and a gap row is gaps throughout.
-        `expand=False` answers a column of lists in pandas and there is no
-        column type for a list here, so it is refused by name, the way
-        `partition` refuses its tuples. The columns are labelled with the text
-        of their position, for the reason `_cut` gives.
+        `expand=False` answers an object column holding each row's list, as
+        pandas does. The columns are labelled with the text of their position,
+        for the reason `_cut` gives.
         """
         from ._frame import DataFrame, Series
 
-        name = "rsplit" if from_right else "split"
         if expand not in (True, False):
             raise InvalidArgumentError("expand must be True or False")
-        if not expand:
-            raise UnsupportedError(
-                f"firepanda:unsupported: str.{name} with expand=False answers a column of"
-                " lists and there is no column type for one yet, so only expand=True is"
-                " written"
-            )
         try:
             pieces = self._pieces(pat, n, regex, from_right)
         except ValueError as error:
             if isinstance(error, FirepandaError):
                 raise
             raise InvalidArgumentError(str(error)) from None
+        if not expand:
+            return self._object_rows(pieces)
         index = self._series.index
         if not pieces:
             return DataFrame(index=index)
@@ -20196,6 +20247,33 @@ class StringMixin:
                 for at in range(width)
             }
         )
+
+    def _object_rows(self, rows: list[Any]) -> Series:
+        """An object column of one value per row, labelled and named as the column.
+
+        A gap row stays a gap, which reads as NaN, as a gap of pandas' text does.
+        """
+        from ._frame import Series
+
+        cells = _objects.cells(rows, "N")
+        return Series(cells, index=self._series.index, name=self._series.name, dtype="str")
+
+    def _found_all(self, pat: Any, flags: Any) -> Series:
+        """Every match of a pattern in each row, as a list, in an object column.
+
+        pandas runs Python's `re.findall` over each value for this, so a pattern
+        with one group gives what the group held, one with several gives a
+        tuple per match, and a gap row stays a gap.
+        """
+        import re
+
+        pat = self._a_pattern(pat)
+        if flags:
+            # Refuses a bit that names no flag, and `re` reads the letters as the caller wrote them.
+            _door_flags(flags, "findall")
+        compiled = re.compile(pat, flags)
+        rows = _held_values(self._series._inner)
+        return self._object_rows([None if row is None else compiled.findall(row) for row in rows])
 
     def _mapped_text(self, each: Callable[[str], str]) -> Series:
         """A text column with `each` applied to every row that is not a gap.
@@ -26057,34 +26135,24 @@ def _temporal_unit_type(types: set[str]) -> str | None:
     return f"{head}[{unit}, {zone}]" if zone else f"{head}[{unit}]"
 
 
-def _concat_type(types: list[str], gap: bool, what: str) -> str:
+def _concat_type(types: list[str], gap: bool) -> str:
     """The one type a column of several parts ends up with, as pandas decides it.
 
     `gap` says a part has no such column, so that part's rows are missing, and
     a missing row makes an integer column float64 and a boolean one object.
 
-    Raises:
-        UnsupportedError: Where pandas answers object, which firepanda has no
-            column type for.
+    Every other mix is pandas' object column, and so is a boolean column
+    where a part lacks it, since a boolean column has no missing value of its own.
     """
     kinds = set(types)
     if len(kinds) == 1:
         (only,) = kinds
     else:
-        only = _numeric_type(kinds) or _temporal_unit_type(kinds) or ""
-        if not only:
-            raise UnsupportedError(
-                f"concat of {what} as {' and '.join(sorted(kinds))} gives pandas' object"
-                " column, and firepanda has no object column"
-            )
+        only = _numeric_type(kinds) or _temporal_unit_type(kinds) or "object"
     if gap and (only in _INTEGER_BITS or only in _UNSIGNED_BITS):
         return "float64"
     if gap and only == "bool":
-        raise UnsupportedError(
-            f"concat of {what} where a part lacks it gives pandas' object column, since a"
-            " boolean column has no missing value of its own, and firepanda has no object"
-            " column"
-        )
+        return "object"
     return only
 
 
@@ -26292,12 +26360,17 @@ def _concat_rows(
         gap = any(name not in _shown_names(frame) for frame in frames)
         if set(types) == {"category"} and not _concat_categories(frames, name):
             types = ["string"]
-        wanted[name] = _concat_type(types, gap, f"column '{name}'")
+        wanted[name] = _concat_type(types, gap)
     if not ignore_index:
         frames = _concat_index_units(frames)
     parts = []
     for frame in frames:
         mine = [n for n in names if n in _shown_names(frame) and str(frame[n].dtype) != wanted[n]]
+        # An object column is written in Python rather than cast underneath.
+        written = {n: _objectified(frame[n]) for n in mine if wanted[n] == "object"}
+        if written:
+            frame = frame.assign(**written)
+            mine = [n for n in mine if n not in written]
         # The cast underneath does not change the unit of instants or spans, so those
         # columns are moved to the unit they meet at with `as_unit` first.
         moved = {n: frame[n].dt.as_unit(_unit_of(wanted[n])) for n in mine if _unit_of(wanted[n])}
@@ -28403,8 +28476,33 @@ def _text_float_options() -> tuple[Any, int]:
     return get_option("display.float_format"), get_option("display.precision")
 
 
+_SHOWN_ITEMS = 100
+"""How many items of a list pandas prints before `...`, its `display.max_seq_items`."""
+
+
+def _text_container(value: Any) -> str:
+    """A list, tuple or set as pandas prints one in a cell, with its text bare.
+
+    pandas prints the items the way it prints a cell rather than with `repr`,
+    so `["a", "b"]` is `[a, b]`, and stops after a hundred items with `...`. A
+    dict is printed with `str`, as pandas prints it.
+    """
+    items = [_text_plain(item) for item in value]
+    more = len(items) > _SHOWN_ITEMS
+    body = ", ".join(items[:_SHOWN_ITEMS]) + (", ..." if more else "")
+    if isinstance(value, list):
+        return f"[{body}]"
+    if isinstance(value, tuple):
+        return f"({body},)" if len(value) == 1 else f"({body})"
+    if isinstance(value, frozenset):
+        return f"frozenset({{{body}}})"
+    return "{" + body + "}"
+
+
 def _text_plain(value: Any) -> str:
     """A value as pandas prints a label or a cell, with tabs and newlines escaped."""
+    if type(value) in (list, tuple, set, frozenset):
+        return _text_container(value)
     text = str(value)
     for raw, escaped in _TEXT_ESCAPES:
         text = text.replace(raw, escaped)
@@ -28560,8 +28658,8 @@ def _text_values(
         return [formatter(v) for v in values]
     gap = "<NA>" if whole or dtype == "bool" else na_rep
     if dtype == "object" and na_rep == "NaN":
-        # An object column holds its gap as None, and pandas prints a None as itself.
-        gap = "None"
+        # pandas prints an object column's gap as the value it is, None, NaN or NaT.
+        gap = {None: "None", "N": "NaN", "T": "NaT"}[_objects.spelling_of(column._inner)]
     space = " " if leading else ""
     texts = []
     for value in values:

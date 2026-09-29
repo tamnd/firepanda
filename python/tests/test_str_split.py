@@ -112,7 +112,9 @@ def test_mistakes_raise_as_pandas_raises(
 
 
 @pytest.mark.parametrize("name", ["split", "rsplit"])
-def test_a_column_of_lists_is_refused_by_name(firepanda: ModuleType, name: str) -> None:
-    """Without expand the answer is a column of lists, which has no column type yet."""
-    with pytest.raises(NotImplementedError, match="expand=False"):
-        getattr(dashed(firepanda).str, name)("-")
+def test_without_expand_the_answer_is_a_column_of_lists(firepanda: ModuleType, name: str) -> None:
+    """Without expand the answer is an object column holding each row's list, as in pandas."""
+    import pandas as pd
+
+    mine, theirs = getattr(dashed(firepanda).str, name)("-"), getattr(dashed(pd).str, name)("-")
+    assert repr(mine) == repr(theirs)

@@ -106,8 +106,17 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     assert str(mine.value).split("\n")[0] == str(theirs.value).split("\n")[0]
 
 
+def test_values_pandas_holds_as_objects_are_an_object_column(firepanda: ModuleType) -> None:
+    """A flag stacked with a number is pandas' object column, and firepanda's."""
+    import pandas as pd
+
+    def build(m: Any) -> Any:
+        return m.DataFrame(FRAME).melt(id_vars="a", value_vars=["b", "c"])
+
+    assert repr(build(firepanda)) == repr(build(pd))
+
+
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["b", "c"]),
     lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["d", "e"]),
     lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["b"], var_name="a"),
     lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["b"], col_level=1),
@@ -116,7 +125,7 @@ REFUSED: list[Callable[[Any], Any]] = [
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """Values pandas holds in an object column, a repeated name and a second level."""
+    """A repeated name and a second level."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 

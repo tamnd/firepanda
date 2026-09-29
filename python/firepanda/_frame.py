@@ -292,6 +292,14 @@ class DatetimeProperties(DatetimeMixin):
             raise translate(error) from None
 
     @property
+    def time(self) -> Series:
+        """The time of day of each instant, as an object column of `datetime.time`."""
+        try:
+            return self._clock_times()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
     def unit(self) -> str:
         """The resolution the column is stored in, one of s, ms, us and ns."""
         try:
@@ -574,17 +582,15 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
-    def split(
-        self, pat: Any = None, *, n: Any = -1, expand: Any = False, regex: Any = None
-    ) -> DataFrame:
-        """Every row cut at a separator or a pattern, one column per piece."""
+    def split(self, pat: Any = None, *, n: Any = -1, expand: Any = False, regex: Any = None) -> Any:
+        """Every row cut at a separator or a pattern, as a list or one column per piece."""
         try:
             return self._split(pat, n, expand, regex, False)
         except Exception as error:
             raise translate(error) from None
 
-    def rsplit(self, pat: Any = None, *, n: Any = -1, expand: Any = False) -> DataFrame:
-        """Every row cut at a separator counted from the right, one column per piece."""
+    def rsplit(self, pat: Any = None, *, n: Any = -1, expand: Any = False) -> Any:
+        """Every row cut at a separator counted from the right, as a list or columns."""
         try:
             return self._split(pat, n, expand, None, True)
         except Exception as error:
@@ -629,6 +635,13 @@ class StringAccessor(StringMixin):
         """What each group of every match held, one row per match."""
         try:
             return self._extracted_all(pat, flags)
+        except Exception as error:
+            raise translate(error) from None
+
+    def findall(self, pat: Any, flags: Any = 0) -> Series:
+        """Every match of a pattern in each row, as a list."""
+        try:
+            return self._found_all(pat, flags)
         except Exception as error:
             raise translate(error) from None
 

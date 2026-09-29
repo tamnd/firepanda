@@ -113,8 +113,8 @@ FLAGS = [
 ]
 """The parts that answer a yes or a no."""
 
-ABSENT = ["time", "timetz", "to_period", "to_pydatetime"]
-"""The four pandas has and this does not, for the reason the module docstring gives."""
+ABSENT = ["timetz", "to_period", "to_pydatetime"]
+"""The three pandas has and this does not, for the reason the module docstring gives."""
 
 
 def stamps(firepanda: ModuleType, values: list[Any] = STAMPS, unit: str = "us") -> Any:
@@ -381,14 +381,14 @@ def test_a_duration_column_answers_its_own_two_parts(firepanda: ModuleType) -> N
 
 @both
 @pytest.mark.parametrize("name", ABSENT)
-def test_the_four_unwritten_names_are_absent_rather_than_refusing(
+def test_the_unwritten_names_are_absent_rather_than_refusing(
     firepanda: ModuleType, name: str
 ) -> None:
     """pandas has them and this does not, and the difference is deliberate.
 
-    Every one needs a type that does not exist yet: a time of day column for
-    `time` and `timetz`, a period for `to_period`, a column of Python objects
-    for `to_pydatetime`, and frequency inference over an index for `freq`. A
+    Every one needs something that does not exist yet: a time of day with its
+    zone for `timetz`, a period for `to_period`, an array of Python objects for
+    `to_pydatetime`, and frequency inference over an index for `freq`. A
     name that is declared and always raises reads as a failure on a conformance
     board and a name that is not there reads as unimplemented, and unimplemented
     is what these are.

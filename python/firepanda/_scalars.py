@@ -92,6 +92,7 @@ rather than a rule, and a moment that exists should stay usable.
 from __future__ import annotations
 
 import datetime as _datetime
+import numbers
 import re
 import time as _time
 import warnings
@@ -654,13 +655,15 @@ class Timestamp(_datetime.datetime):
         if nanosecond is not None:
             nanos += int(nanosecond)
             spelled = "ns"
-        if zone is not None and found is None:
+        counted = isinstance(ts_input, numbers.Real) and not isinstance(ts_input, bool)
+        if zone is not None and found is None and not counted:
             # A zone named beside a value that carries none localizes rather
             # than converts, so `Timestamp("13:45", tz="Europe/Paris")` is a
             # quarter to two in Paris and not a quarter to two in London seen
             # from Paris. The two readings differ by the offset and only one of
             # them is pandas', which is worth a line here because handing the
-            # zone straight to the builder below gives the other one.
+            # zone straight to the builder below gives the other one. A number
+            # counts from the epoch, which is a moment in UTC, so it converts.
             made = cls._from_nanos(nanos, spelled, None, fold)
             return made.tz_localize(zone)
         return cls._from_nanos(nanos, spelled, zone if zone is not None else found, fold)

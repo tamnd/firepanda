@@ -140,11 +140,25 @@ def test_a_percentile_that_is_not_a_number_is_a_type_error(firepanda: ModuleType
         firepanda.Series([1.0]).describe(percentiles=["a"])
 
 
-REFUSED: list[Callable[[Any], Any]] = [
+MIXED: list[Callable[[Any], Any]] = [
     lambda m: m.Series(FRAME["s"]).describe(),
     lambda m: m.Series(FRAME["b"]).describe(),
     lambda m: m.DataFrame(FRAME)[["s", "b"]].describe(),
     lambda m: m.DataFrame(FRAME).describe(include="all"),
+]
+
+
+@pytest.mark.parametrize("build", MIXED)
+def test_a_mixed_answer_is_pandas_answer(
+    firepanda: ModuleType, build: Callable[[Any], Any]
+) -> None:
+    """Text and flags are described by count, unique, top and freq, in an object column."""
+    import pandas as pd
+
+    assert repr(build(firepanda)) == repr(build(pd))
+
+
+REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame(FRAME).describe(include=["number"]),
     lambda m: m.DataFrame(FRAME)[["x"]].kurt(axis=1),
 ]
@@ -152,7 +166,7 @@ REFUSED: list[Callable[[Any], Any]] = [
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """A mixed answer pandas holds in an object column, a list of types and a row."""
+    """A list of types and a row."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 

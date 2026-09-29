@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import math
 from collections.abc import Callable
 from types import ModuleType
 from typing import Any
@@ -23,6 +24,10 @@ pd = pytest.importorskip("pandas")
 
 def mixed(lib: ModuleType) -> Any:
     return lib.Series([3, "a", None, 1.5, "a"])
+
+
+def typed(lib: ModuleType) -> Any:
+    return lib.DataFrame({"a": [1, 2], "b": ["x", "y"], "c": [1.5, None]})
 
 
 def lists(lib: ModuleType) -> Any:
@@ -106,6 +111,32 @@ CASES: list[Callable[[ModuleType], Any]] = [
     ),
     lambda lib: lib.DataFrame({"a": mixed(lib)}).to_csv(),
     lambda lib: lib.DataFrame({"a": mixed(lib)}).iloc[1, 0],
+    lambda lib: typed(lib).iloc[0],
+    lambda lib: typed(lib).loc[1],
+    lambda lib: [row.tolist() for _, row in typed(lib).iterrows()],
+    lambda lib: typed(lib).T,
+    lambda lib: typed(lib).T.dtypes.astype(str).tolist(),
+    lambda lib: typed(lib).melt(),
+    lambda lib: lib.DataFrame({"a": [1.5], "b": [True]}).iloc[0],
+    lambda lib: lib.concat([lib.Series([1, 2]), lib.Series(["a"])]),
+    lambda lib: lib.concat([lib.DataFrame({"a": [True]}), lib.DataFrame({"b": [1]})]),
+    lambda lib: lib.Series(["a", "b", "a", None]).describe(),
+    lambda lib: lib.Series(["b", "a", "a", "b"], dtype="category").describe(),
+    lambda lib: lib.Series([True, False, True]).describe(),
+    lambda lib: lib.Series(["a", None]).iloc[1:].describe(),
+    lambda lib: lib.DataFrame({"a": ["x", "y", "x"]}).describe(),
+    lambda lib: lib.DataFrame({"a": ["x", "y", "x"], "b": [1, 2, 3]}).describe(include="all"),
+    lambda lib: lib.Series(["a b", "c", None]).str.split(),
+    lambda lib: lib.Series(["a,b,c"]).str.split(",", n=1),
+    lambda lib: lib.Series(["a b c", "c"]).str.rsplit(n=1),
+    lambda lib: lib.Series(["a1b2", "c", None]).str.findall(r"\d"),
+    lambda lib: lib.Series(["a1b2"]).str.findall(r"(\w)(\d)"),
+    lambda lib: lib.Series(["A1a2"]).str.findall(r"a\d", flags=2),
+    lambda lib: lib.Series(lib.to_datetime(["2020-01-01 10:30:05", None])).dt.time,
+    lambda lib: lib.Series(lib.to_datetime(["2020-01-01 10:30:05"])).dt.time[0],
+    lambda lib: lib.Series([{"a"}, frozenset(["b"]), ("x",), ["y", ("z", "w")], {"k": ["v"]}]),
+    lambda lib: lib.Series([1.5, "a", float("nan")]),
+    lambda lib: lib.Series([1.5, "a", None]),
 ]
 
 
@@ -129,6 +160,12 @@ def test_ordinary_text_is_not_an_object_column() -> None:
     assert fp.Series(["a", None, "b"]).dtype != "object"
 
 
+def test_a_gap_reads_as_the_list_wrote_it() -> None:
+    assert fp.Series([1, "a", None]).tolist()[2] is None
+    assert math.isnan(fp.Series([1, "a", float("nan")]).tolist()[2])
+    assert math.isnan(fp.Series([1, 2]).astype(object).reindex([0, 5]).tolist()[1])
+
+
 def test_the_string_accessor_refuses_lists_for_now() -> None:
     with pytest.raises(NotImplementedError, match="lists"):
         fp.Series([[1], [2]]).str.len()
@@ -138,3 +175,12 @@ def test_text_that_starts_with_the_mark_is_still_text() -> None:
     rows = ["\x1c", "\x1cs\x01x", "\x1cz\x01"]
     assert fp.Series(rows).dtype != "object"
     assert fp.Series(rows).tolist() == rows
+
+
+def test_a_number_with_a_zone_counts_from_the_epoch() -> None:
+    assert repr(fp.Timestamp(1609524245000000000, tz="Asia/Tokyo")) == repr(
+        pd.Timestamp(1609524245000000000, tz="Asia/Tokyo")
+    )
+    assert repr(fp.Timestamp(1609524245, unit="s", tz="Asia/Tokyo")) == repr(
+        pd.Timestamp(1609524245, unit="s", tz="Asia/Tokyo")
+    )
