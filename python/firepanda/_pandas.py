@@ -289,6 +289,47 @@ def _is_written_side(side: Any) -> bool:
     return isinstance(side, SeriesMixin) and _written_category(side._inner)
 
 
+_FLAGS_AND_FLOATS = frozenset({"bool", "float32", "float64"})
+_COMPARISONS = frozenset({"eq", "ne", "lt", "le", "gt", "ge"})
+
+
+def _text_equality(column: Any, other: Any, op: str) -> Any:
+    """A comparison between a column of numbers or flags and a piece of text, as pandas answers it.
+
+    pandas compares the two one value at a time and no number equals text, so
+    every row answers False for `==` and True for `!=`, a gap included, and an
+    order between them is refused in pandas' words. The engine has no type the
+    two share and would refuse all six the same way. None means the operands
+    are not that pair.
+
+    Raises:
+        TypeError: For `<`, `<=`, `>` and `>=`, in pandas' words.
+    """
+    if op not in _COMPARISONS or not isinstance(other, str):
+        return None
+    printed = str(column._inner.dtype())
+    if not (printed in _SIGNED or printed in _UNSIGNED or printed in _FLAGS_AND_FLOATS):
+        return None
+    if op not in ("eq", "ne"):
+        raise TypeError(f"Invalid comparison between dtype={printed} and str")
+    from ._frame import Series
+
+    return Series([op == "ne"] * len(column), index=column.index, name=column.name, dtype="bool")
+
+
+def _frame_text_equality(frame: Any, other: Any, op: str) -> Any:
+    """`_text_equality` for a frame, run on each column when some column is not text."""
+    if op not in _COMPARISONS or not isinstance(other, str):
+        return None
+    names = _shown_names(frame)
+    if not any(_text_equality(frame[name], other, op) is not None for name in names):
+        return None
+    from ._frame import DataFrame
+
+    pieces = {name: frame[name]._operator(other, op, False, True) for name in names}
+    return DataFrame(pieces, index=frame.index)
+
+
 def _holds_objects(column: Any, other: Any) -> bool:
     """Whether either side of an operator is an object column."""
     if _objects.is_object(column._inner):
@@ -5813,6 +5854,11 @@ def _aligned_mask(index: Any, mask: Any) -> Any:
     return mask.reindex(index)
 
 
+def _level_pick(part: Any) -> bool:
+    """Whether one piece of a row key on levels is a slice or a list rather than a label."""
+    return isinstance(part, (slice, list, IndexMixin, SeriesMixin)) or _is_numpy(part)
+
+
 def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
     """Reads a row key as labels, which is what `loc` does on either type.
 
@@ -5858,6 +5904,10 @@ def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
         return ("gather", _row_positions(index, key))
     if isinstance(key, IndexMixin):
         return ("gather", _row_positions(index, key._inner.to_list()))
+    if isinstance(key, tuple) and any(_level_pick(part) for part in key):
+        # A key with a slice or a list for some level is pandas' `get_locs`,
+        # which picks level by level rather than looking up one label.
+        return ("gather", [int(at) for at in index.get_locs(key)])
     try:
         found = index.get_loc(key)
     except KeyError:
@@ -5875,11 +5925,16 @@ def _level_axes(owner: Any, key: tuple[Any, ...]) -> tuple[Any, Any]:
     """A `loc` tuple on rows labelled by several levels, split into a row key and a column key.
 
     The whole tuple is a row label when some row has it, and a row and a
-    column otherwise, which is the order pandas tries them in.
+    column otherwise, which is the order pandas tries them in. A pair with a
+    slice or a list in it is never a row label, so pandas reads it as a row and
+    a column straight away, and `loc[("a", slice(None)), :]` picks rows by
+    level where `loc[("a", slice(None))]` is the row "a" and every column.
 
     Raises:
         KeyError: For a column that is not there, when the tuple is not a row either.
     """
+    if len(key) == 2 and any(_level_pick(part) for part in key):
+        return key[0], key[1]
     try:
         _by_label(owner.index, key, owner._inner.length())
     except KeyError:
@@ -5904,7 +5959,7 @@ def _prefix_dropped(owner: Any, rows: Any, answer: Any) -> Any:
         return answer
     if type(rows) is tuple:
         count = len(rows)
-    elif _is_scalar(rows) and rows is not EVERY:
+    elif _is_scalar(rows) and rows is not EVERY and not isinstance(rows, slice):
         count = 1
     else:
         return answer
@@ -8907,6 +8962,38 @@ def _gathered(results: list[Any], labels: list[Any], stack: Any, name: Any = Non
     return DataFrame(rows, index=labels, columns=results[0].index.tolist() if results else stack)
 
 
+def _sequences_framed(frame: Any, results: list[Any], names: list[Any]) -> Any:
+    """What a function on each column answered as lists, arrays or tuples, as pandas frames it.
+
+    pandas reads a sequence for each column as that column's new values. They
+    make a frame, labelled by the rows when they are as long as the frame and by
+    positions when they are not, and a column of the sequences themselves when
+    they differ in length from each other. None means the answers were not
+    sequences and `_gathered` puts them together.
+    """
+    if not results or not _sequence_answer(results[0]):
+        return None
+    from ._frame import DataFrame
+
+    pieces = [
+        (result.tolist() if _is_numpy(result) else list(result))
+        if _sequence_answer(result)
+        else result
+        for result in results
+    ]
+    if len({len(piece) for piece in pieces if isinstance(piece, list)}) > 1:
+        return None
+    data = dict(zip(names, pieces, strict=True))
+    if len(pieces[0]) == len(frame.index):
+        return DataFrame(data, index=frame.index)
+    return DataFrame(data)
+
+
+def _sequence_answer(result: Any) -> bool:
+    """Whether a function's answer is a list, a tuple or an array rather than one value."""
+    return isinstance(result, (list, tuple, range)) or (_is_numpy(result) and result.ndim == 1)
+
+
 def _padded(pieces: dict[Any, list[Any]]) -> dict[Any, list[Any]]:
     """Columns of different lengths made the longest length, NaN after the end."""
     longest = max((len(values) for values in pieces.values()), default=0)
@@ -10169,7 +10256,11 @@ class DataFrameMixin(_Carries):
             ]
             return _gathered(results, labels, names)
         names = _shown_names(self)
-        return _gathered([func(self[name], *args, **kwargs) for name in names], names, None)
+        results = [func(self[name], *args, **kwargs) for name in names]
+        framed = _sequences_framed(self, results, names)
+        if framed is not None:
+            return framed
+        return _gathered(results, names, None)
 
     def agg(self, func: Any = None, axis: Any = 0, *args: Any, **kwargs: Any) -> Any:
         """One or more reductions of each column, by name, function, list or dict.
@@ -12847,6 +12938,9 @@ class DataFrameMixin(_Carries):
                 return DataFrame._wrap(
                     _nan_over_gaps_frame(_two_valued_frame(answer, op), op, self, other)
                 )
+            unequal = _frame_text_equality(self, other, op)
+            if unequal is not None:
+                return unequal
             return DataFrame._wrap(_two_valued_frame(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
@@ -12887,6 +12981,9 @@ class DataFrameMixin(_Carries):
                 return DataFrame._wrap(
                     _nan_over_gaps_frame(_two_valued_frame(answer, op), op, self, other, number)
                 )
+            unequal = _frame_text_equality(self, other, op)
+            if unequal is not None:
+                return unequal
             return DataFrame._wrap(_two_valued_frame(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
@@ -16849,6 +16946,9 @@ class SeriesMixin(_Carries):
             return _category_operator(self, other, op, flip, strict)
         if _holds_objects(self, other):
             return _object_operator(self, other, op, flip)
+        unequal = _text_equality(self, other, op)
+        if unequal is not None:
+            return unequal
         if isinstance(other, BaseOffset) and not _is_spans(self):
             return _offset_operand(self, other, op, flip)
         _no_scaling_by_nat(self, other, op, flip)
@@ -16905,6 +17005,9 @@ class SeriesMixin(_Carries):
             )
         if fill_value is None and _holds_objects(self, other):
             return _object_operator(self, other, op, flip)
+        unequal = _text_equality(self, other, op)
+        if unequal is not None:
+            return unequal
         _no_scaling_by_nat(self, other, op, flip)
         other = _temporal_operand(self, _listed_operand(self, other, op))
         scaled = None

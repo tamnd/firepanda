@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: sequence answers in apply, level keys in loc and numbers compared with text
+
+`DataFrame.apply` now frames a list, a tuple or an array answered for each column the way pandas does, labelled by the rows when the answers are as long as the frame. `loc` reads a row key with a slice or a list for some level, such as `IndexSlice["A", :]`, level by level through `MultiIndex.get_locs`, which now answers rows in the order its lists name them, and `loc[:, "a"]` on rows with levels keeps every level. A column of numbers or flags compared with text is False for `==` and True for `!=`, and an order between them raises pandas' TypeError.
+
 ### Added: DuckDB's .test files run against firepanda, with a floor
 
 `pixi run conformance` runs DuckDB's own `.test` files from the vendored corpus through firepanda and checks each against what the file says DuckDB answers: every statement's success or error and every query's rows, whether sorted, hashed or labelled. The files are run unmodified. A file that needs an extension, a database file or the corpus's data directory is counted as not run, and every failing file is put in the bucket of its first failure: a refusal by name, a missing function, a divergence, a wrong answer or a crash. The per directory table over the target directories is in the README with its denominators, and `tests/conformance_floor.txt` holds the count that passes in each, which CI checks so a change that lowers it fails. `--all` runs every directory and writes the failures to `build/conformance/failures.txt`.
