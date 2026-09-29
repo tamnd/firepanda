@@ -32,7 +32,7 @@ def same(got: list[Any], want: list[Any]) -> bool:
     """Equal row by row, with NaN equal to NaN."""
 
     def missing(value: Any) -> bool:
-        return value is None or value != value
+        return value is None or type(value).__name__ == "NAType" or value != value
 
     return len(got) == len(want) and all(
         (missing(a) and missing(b)) or a == b for a, b in zip(got, want, strict=True)
@@ -92,6 +92,15 @@ FRAMES: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame({"a": [np().int64(1), np().int32(2)]}),
     lambda m: m.DataFrame(),
     lambda m: m.DataFrame({}),
+    lambda m: m.DataFrame({"c": m.Categorical(["a", "b", "a"])}),
+    lambda m: m.DataFrame(
+        {"c": m.Categorical(["a", "b"], categories=["b", "a"], ordered=True), "n": [1, 2]},
+        index=["x", "y"],
+    ),
+    lambda m: m.DataFrame({"a": m.array([1, None, 3], dtype="Int64"), "b": [1.5, 2.5, 3.5]}),
+    lambda m: m.DataFrame({"a": m.array([True, None], dtype="boolean")}),
+    lambda m: m.DataFrame({"a": m.array([1.5, None], dtype="Float64")}, index=[7, 8]),
+    lambda m: m.DataFrame({"s": keyed(m, ["y", "x"], [1, 2]), "c": m.Categorical(["p", "q"])}),
 ]
 
 
@@ -154,6 +163,7 @@ MISTAKES: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame(np().arange(6).reshape(3, 2), columns=["a", "b", "c"]),
     lambda m: m.Series([1, 2], index=["a"]),
     lambda m: m.Series(np().zeros((2, 2))),
+    lambda m: m.DataFrame({"s": keyed(m, ["y", "x"], [1, 2]), "c": m.Categorical(["p"])}),
 ]
 
 
