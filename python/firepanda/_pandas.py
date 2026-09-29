@@ -52,6 +52,7 @@ from . import (
     _masked,
     _names,
     _objects,
+    _period,
     _row_dates,
     _row_formats,
 )
@@ -149,6 +150,9 @@ def _object_kind(inner: Any) -> Any:
     interval = _objects.interval_name_of(inner)
     if interval is not None:
         return _interval.IntervalDtype(interval)
+    period = _objects.period_name_of(inner)
+    if period is not None:
+        return _period.period_type(period)
     arrow = _objects.arrow_type_of(inner)
     if arrow is None:
         return "object"
@@ -7028,6 +7032,20 @@ def _interval_typed(inner: Any, kind: str) -> Any:
     """An interval column written again as the interval type `kind` names."""
     pairs = _interval.interval_pairs(_held_values(inner), kind)
     return _firepanda.Series(_objects.interval_cells(pairs, kind), inner.label())
+
+
+def _period_typed(inner: Any, dtype: Any) -> Any:
+    """A column's values written again as a period column of the type `dtype` names."""
+    kind = _period.period_type(dtype).name
+    ordinals = _period.period_ordinals(_held_values(inner), kind)
+    return _firepanda.Series(_objects.period_cells(ordinals, kind), inner.label())
+
+
+def _is_period_type(dtype: Any) -> bool:
+    """Whether a dtype asked for is a period type, by its class or its text."""
+    return isinstance(dtype, _period.PeriodDtype) or (
+        isinstance(dtype, str) and dtype[:7].lower() == "period["
+    )
 
 
 def _category_values(column: Any) -> Any:
@@ -14209,6 +14227,8 @@ class SeriesMixin(_Carries):
                 self._inner = self._made(data, name)
                 if str(dtype).startswith("interval[") and _objects.interval_name_of(self._inner):
                     self._inner = _interval_typed(self._inner, str(dtype))
+                if _is_period_type(dtype):
+                    self._inner = _period_typed(self._inner, dtype)
                 if typed is not None and dtype is None:
                     self._inner = _retyped(self._inner, typed)
                 if index is not None:
@@ -14222,6 +14242,8 @@ class SeriesMixin(_Carries):
         except Exception as error:
             raise translate(error) from None
         if str(dtype).startswith("interval") and _objects.interval_name_of(self._inner):
+            dtype = None
+        if _is_period_type(dtype):
             dtype = None
         if dtype is not None:
             arrow = type(dtype).__name__ == "ArrowDtype" or _masked.masked_name(dtype) is not None
@@ -14268,6 +14290,11 @@ class SeriesMixin(_Carries):
                 if kind is not None:
                     pairs = _interval.interval_pairs(source, kind)
                     return _firepanda.Series(_objects.interval_cells(pairs, kind), label)
+                # Periods of one frequency are a period column, document 103.
+                kind = _period.period_kind(source)
+                if kind is not None:
+                    ordinals = _period.period_ordinals(source, kind)
+                    return _firepanda.Series(_objects.period_cells(ordinals, kind), label)
                 return _firepanda.Series(_objects.cells(source), label)
 
     def __getitem__(self, key: Any) -> Any:
