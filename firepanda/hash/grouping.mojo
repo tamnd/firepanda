@@ -123,6 +123,12 @@ columns writes the packed value directly and the per key factorizes never
 happen. `n` scans plus one pass plus one factorize, rather than `n` scans plus
 `n` passes plus `n - 1` packing passes plus one factorize.
 
+The same holds when the product is far wider than a table, as long as it fits a
+uint32. The factorize at the bottom hashes then, but it would have hashed after
+the composition too unless the per key factorizes shrank the space by the whole
+distance, and `WIDE_TUPLE_SHARE` says how far that has to be before it is not
+worth betting on.
+
 The route is declined for a key that is not an integer, for a key whose values
 are spread too far apart for the subtraction to be a dense ordinal, for a mix of
 dtypes, and for a key with a null in it. The first three are the same questions
@@ -844,8 +850,8 @@ def group_ordinals[
         raise Error("group by: at least one key column is required")
 
     # Every key an integer of the same dtype in a range narrow enough to index,
-    # and the tuple packs straight out of the raw columns with no per key
-    # factorize at all. The dtypes have to agree because the packing loop reads
+    # or so wide that composing would hash anyway, and the tuple packs straight
+    # out of the raw columns with no per key factorize at all. The dtypes have to agree because the packing loop reads
     # all of the keys in one pass and a loop instantiated on each key's own dtype
     # would be twelve copies of it per key. They nearly always do agree, because
     # the keys of a group by are columns of one table.
@@ -862,8 +868,14 @@ def group_ordinals[
             comptime for dt in ALL:
                 comptime if dt.is_integral():
                     if kind == dt:
-                        var plan = _tuple_plan[dt](columns, at, rows)
-                        if plan.space > 0:
+                        var plan = _tuple_plan[dt](
+                            columns, at, rows, Int(UInt32.MAX)
+                        )
+                        var dense = _dense_bound(rows)
+                        if plan.space > 0 and (
+                            plan.space <= dense
+                            or plan.space // WIDE_TUPLE_SHARE > dense
+                        ):
                             var packed = tuple_pack[dt](columns, at, rows, plan)
                             return _packed_grouping(packed, plan.space)
 
@@ -1193,17 +1205,50 @@ def _code_pack[
     return packed^
 
 
+comptime WIDE_TUPLE_SHARE = 64
+"""How far past a table's reach a packed space has to be to be packed anyway.
+
+A tuple whose ranges multiply out to more than `_dense_bound` is hashed at the
+bottom whichever route packs it, so the per key factorizes the composed route
+runs first only pay off when they shrink the space back under that bound, which
+they do when the keys are sparse inside their ranges: the composed space is the
+product of the group counts and the packed one the product of the spans. A space
+this many times past the bound would need the keys that sparse between them to
+come back, and key columns that are that sparse are not the ones that turn up.
+
+TPC-H q20 is the case the other way. It groups nine hundred thousand lines by
+part and supplier, whose ranges are two hundred thousand and ten thousand, so the
+space is two thousand times the row count and both keys are nearly full. The two
+direct factorizes and the pass that packed their codes were a fifth of its group
+by, and packing the raw values instead skips all three.
+"""
+
+
+def _dense_bound(rows: Int) -> Int:
+    """Returns the widest packed space `factorize_dense` lays a table over.
+
+    Args:
+        rows: The frame's height.
+
+    Returns:
+        The wider of `DIRECT_LIMIT` and the row count, capped at a uint32.
+    """
+    var bound = rows if rows > DIRECT_LIMIT else DIRECT_LIMIT
+    return min(bound, Int(UInt32.MAX))
+
+
 def _tuple_plan[
     dt: DType, o: ImmOrigin
-](columns: ColumnRefs[o], at: List[Int], rows: Int) raises -> TuplePlan[dt]:
+](
+    columns: ColumnRefs[o], at: List[Int], rows: Int, bound: Int
+) raises -> TuplePlan[dt]:
     """Works out whether the keys can be packed without factorizing them first.
 
     A key qualifies when it has no nulls and `direct_plan` gives it a range, and
-    the tuple qualifies when the product of those ranges is a space the factorize
-    at the bottom will lay a table over rather than hash. That bound is the wider
-    of `DIRECT_LIMIT` and the row count, which is `factorize_dense`'s own rule,
-    capped at what a uint32 can hold so the packed column is four bytes a row
-    rather than eight.
+    the tuple qualifies when the product of those ranges is within `bound`. The
+    group by asks for anything a uint32 can hold, so the packed column is four
+    bytes a row rather than eight, and decides afterwards whether the space it got
+    is one worth packing; `WIDE_TUPLE_SHARE` has that rule.
 
     The scans are the cost of asking, and they are wasted on a key list that
     turns out not to qualify, so the asking is arranged to be cheap when the
@@ -1219,6 +1264,7 @@ def _tuple_plan[
         columns: The frame's columns, borrowed.
         at: Which of them are keys.
         rows: The frame's height.
+        bound: The widest packed space to accept.
 
     Parameters:
         dt: The dtype all of the keys share.
@@ -1230,10 +1276,6 @@ def _tuple_plan[
     Raises:
         If a column cannot be viewed at `dt`.
     """
-    var bound = rows if rows > DIRECT_LIMIT else DIRECT_LIMIT
-    if bound > Int(UInt32.MAX):
-        bound = Int(UInt32.MAX)
-
     var bases = List[Scalar[dt]]()
     var spans = List[Int]()
     var space = 1

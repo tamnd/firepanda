@@ -1067,6 +1067,35 @@ def test_a_key_pair_of_two_dtypes_groups_the_same_as_one_dtype() raises:
         _same_grouping(uniform, mixed, n)
 
 
+def test_a_pair_of_wide_but_full_ranges_packs_the_raw_values() raises:
+    """Part and supplier sized keys, packed without factorizing either of them.
+
+    Two hundred thousand by ten thousand is far past anything a table is laid
+    over, but it fits a uint32, so the pair packs straight out of the columns and
+    the packed column is hashed. The same values with the second key held in an
+    int32 cannot be packed in one pass, because the dtypes differ, so they go the
+    way this pair went before, and the two have to agree on every ordinal and
+    every representative row. The last trial is tall enough that the hash at the bottom partitions.
+    """
+    var rng = Rng(UInt64(0x9A27))
+    for trial in range(12):
+        var n = 1 + rng.next_below(3000)
+        if trial == 11:
+            n = 600_000
+        var a = Array[DType.int64](n)
+        var b = Array[DType.int64](n)
+        var narrow = Array[DType.int32](n)
+        for i in range(n):
+            var y = Int64(rng.next_below(10_000)) + 1
+            a[i] = Int64(rng.next_below(200_000)) + 1
+            b[i] = y
+            narrow[i] = Int32(y)
+
+        var raw = _pair_grouping(Array[DType.int64](copy=a), b^)
+        var composed = _pair_grouping(a^, narrow^)
+        _same_grouping(raw, composed, n)
+
+
 def test_both_packing_routes_give_first_appearance_order() raises:
     """Holds the fused pass and the fold it replaces against the same oracle.
 
