@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas.compat, core, io and errors submodules
+
+`firepanda.compat` has pandas' platform checks and version flags, with the pyarrow flags worked out on first read. `firepanda.core.api` and `firepanda.io.api` name the core objects and the readers as the top level objects. `firepanda.errors` is now a package with `cow` holding pandas' chained assignment messages, and `abc` and `ctypes` showing through as they do in pandas.
+
 ### Added: pandas.util
 
 `firepanda.util` has `hash_pandas_object` and `hash_array`, which give the same uint64 row hashes pandas gives for every column kind, index and key, through a SipHash-2-4 port and pandas' bit mixing and row folding. `firepanda.util.version` reads and orders PEP 440 version strings like pandas' copy of `packaging.version`.
