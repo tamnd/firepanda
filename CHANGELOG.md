@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Categories of numbers and flags
+
+`astype("category")`, `Series(..., dtype="category")` and `Categorical` now make a category column of whole numbers, floats or flags, whose categories keep the values' own type as pandas' do, where they refused anything but text. The categories are written as object cells, so the extension still encodes the column. The repr, `CategoricalDtype`, the `cat` methods, comparisons, `isin`, `astype` back, `value_counts`, grouping by the column and `fillna` all read them as values. `unique` and `values` on a category column now answer a `Categorical`, and `drop_duplicates` on one no longer raises.
+
 ### Added: DataFrame.compare, and stack over columns with levels
 
 `DataFrame.compare` is new and answers the differing values of two frames with columns named by the pair of the column and the side, or with `align_axis=0` rows named by the pair of the label and the side, with `keep_shape`, `keep_equal` and `result_names` as in pandas. `stack` over a frame whose columns have levels moves the asked levels to the rows, keeping the order the labels first appear and reading a missing pair as missing, as pandas' new stacking does. `droplevel`, `swaplevel` and `reorder_levels` with `axis=1` now work on the column levels. The repr of a `MultiIndex` right aligns each value to the widest at its place, as pandas prints it.

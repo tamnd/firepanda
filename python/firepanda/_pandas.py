@@ -178,6 +178,32 @@ _OBJECT_OPERATORS = {
 }
 
 
+def _category_operator(column: Any, other: Any, op: str, flip: bool, strict: bool) -> Any:
+    """An operator on a column of number categories, which pandas allows only as a comparison.
+
+    Equality reads the values the rows stand for. An ordering needs the categories to be ordered
+    and then follows their order rather than the values', so it compares codes.
+    """
+    sides = [column, other]
+    if op not in _COMPARISONS:
+        raise TypeError(f"Series cannot perform the operation {op}")
+    if op in ("eq", "ne"):
+        sides = [_category_values(s) if _is_written_side(s) else s for s in sides]
+        return sides[0]._operator(sides[1], op, flip, strict)
+    if not column.cat.ordered:
+        raise TypeError("Unordered Categoricals can only compare equality or not")
+    kept = column.cat.categories.tolist()
+    if not _is_scalar(other) or other not in kept:
+        raise TypeError("Invalid comparison between dtype=category and " + type(other).__name__)
+    codes = column.cat.codes.astype("float64").replace(-1, float("nan"))
+    return (codes._operator(kept.index(other), op, flip, strict)).fillna(False)
+
+
+def _is_written_side(side: Any) -> bool:
+    """Whether an operand is a column of number categories."""
+    return isinstance(side, SeriesMixin) and _written_category(side._inner)
+
+
 def _holds_objects(column: Any, other: Any) -> bool:
     """Whether either side of an operator is an object column."""
     if _objects.is_object(column._inner):
@@ -364,7 +390,7 @@ def _held_values(inner: Any) -> list[Any]:
     """
     dtype = inner.dtype()
     values = list(inner.to_list())
-    if dtype == "string":
+    if dtype in ("string", "category"):
         first = next((value for value in values if value is not None), None)
         if _objects.is_cell(first):
             return _objects.values(values)
@@ -3514,7 +3540,11 @@ def _category_fallback(column: Any, value: Any) -> Any:
             f"Cannot setitem on a Categorical with a new category ({value}),"
             " set the categories first"
         )
-    one = Series([value]).astype("category")
+    if column.cat._written():
+        # The category equal to the value, so 1 fills a column of 1.0 as 1.0.
+        one = _number_categories(Series([categories[categories.index(value)]]), False)
+    else:
+        one = Series([value]).astype("category")
     return one.cat.set_categories(categories, ordered=column.cat.ordered)._inner
 
 
@@ -6907,6 +6937,65 @@ def _as_decided(column: Series, dtype: Any) -> Series:
     return column.cat.set_categories(held, ordered=bool(dtype.ordered))
 
 
+def _written_category(inner: Any) -> bool:
+    """Whether a category column's categories are written values rather than text."""
+    try:
+        first = inner.categories().to_list()[:1] if inner.dtype() == "category" else []
+    except Exception:
+        return False
+    return bool(first) and _objects.is_cell(first[0])
+
+
+def _written_categories(printed: str) -> bool:
+    """Whether a column of this type becomes a category of written values, spec 97."""
+    return _numeric_kind(printed) is not None or printed == "bool"
+
+
+def _category_values(column: Any) -> Any:
+    """A column of written categories as the values its rows stand for, in the categories' type."""
+    from ._frame import Series
+
+    levels = column.cat.categories
+    kept = levels.tolist()
+    values = [kept[code] if code >= 0 else None for code in column.cat.codes.tolist()]
+    kind = str(levels.dtype)
+    if None in values and kind.startswith("int"):
+        kind = "float64"
+    return Series(values, dtype=kind, index=column.index, name=column.name)
+
+
+def _number_categories(column: Series, widen: bool = True) -> Series:
+    """A category column of values that are not text, pandas' categories of their own type.
+
+    The extension holds categories as text, so each value is written as an object
+    cell, and the categories are set in the order of the values, which is the
+    order pandas sorts them in. A column of whole numbers with a gap is one pandas
+    holds as floats, so its categories are floats too unless `widen` is off.
+    """
+    from ._frame import Series
+
+    values = _held_values(column._inner)
+    gaps = any(_objects.is_gap(value) for value in values)
+    if widen and gaps and str(column.dtype).startswith(("int", "uint")):
+        values = [value if _objects.is_gap(value) else float(value) for value in values]
+    kept = sorted({value for value in values if not _objects.is_gap(value)})
+    texts = Series(
+        [_objects.cell(value, "N") for value in values],
+        dtype="str",
+        index=column.index,
+        name=column.name,
+    )
+    held = Series._wrap(texts._inner.cast("category", True))
+    return held.cat.set_categories(kept) if kept else held
+
+
+def _number_category_cast(column: Series, wanted: Any) -> bool:
+    """Whether a cast makes or reads number categories, which the column does on its own."""
+    if _written_category(column._inner):
+        return True
+    return str(wanted) == "category" and _written_categories(str(column.dtype))
+
+
 def _category_of(printed: str, wanted: Any) -> None:
     """Refuses a category of anything but text before the core is asked for one.
 
@@ -8642,6 +8731,10 @@ def _values_array(column: Any) -> Any:
     from ._array import FirepandaArray
 
     printed = str(column.dtype)
+    if printed == "category":
+        from ._categorical import Categorical
+
+        return Categorical._held_by(column)
     if _numpy_type(printed, False) == "object":
         return FirepandaArray(column)
     return _column_to_numpy(column, None, NO_DEFAULT)
@@ -13688,7 +13781,9 @@ class DataFrameMixin(_Carries):
         decided = {
             name: wanted
             for name, wanted in asked.items()
-            if _decided_categories(wanted) or _counts_target(str(self[name].dtype), wanted)
+            if _decided_categories(wanted)
+            or _counts_target(str(self[name].dtype), wanted)
+            or _number_category_cast(self[name], wanted)
         }
         if decided:
             rest = {name: wanted for name, wanted in asked.items() if name not in decided}
@@ -13832,8 +13927,12 @@ class SeriesMixin(_Carries):
             raise translate(error) from None
         if dtype is not None:
             wanted = _named_dtype(dtype)
+            made = type(self)._wrap(self._inner)
             try:
-                self._inner = self._inner.cast(wanted, True)
+                if wanted == "category" and _written_categories(str(made.dtype)):
+                    self._inner = _number_categories(made)._inner
+                else:
+                    self._inner = self._inner.cast(wanted, True)
             except Exception as error:
                 raise translate(error) from None
         _named_as(self, name)
@@ -14567,6 +14666,8 @@ class SeriesMixin(_Carries):
         self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT, **kwargs: Any
     ) -> Any:
         """The values as a numpy array, in the type pandas gives this column."""
+        if _written_category(self._inner):
+            return _column_to_numpy(_category_values(self), dtype, na_value)
         return _column_to_numpy(self, dtype, na_value)
 
     @property
@@ -14666,6 +14767,8 @@ class SeriesMixin(_Carries):
 
         if _objects.is_object(self._inner):
             return _objects_in(self, values)
+        if _written_category(self._inner):
+            return _category_values(self).isin(values)
         return Series._wrap(_isin_mask(self, _isin_set(values, _ISIN_SERIES)))
 
     def duplicated(self, keep: Any = "first") -> Series:
@@ -14688,6 +14791,11 @@ class SeriesMixin(_Carries):
         self, *, keep: Any = "first", inplace: bool = False, ignore_index: bool = False
     ) -> Series | None:
         """The values with the repeated ones removed, by a chosen rule."""
+        if self.dtype == "category":
+            # The rows are compared by their codes, which the duplicate rule reads.
+            made = self[~self.cat.codes.duplicated(keep=keep)]
+            made = made.reset_index(drop=True) if ignore_index else made
+            return _settled(self, made, _flag("inplace", inplace))
         made = self._through(
             lambda frame: frame.drop_duplicates(keep=keep, ignore_index=ignore_index)
         )
@@ -15541,8 +15649,10 @@ class SeriesMixin(_Carries):
         every one of its categories, used or not, which is pandas too.
         """
         from ._array import FirepandaArray
+        from ._categorical import Categorical
 
-        return FirepandaArray(self[_first_seen(self)])
+        seen = self[_first_seen(self)]
+        return Categorical._held_by(seen) if seen.dtype == "category" else FirepandaArray(seen)
 
     def factorize(
         self, sort: bool = False, use_na_sentinel: bool = True
@@ -15847,6 +15957,10 @@ class SeriesMixin(_Carries):
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
+        if _written_category(self._inner) or (
+            isinstance(other, SeriesMixin) and _written_category(other._inner)
+        ):
+            return _category_operator(self, other, op, flip, strict)
         if _holds_objects(self, other):
             return _object_operator(self, other, op, flip)
         if isinstance(other, BaseOffset) and not _is_spans(self):
@@ -15982,7 +16096,9 @@ class SeriesMixin(_Carries):
         if missing:
             labels.append(None)
             counts.append(missing)
-        index = Series(labels, dtype="string").astype("category")
+        kind = str(self.cat.categories.dtype) if self.cat._written() else "string"
+        index = Series(labels, dtype=kind)
+        index = _number_categories(index, False) if kind != "string" else index.astype("category")
         index = index.cat.set_categories(categories, ordered=self.cat.ordered)
         table = DataFrame({"label": index, "count": Series(counts, dtype="int64")})
         return table.set_index("label")["count"]
@@ -16532,6 +16648,8 @@ class SeriesMixin(_Carries):
             return _objectified(self)
         if _objects.is_object(self._inner):
             return _from_objects(self, dtype, strictly)
+        if _written_category(self._inner) and _named_dtype(dtype) != "category":
+            return _category_values(self)._astype(dtype, copy, errors)
         if _decided_categories(dtype):
             return _as_decided(self._astype("category", copy, errors), dtype)
         unit = _unit_change(str(self.dtype), dtype)
@@ -16549,6 +16667,8 @@ class SeriesMixin(_Carries):
         texts = _temporal_texts(self) if wanted == "string" else None
         if texts is not None:
             return Series(texts, dtype="str", index=self.index, name=self.name)
+        if wanted == "category" and _written_categories(str(self.dtype)):
+            return _number_categories(self)
         _category_of(str(self.dtype), wanted)
         refused = _temporal_cast_refused(str(self.dtype), wanted)
         if refused:
@@ -17066,13 +17186,26 @@ class CategoricalMixin:
         self._series = data
 
     def _levels(self) -> Index:
-        """The categories, as an index."""
+        """The categories, as an index, read back as values when they were written."""
+        from ._frame import Index
+
+        raw = self._raw_levels()
+        if not self._written():
+            return raw
+        return Index(_objects.values(raw.tolist()))
+
+    def _raw_levels(self) -> Index:
+        """The categories as the extension holds them, written cells and all."""
         from ._frame import Index
 
         try:
             return Index._wrap(self._series._inner.categories())
         except Exception as error:
             raise translate(error) from None
+
+    def _written(self) -> bool:
+        """Whether the categories are values written as cells, which is spec 97."""
+        return _written_category(self._series._inner)
 
     def _ordered(self) -> bool:
         """Whether the category order means anything."""
@@ -17140,7 +17273,11 @@ class CategoricalMixin:
         a hole in it cannot be compared against what the caller passed.
         """
         out: list[str] = []
-        for label in self._levels().tolist():
+        try:
+            raw = self._series._inner.categories().to_list()
+        except Exception as error:
+            raise translate(error) from None
+        for label in raw:
             if not isinstance(label, str):
                 raise NotImplementedError(
                     "one of this column's categories is missing, which Arrow permits"
@@ -17159,7 +17296,9 @@ class CategoricalMixin:
         at the boundary, because firepanda holds categories as text and the
         message about that should name the value.
         """
-        one = [value] if isinstance(value, str) else list(value)
+        one = [value] if isinstance(value, str) or _is_scalar(value) else list(value)
+        if self._written():
+            return [_objects.cell(label, "N") for label in one]
         for label in one:
             if not isinstance(label, str):
                 raise NotImplementedError(
@@ -17229,12 +17368,13 @@ class CategoricalMixin:
         which is pandas and is worth knowing. A callable is applied to each.
         """
         held = self._held()
-        if callable(new_categories):
-            return self._relabel([new_categories(label) for label in held], self._ordered())
-        if isinstance(new_categories, dict):
-            return self._relabel(
-                [new_categories.get(label, label) for label in held], self._ordered()
-            )
+        if callable(new_categories) or isinstance(new_categories, dict):
+            shown = self._levels().tolist()
+            if callable(new_categories):
+                names = [new_categories(label) for label in shown]
+            else:
+                names = [new_categories.get(label, label) for label in shown]
+            return self._relabel(self._wanted(names, "new_categories"), self._ordered())
         wanted = self._wanted(new_categories, "new_categories")
         if len(wanted) != len(held):
             raise InvalidArgumentError(
@@ -17351,7 +17491,8 @@ def _category_keys(frame: DataFrame, keys: list[str]) -> tuple[DataFrame, dict[s
         column = frame[name]
         if column.dtype == "category":
             accessor = column.cat
-            categories[name] = (accessor._held(), accessor._ordered())
+            held = accessor._levels().tolist() if accessor._written() else accessor._held()
+            categories[name] = (held, accessor._ordered())
             codes = accessor._codes()
             changed[name] = codes.astype("float64").where(codes >= 0)
     return (frame.assign(**changed) if changed else frame), categories
@@ -17821,6 +17962,15 @@ def _as_categories(codes: Any, categories: list[str], ordered: bool) -> Any:
 
     if str(codes.dtype) == "category":
         return codes
+    if categories and not all(isinstance(label, str) for label in categories):
+        # Number categories are written cells, so the column is built from its values.
+        from ._frame import Index
+
+        values = [categories[int(c)] if c == c and c is not None else None for c in codes.tolist()]
+        kind = str(Index(categories).dtype)
+        plain = Series(values, dtype=kind, index=codes.index, name=codes.name)
+        built = _number_categories(plain, False)
+        return built.cat.set_categories(categories, ordered=ordered)
     kept = codes.notna()
     at = codes.where(kept, 0).astype("int64")
     held = Series(categories or [""], dtype="string").take(at.tolist())
@@ -29236,6 +29386,13 @@ def _text_values(
     pandas writes a gap in its nullable integer and boolean columns.
     """
     dtype = str(column.dtype)
+    if dtype == "category" and _written_category(column._inner):
+        # Each row prints as its category does in a column of the categories' own type.
+        shown = _text_values(
+            column.cat.categories.to_series(), formatter, float_format, na_rep, decimal, leading
+        )
+        gap = f" {na_rep}" if leading else na_rep
+        return [shown[code] if code >= 0 else gap for code in column.cat.codes.tolist()]
     values = _held_values(column._inner)
     if dtype.startswith("float"):
         return _text_floats(values, formatter, float_format, na_rep, decimal, leading, justify)
@@ -29735,11 +29892,16 @@ def _text_categories(column: Any) -> str:
     More than eight are cut to the first four and the last four, and the list
     wraps at eighty characters, counted the way pandas counts them.
     """
-    categories = column.cat.categories.tolist()
+    levels = column.cat.categories
+    categories = levels.tolist()
+    kind = "str"
     texts = [repr(c) for c in categories]
+    if _written_category(column._inner):
+        kind = str(levels.dtype)
+        texts = [text.strip() for text in _text_values(levels.to_series(), leading=False)]
     if len(texts) > 8:
         texts = [*texts[:4], "...", *texts[-4:]]
-    header = f"Categories ({len(categories)}, str): "
+    header = f"Categories ({len(categories)}, {kind}): "
     step, sep = (3, " < ") if column.cat.ordered else (2, ", ")
     listed = ""
     size = len(header)

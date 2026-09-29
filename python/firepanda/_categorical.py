@@ -25,6 +25,12 @@ if TYPE_CHECKING:
     from ._frame import Index, Series
 
 
+def _kind_of(categories: Index) -> str:
+    """The type pandas prints for categories: `str` for text, and the index's type otherwise."""
+    kind = str(categories.dtype)
+    return "str" if kind == "string" else kind
+
+
 class CategoricalDtype(str):
     """The type of a category column: its categories and whether their order means anything.
 
@@ -105,8 +111,10 @@ class CategoricalDtype(str):
                 f"CategoricalDtype(categories=None, ordered={self._ordered}, categories_dtype=None)"
             )
         shown = ", ".join(repr(label) for label in self._held)
+        kind = _kind_of(self.categories) if self._held else "str"
         return (
-            f"CategoricalDtype(categories=[{shown}], ordered={self._ordered}, categories_dtype=str)"
+            f"CategoricalDtype(categories=[{shown}], ordered={self._ordered},"
+            f" categories_dtype={kind})"
         )
 
     def __str__(self) -> str:
@@ -352,7 +360,7 @@ class Categorical(FirepandaArray):
         if len(names) > 10:
             names = [*names[:4], "...", *names[-4:]]
         levels = link.join(names)
-        kind = "str" if held else "object"
+        kind = _kind_of(self.categories) if held else "object"
         if not values:
             return f"[], Categories (0, {kind}): [{levels}]"
         tail = f"\nLength: {len(values)}" if len(values) > 10 else ""
