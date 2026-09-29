@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL LEFT JOIN LATERAL
+
+`LEFT JOIN LATERAL (...) ON true` now lowers, where it used to be refused. A left row the subquery finds nothing for is kept once, with nulls where the subquery's columns would be, as in DuckDB. The subquery has to be correlated by equalities alone, its select list may not read the left side, and the `ON` has to be `true`; anything else is refused by name. A right or full join to a `LATERAL` is refused as before.
+
 ### Added: SQL ASOF joins with USING
 
 `ASOF JOIN ... USING (a, b, t)` and `ASOF LEFT JOIN ... USING` now lower, where they used to be refused. As in DuckDB, every named column but the last must be equal on both sides, and the last is the inequality: each left row takes the right row with the greatest value that is at most its own. The named columns come out once, as with any `USING`. `ASOF RIGHT` and `ASOF FULL` are still refused.
@@ -23,10 +27,6 @@ An object column exported through the Arrow PyCapsule interface, on its own or i
 ### Added: Operations that answer object columns
 
 Reading one row across columns of different types with `iloc`, `loc` or `iterrows`, `transpose` and `melt` over such columns, and `concat` of parts that share no type now answer an object column, as pandas does. `describe` answers `count`, `unique`, `top` and `freq` for text, flags and categories, and `describe(include="all")` puts those rows before the numbers' rows. `str.split` and `str.rsplit` without `expand` and the new `str.findall` answer a list per row, and `dt.time` answers the time of day. An object column's gap reads as None, NaN or NaT the way pandas' does, and a list in a cell prints as pandas prints it, as `[a, b]`. `Timestamp` of a number with a zone now counts from the epoch in UTC, as pandas does, where it used to read the number as a time on the zone's clock.
-### Added: SQL LEFT JOIN LATERAL
-
-`LEFT JOIN LATERAL (...) ON true` now lowers, where it used to be refused. A left row the subquery finds nothing for is kept once, with nulls where the subquery's columns would be, as in DuckDB. The subquery has to be correlated by equalities alone, its select list may not read the left side, and the `ON` has to be `true`; anything else is refused by name. A right or full join to a `LATERAL` is refused as before.
-
 ### Added: Object columns
 
 A column can hold any Python value, as pandas' object dtype does. A list whose values do not share one type, such as text mixed with numbers, a list in each cell, a dict, a `Decimal` or an integer too large for int64, now builds an object column where it used to be refused, and `dtype=object` and `astype(object)` make one on request. The values are written into a text column, so every operation that moves rows carries them unchanged, and they are read back as they were by `tolist`, iteration, one cell, `to_dict` and `to_numpy`. Comparisons, arithmetic, `isin`, `fillna`, sorting, `min`, `max`, `sum` and `prod` compute one value at a time in Python, as pandas does, and `.str` works on an object column of text. Document 95 of the compat notes describes the design and the few places the answer still differs from pandas.
