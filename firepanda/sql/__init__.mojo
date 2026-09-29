@@ -165,6 +165,7 @@ from .cte import (
     read_ctes,
     reference_count,
 )
+from .ddl import execute
 from .generated.casts import ANY_COST, NO_CAST
 from .generated.functions import (
     DUCKDB_VERSION,

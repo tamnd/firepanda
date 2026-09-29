@@ -624,12 +624,12 @@ from .ast import (
     STMT_UNPIVOT,
     STMT_VALUES,
 )
-from .catalog import NOT_FOUND, Catalog, KIND_FRAME, fold
+from .catalog import NOT_FOUND, Catalog, KIND_FRAME, KIND_VIEW, fold
 from .generated.functions import KIND_AGGREGATE
 from .registry import Registry
 from .cte import NOT_A_CTE, aliased, read_ctes
 from .printer import print_expr, print_window
-from .transform import KEEPS_NULLS
+from .transform import KEEPS_NULLS, Transform
 from .star import (
     NOT_REPLACED,
     Renaming,
@@ -5424,16 +5424,7 @@ def _table(
     if found < 0:
         raise Error(catalog.missing(name))
     if catalog.kind_at(found) != KIND_FRAME:
-        raise Error(
-            String(
-                name,
-                (
-                    " is a view, and firepanda does not lower a view yet"
-                    " because the text it holds has to be parsed and lowered in"
-                    " the place the name was written"
-                ),
-            )
-        )
+        return _view(catalog, found, called^, grammar, plan, sources, scope)
 
     # The scan carries the offset of its own schema in `sources`, so a query
     # over two tables hands binding two schemas and each scan reaches its own.
@@ -5450,6 +5441,102 @@ def _table(
     scope.spells(spelling^)
     var origin = List[Int](length=len(schema), fill=table)
     return _From(plan.scan(name, List[String](), table), schema^, origin^)
+
+
+def _view(
+    catalog: Catalog,
+    found: Int,
+    var called: String,
+    grammar: Grammar,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+) raises -> _From:
+    """Lowers a view's name as the query it holds, parsed where it is read.
+
+    The text is parsed again at every reference, so a view reads the tables
+    under it as they are when the query runs and not as they were when the view
+    was made, which is what makes a row inserted later show up through it. The
+    query sees no CTE of the statement around it, since a view is defined
+    before and apart from any statement that names it.
+
+    Args:
+        catalog: What the names inside it are resolved against.
+        found: The index `find` returned, whose kind is `KIND_VIEW`.
+        called: The name the reference is known by, its alias when it has one.
+        grammar: A loaded grammar, to parse the text with.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+
+    Returns:
+        The query's root and what it produces.
+
+    Raises:
+        If the text no longer lowers against the catalog as it is now.
+    """
+    var rules = Transform(grammar)
+    _no_cycle(catalog, found, rules, grammar)
+    ref view = catalog.view_at(found)
+    var ast = Ast()
+    var statement = rules.parse_statement(view.sql, grammar, ast)
+    var inner = _Scope()
+    var root = _statement(
+        ast, statement, catalog, grammar, plan, sources, inner, _Bindings()
+    )
+    root = _renamed(plan, root, view.columns)
+    return _derived(plan, root, called^, scope)
+
+
+def _no_cycle(
+    catalog: Catalog, start: Int, rules: Transform, grammar: Grammar
+) raises:
+    """Refuses a view that reaches itself through the views it names.
+
+    `CREATE OR REPLACE VIEW` checks the new text against the old view, so a
+    chain that closes on itself can be made, and DuckDB refuses it when it is
+    read rather than when it is made. Lowering one would never end.
+
+    Args:
+        catalog: The session's names.
+        start: The index of the view about to be lowered.
+        rules: The transform, to parse each view's text with.
+        grammar: A loaded grammar.
+
+    Raises:
+        If `start` is among the views reached from it.
+    """
+    var seen = List[Int]()
+    var pending = List[Int]()
+    pending.append(start)
+    while len(pending) > 0:
+        var at = pending.pop()
+        var ast = Ast()
+        _ = rules.parse_statement(catalog.view_at(at).sql, grammar, ast)
+        for i in range(1, len(ast.refs)):
+            if ast.refs[i].kind != REF_TABLE:
+                continue
+            var run = ast.refs[i].children
+            var count = ast.length(run)
+            if count == 0:
+                continue
+            var named = catalog.find(ast.text(ast.at(run, count - 1)))
+            if named == NOT_FOUND or catalog.kind_at(named) != KIND_VIEW:
+                continue
+            if named == start:
+                raise Error(
+                    String(
+                        (
+                            "Binder Error: infinite recursion detected:"
+                            ' attempting to recursively bind view "'
+                        ),
+                        catalog.name_at(start),
+                        '"',
+                    )
+                )
+            if named not in seen:
+                seen.append(named)
+                pending.append(named)
 
 
 def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
