@@ -15,7 +15,8 @@ The input is the steps file the driver writes, one record per line of header:
 and the output is one record per record in:
 
     F <path>            the file about to run
-    R <columns> <bytes> the statement answered, then its rows
+    R <columns> <bytes> the statement answered, then a letter per column
+                        for its type and a line per row
     E <bytes>           the statement raised, then the message
 
 A row is its values joined by tabs, a null as `NULL` and empty text as
@@ -41,7 +42,7 @@ from firepanda.array.any import AnyArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
-from firepanda.kernel.cast import cast_any
+from firepanda.io.write import cell_text
 from firepanda.sql.catalog import Catalog
 from firepanda.sql.ddl import execute
 from firepanda.sql.run import Dialect
@@ -52,61 +53,78 @@ def _column(frame: DataFrame, i: Int) raises -> AnyArray:
     return frame.columns[i].copy().combine()
 
 
-def _texts(dialect: Dialect, frame: DataFrame) raises -> List[AnyArray]:
-    """Every column cast to text, by SQL's cast where it has one.
+def _cast(dialect: Dialect, frame: DataFrame, i: Int) raises -> AnyArray:
+    """Column `i` cast to text by SQL's own cast.
 
-    The frame goes into a catalog of its own under names that cannot clash, so
-    a result with two columns of one name, or a name no query could write, is
-    still read one column at a time.
+    The column goes into a catalog of its own under a name that cannot clash,
+    so a result with two columns of one name, or a name no query could write,
+    is still read one column at a time.
     """
     var fields = List[Field]()
+    fields.append(Field("c", frame.schema[i].dtype))
     var columns = List[AnyArray]()
-    var select = String("SELECT ")
-    for i in range(frame.width()):
-        var name = String("c", i)
-        fields.append(Field(name, frame.schema[i].dtype))
-        columns.append(_column(frame, i))
-        if i > 0:
-            select += ", "
-        select += String("CAST(", name, " AS VARCHAR) AS ", name)
-    select += " FROM r"
+    columns.append(_column(frame, i))
     var scratch = Catalog()
     scratch.register("r", DataFrame(Schema(fields^), columns^))
-    var cast = DataFrame()
-    var cast_ok = True
-    try:
-        cast = dialect.run(select, scratch)
-    except:
-        cast_ok = False
-    var out = List[AnyArray]()
+    var cast = dialect.run("SELECT CAST(c AS VARCHAR) AS c FROM r", scratch)
+    return _column(cast, 0)
+
+
+def _kinds(frame: DataFrame) -> String:
+    """One letter per column for the driver's comparison.
+
+    DuckDB's runner compares a value that is not the text it expects under the
+    column's type, so `true` answers a `1` it expects of a boolean. `B` is a
+    boolean, `I` an integer, `R` a float and `T` anything else.
+    """
+    var out = String()
     for i in range(frame.width()):
-        if cast_ok:
-            out.append(_column(cast, i))
+        var dtype = frame.schema[i].dtype
+        if dtype == LogicalType.BOOL:
+            out += "B"
+        elif dtype.is_integer():
+            out += "I"
+        elif dtype.is_float():
+            out += "R"
         else:
-            # A type SQL cannot cast to text yet still has a rendering, and a
-            # row that prints is more use to the report than one that could
-            # not.
-            out.append(
-                cast_any(_column(frame, i), LogicalType.STRING, strict=False)
-            )
+            out += "T"
     return out^
 
 
 def _rendered(dialect: Dialect, frame: DataFrame) raises -> String:
-    """The rows, a tab between values and a newline between rows."""
-    var texts = _texts(dialect, frame)
+    """The rows, a tab between values and a newline between rows.
+
+    A column SQL cannot cast to text yet is written the way a file would carry
+    it, which spells a date as a date rather than as the day count it is stored
+    as, and a row that prints is more use to the report than one that could
+    not.
+    """
+    var width = frame.width()
+    var texts = List[AnyArray]()
+    var cast = List[Bool]()
+    for i in range(width):
+        try:
+            texts.append(_cast(dialect, frame, i))
+            cast.append(True)
+        except:
+            texts.append(_column(frame, i))
+            cast.append(False)
     var rows = len(frame)
     var out = String()
     for r in range(rows):
         if r > 0:
             out += "\n"
-        for c in range(len(texts)):
+        for c in range(width):
             if c > 0:
                 out += "\t"
             if not texts[c].is_valid(r):
                 out += "NULL"
                 continue
-            var text = texts[c].text_at(r)
+            var text: String
+            if cast[c]:
+                text = texts[c].text_at(r)
+            else:
+                text = cell_text(texts[c], r)
             if text.byte_length() == 0:
                 out += "(empty)"
             else:
@@ -152,7 +170,7 @@ def test_conformance() raises:
             continue
         try:
             var frame = execute(dialect, sql, catalog)
-            var text = _rendered(dialect, frame)
+            var text = _kinds(frame) + "\n" + _rendered(dialect, frame)
             print(
                 "R ",
                 frame.width(),

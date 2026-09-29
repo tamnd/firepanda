@@ -43,6 +43,7 @@ See docs/specs/sql/11-conformance.md.
 from __future__ import annotations
 
 import argparse
+import decimal
 import hashlib
 import os
 import queue
@@ -462,7 +463,8 @@ def _records(stream, records):
             _, columns, size = head.split(" ")
             body = stream.read(int(size))
             stream.read(1)
-            records.put(("rows", int(columns), body.decode("utf-8", "replace")))
+            kinds, _, rows = body.decode("utf-8", "replace").partition("\n")
+            records.put(("rows", int(columns), rows, kinds))
             continue
         if head.startswith("E "):
             body = stream.read(int(head[2:]))
@@ -512,7 +514,7 @@ def _judge(step, result, labels):
         return "divergence", "answered where DuckDB raises"
     if step.kind != "query":
         return None
-    columns, text = result[1], result[2]
+    columns, text, kinds = result[1], result[2], result[3]
     rows = [row.split("\t") for row in text.split("\n")] if text else []
     if rows and columns == 0:
         rows = []
@@ -521,6 +523,10 @@ def _judge(step, result, labels):
             columns,
             len(step.types),
         )
+    if step.sort == "valuesort":
+        # Every value is a row of one once sorted, so a kind is only known
+        # when all the columns share it.
+        kinds = kinds[:1] if len(set(kinds)) == 1 else ""
     values = _ordered(rows, step.sort)
     if not step.expected:
         if step.label:
@@ -545,7 +551,10 @@ def _judge(step, result, labels):
     if len(wanted) != len(values):
         return "wrong", "%d rows where DuckDB has %d" % (len(values), len(wanted))
     for got, want in zip(values, wanted):
-        if len(got) != len(want) or not all(map(_same, got, want)):
+        if len(got) != len(want) or not all(
+            _same(g, w, kinds[i] if i < len(kinds) else "T")
+            for i, (g, w) in enumerate(zip(got, want))
+        ):
             return "wrong", "%s where DuckDB has %s" % (
                 "\t".join(got)[:120],
                 "\t".join(want)[:120],
@@ -569,19 +578,44 @@ def _ordered(rows, sort):
     return rows
 
 
-def _same(got, want):
-    """DuckDB's runner's rule for two values: the same text, or two numbers
-    within its tolerance of each other."""
+def _same(got, want, kind="R"):
+    """DuckDB's runner's rule for two values.
+
+    The same text is always the same value. Otherwise the two are compared
+    under the column's type, which is what `CompareValues` in DuckDB's
+    `result_helper.cpp` does: a number is read as the column's type on both
+    sides and a float then gets its tolerance, a boolean reads `true` and `1`
+    as one value in any case, and anything else has to be the same text.
+    """
     if got == want:
         return True
-    try:
-        left = float(got)
-        right = float(want)
-    except ValueError:
+    if got == "NULL" or want == "NULL":
         return False
+    if kind == "B":
+        return _truth(got) is not None and _truth(got) == _truth(want)
+    if kind not in ("I", "R"):
+        return False
+    try:
+        left = decimal.Decimal(got)
+        right = decimal.Decimal(want)
+    except decimal.InvalidOperation:
+        return False
+    if kind == "I":
+        return left.to_integral_value(decimal.ROUND_HALF_UP) == right.to_integral_value(
+            decimal.ROUND_HALF_UP
+        )
     if left == right:
         return True
-    return abs(left - right) <= abs(right) * 0.01 + 0.00000001
+    return abs(left - right) <= abs(right) * decimal.Decimal("0.01") + decimal.Decimal("1e-8")
+
+
+def _truth(text):
+    lowered = text.lower()
+    if lowered == "true" or text == "1":
+        return True
+    if lowered == "false" or text == "0":
+        return False
+    return None
 
 
 def _matches(message, wanted):
