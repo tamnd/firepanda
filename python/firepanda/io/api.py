@@ -5,6 +5,7 @@ from __future__ import annotations
 from .._clipboard import read_clipboard
 from .._columnar import read_feather, read_orc, read_parquet
 from .._excel import ExcelFile, read_excel
+from .._excel_write import ExcelWriter
 from .._html_read import read_html
 from .._pandas import read_csv, read_json
 from .._pickle import read_pickle, to_pickle
@@ -14,6 +15,7 @@ from .._xml import read_xml
 
 __all__ = [
     "ExcelFile",
+    "ExcelWriter",
     "read_clipboard",
     "read_csv",
     "read_excel",
