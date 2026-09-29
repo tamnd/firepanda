@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_xarray
+
+`DataFrame.to_xarray` and `Series.to_xarray` answer an xarray `Dataset` or `DataArray` the way pandas does. Like pandas, they hand the object to `xarray.Dataset.from_dataframe` or `xarray.DataArray.from_series`. Those read pandas' internals, and xarray depends on pandas, so the object is first rebuilt as a pandas one with every column's type kept: categories and their order, the nullable types, text, and moments with a zone. A multi index is filled out to its full grid and a repeated label is refused, both by xarray itself. Without xarray the error is pandas' ImportError.
+
 ### Added: arrays and categoricals in a frame mapping
 
 `DataFrame({"c": Categorical([...])})` now builds a category column with the categories and order it was given, where it used to build a text column, and an array from `array(..., dtype="Int64")`, `"Float64"` or `"boolean"` builds a column of that type with its missing values, where it used to be refused. Each array is read as a series of itself placed by position. Beside a series, it takes the labels the series make and has to be as long as they are, with pandas' error when it is not.
