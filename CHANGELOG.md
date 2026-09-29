@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.to_stata and the Stata writers
+
+`DataFrame.to_stata`, `StataWriter`, `StataWriter117`, `StataWriterUTF8`, `StataStrLWriter`, `StataValueLabel` and `StataNonCatValueLabel` now write Stata dta files in versions 114, 117, 118 and 119. The writer is a pure struct port of pandas' own, so with the same time stamp the file is byte for byte the one pandas writes, including type narrowing, renamed columns, value labels, dates in every Stata format, long strings, byte order and compression, and it raises pandas' warnings and errors in pandas' words.
+
 ### Added: read_stata and StataReader
 
 `read_stata` reads Stata dta files of versions 102 to 119, whole or in chunks through `StataReader`, which also lives at `firepanda.io.stata` with `StataMissingValue`. It is a port of pandas' reader that uses `struct` in place of numpy, and it follows pandas for missing values, the nine date formats, long strings, value labels as ordered categoricals, `preserve_dtypes`, `columns`, `index_col` and compressed files, with pandas' warnings and error sentences.
