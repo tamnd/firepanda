@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: read_excel and ExcelFile
+
+`read_excel` and `ExcelFile` read xlsx, xlsm, xls, xlsb and OpenDocument workbooks with pandas' signature and pandas' answers. The engine is picked from the first bytes the way pandas picks it, and openpyxl, xlrd, pyxlsb, odfpy and python-calamine each read the cells as pandas' reader for that engine does. The rows then go through a port of pandas' Python parser, so header rows, `index_col`, `usecols` in all its forms, `skiprows`, `nrows`, `skipfooter`, the missing value options, `true_values` and `false_values`, `thousands`, `converters`, `dtype`, `parse_dates` and `dtype_backend` type a column the way pandas does and fail with pandas' sentence. The engines are optional, and a missing one is named in pandas 3's words.
+
 ### Added: pandas 3's sentence for a missing optional dependency
 
 A reader or method that needs a package which is not installed now says so the way pandas 3 does, "`Import xarray` failed.  Use pip or conda to install the xarray package.", naming the package to install, so `odf` is named `odfpy`. `to_xarray`, the sparse conversions to scipy, the Parquet, ORC and Feather readers and `firepanda.test` all word it through one helper, `_optional`, which the Excel readers will use too.
