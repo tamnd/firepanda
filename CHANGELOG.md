@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: HDFStore, read_hdf and to_hdf
+
+`HDFStore`, `read_hdf`, `DataFrame.to_hdf` and `Series.to_hdf` read and write HDF5 files in pandas' fixed and table formats, and `firepanda.io.pytables` holds the storers where pandas keeps them. The module is pandas' own `pandas.io.pytables` ported class for class on top of PyTables, which is imported only when a store opens. Columns are grouped into blocks and consolidated by pandas' rules, so a file firepanda writes has the same nodes, attributes and types as the one pandas writes and each library reads the other's files. Where clauses, data columns, appends, removal, chunks, coordinates, several tables at once, copies, table indexes, the printed store and the errors all match pandas.
+
 ### Added: read_sas and the SAS readers
 
 `read_sas` reads SAS transport files and SAS7BDAT data sets the way pandas does, and `firepanda.io.sas` holds `SASReader`, `XportReader` and `SAS7BDATReader` where pandas keeps them. Both readers are ported to plain Python with `struct`, including the IBM float conversion of transport files and the run length and Ross decompressors of data sets, so they need no other package. Names, types, values, dates, chunks, reader attributes and errors match pandas on pandas' own SAS test files, with and without an encoding.
