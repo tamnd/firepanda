@@ -7717,7 +7717,58 @@ def _column_labels(frame: DataFrame) -> Index:
     from ._range_index import RangeIndex
 
     names = _names.shown_all(frame._inner.names())
+    if _column_depth(names) > 1:
+        from ._multi import MultiIndex
+
+        return MultiIndex.from_tuples(names)
     return _names_index(names, None) if names else RangeIndex(0)
+
+
+def _column_depth(labels: list[Any]) -> int:
+    """How many levels a frame's column labels have, which is one unless they are tuples.
+
+    Document 96 of the compat notes: a frame whose names are all tuples of one
+    length of two or more has columns with that many levels, as a frame built
+    with `columns=MultiIndex(...)` or from a dict of tuple keys has in pandas.
+    """
+    if not labels or not all(isinstance(label, tuple) for label in labels):
+        return 1
+    sizes = {len(label) for label in labels}
+    size = sizes.pop()
+    return size if not sizes and size >= 2 else 1
+
+
+def _level_selected(frame: Any, key: Any) -> Any:
+    """The columns under a first level label, as pandas' `df[key]` answers them, or None.
+
+    Each tuple loses its first level, so the columns are named by the rest of it,
+    or by the one label left. When what is left of every one is empty text, as
+    with a column `("a", "")`, pandas answers the one column as a series named
+    by the key, and so does this.
+    """
+    from ._frame import DataFrame, Series
+
+    held = frame._inner.names()
+    labels = _names.shown_all(held)
+    if _column_depth(labels) < 2 or isinstance(key, tuple):
+        return None
+    try:
+        picked = [at for at, label in enumerate(labels) if label[0] == key]
+    except TypeError:
+        return None
+    if not picked:
+        return None
+    rests = [labels[at][1:] for at in picked]
+    rests = [rest[0] if len(rest) == 1 else rest for rest in rests]
+    try:
+        chosen = frame._inner.select([held[at] for at in picked])
+        if all(rest == "" for rest in rests):
+            column = chosen.column(held[picked[0]])
+            return Series._wrap(column).rename(key)
+        chosen = chosen.renamed_columns([held[at] for at in picked], _names.held_all(rests))
+    except Exception as error:
+        raise translate(error) from None
+    return DataFrame._wrap(chosen)
 
 
 def _shown_names(frame: Any) -> list[Any]:
@@ -8965,13 +9016,31 @@ class DataFrameMixin(_Carries):
             key = list(key.tolist())
         if isinstance(key, list):
             key = _names.held_all(key)
-        elif not isinstance(key, (str, tuple, slice)) and _is_scalar(key):
-            if _names.held(key) not in self._inner.names():
+        elif isinstance(key, tuple) and key:
+            try:
+                named = _names.held(key)
+            except NotImplementedError:
+                named = None
+            if named is not None and named in self._inner.names():
+                key = named
+            elif _column_depth(_names.shown_all(self._inner.names())) > 1:
                 raise KeyError(key)
+        elif not isinstance(key, (str, slice)) and _is_scalar(key):
+            if _names.held(key) not in self._inner.names():
+                levelled = _level_selected(self, key)
+                if levelled is None:
+                    raise KeyError(key)
+                return levelled
             key = _names.held(key)
-        try:
-            if isinstance(key, str):
+        if isinstance(key, str):
+            try:
                 return Series._wrap(self._inner.column(key))
+            except Exception as error:
+                levelled = _level_selected(self, key)
+                if levelled is None:
+                    raise translate(error) from None
+                return levelled
+        try:
             if isinstance(key, (list, tuple)) and all(isinstance(k, str) for k in key):
                 return DataFrame._wrap(self._inner.select(list(key)))
         except Exception as error:
@@ -28759,7 +28828,18 @@ def _write_csv(names: list[Any], columns: list[Any], rows: Any, path_or_buf: Any
             else:
                 label = [str(index_label)]
             titles = [*label, *titles]
-        lines.append(titles)
+        depth = 1 if _list_like(header) else _column_depth(list(names))
+        if depth > 1:
+            # One line per level, as pandas' `_generate_multiindex_header_rows`
+            # writes them, then the row label names on a line of their own.
+            label = titles[: len(titles) - len(names)]
+            for level in range(depth):
+                ahead = [""] * len(label)
+                lines.append([*ahead, *(str(name[level]) for name in names)])
+            if label and set(label) != {""}:
+                lines.append([*label, *([""] * len(names))])
+        else:
+            lines.append(titles)
     texts = [
         _csv_cells(column, kw["float_format"], kw["date_format"], **cells) for column in columns
     ]
@@ -29125,6 +29205,27 @@ def _text_heads(frame: Any, labels: list[Any]) -> list[str]:
     return [_text_head(label) for label in labels]
 
 
+def _text_level_heads(labels: list[Any]) -> list[list[str]]:
+    """The header lines of columns with levels, one per level, as pandas prints them.
+
+    A label that repeats the one to its left, with every level above it
+    repeating too, prints blank. That is pandas' `sparsify_labels`, and the last
+    level always prints. Unlike a flat header no label gets a leading space for
+    a numeric column, which is pandas 3's rule.
+    """
+    columns = [[_text_head(part) for part in label] for label in labels]
+    heads = [columns[0]] if columns else []
+    for before, now in itertools.pairwise(columns):
+        sparse = []
+        for level, (above, part) in enumerate(zip(before, now, strict=True)):
+            if level == len(now) - 1 or above != part:
+                sparse.extend(now[level:])
+                break
+            sparse.append("")
+        heads.append(sparse)
+    return heads
+
+
 def _text_head(label: Any) -> str:
     """One name as the header prints it, where a float gap prints as `NaN`."""
     if isinstance(label, float) and label != label:
@@ -29281,10 +29382,14 @@ def _text_table(
 
     named = bool(index and kw["index_names"] and _text_named(frame.index))
     listed = _list_like(header)
+    depth = 1
     if listed:
         if len(header) != len(labels):
             raise ValueError(f"Writing {len(labels)} cols but got {len(header)} aliases")
         heads = [[str(h)] for h in header]
+    elif header and _column_depth(labels) > 1:
+        depth = _column_depth(labels)
+        heads = _text_level_heads(labels)
     elif header:
         written = _text_heads(frame, labels)
         heads = [
@@ -29319,7 +29424,7 @@ def _text_table(
         names = _text_fixed(
             _text_labels(frame.index, named, widest), "left", int(spaces.get("", 0)), widest
         )
-        blocks.insert(0, ["", *names] if listed or header else names)
+        blocks.insert(0, [""] * depth + names if listed or header else names)
     tall = len(blocks[-1])
     if dots_col is not None:
         blocks.insert(dots_col + 1, [" ..."] * tall)
