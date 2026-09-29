@@ -14692,24 +14692,22 @@ class SeriesMixin(_Carries):
         """
         return _zoned_axis(self, "tz_convert", tz, axis, level, copy, ())
 
-    def to_period(self, freq: Any = None, axis: Any = 0, copy: Any = NO_DEFAULT) -> Any:
+    def to_period(self, freq: Any = None, copy: Any = NO_DEFAULT) -> Any:
         """The same values with instant labels read as the periods they fall in.
 
         Raises:
-            TypeError: When the labels along `axis` are not instants.
+            TypeError: When the labels are not instants.
         """
-        return _period_labels(self, "to_period", axis, lambda labels: labels.to_period(freq))
+        return _period_labels(self, "to_period", 0, lambda labels: labels.to_period(freq))
 
-    def to_timestamp(
-        self, freq: Any = None, how: str = "start", axis: Any = 0, copy: Any = NO_DEFAULT
-    ) -> Any:
+    def to_timestamp(self, freq: Any = None, how: str = "start", copy: Any = NO_DEFAULT) -> Any:
         """The same values with period labels read as instants, at their start or end.
 
         Raises:
-            TypeError: When the labels along `axis` are not periods.
+            TypeError: When the labels are not periods.
         """
         return _period_labels(
-            self, "to_timestamp", axis, lambda labels: labels.to_timestamp(freq=freq, how=how)
+            self, "to_timestamp", 0, lambda labels: labels.to_timestamp(freq=freq, how=how)
         )
 
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
