@@ -271,17 +271,13 @@ REFUSED: list[Callable[[Any], Any]] = [
     lambda m: numbers(m).resample("h").agg(lambda x: x.sum()),
     lambda m: numbers(m).resample("h").apply(lambda x: x.sum()),
     lambda m: numbers(m).resample("h").transform(lambda x: x),
-    lambda m: numbers(m).resample("h").ffill(),
-    lambda m: numbers(m).resample("h").bfill(),
-    lambda m: numbers(m).resample("h").nearest(),
-    lambda m: numbers(m).resample("h").interpolate(),
     lambda m: numbers(m).resample("h").first(skipna=False),
 ]
 
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """Calendar rules, shifted bins, finer units, two levels of labels and upsampling."""
+    """Calendar rules, shifted bins, finer units and two levels of labels."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 

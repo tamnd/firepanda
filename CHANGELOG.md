@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Resampler upsampling
+
+`ffill`, `bfill`, `nearest`, `asfreq` and `interpolate` on a resampler now fill the new bins the way pandas does, on the bin edges pandas picks for `closed` and `label`, with `limit` and `fill_value`. A column picked from the resampler fills within each bin on the original rows, and the methods pandas refuses there, after `on=`, and on a grouped resampler raise pandas' errors. `interpolate(method="time")` now works over dates and spans, `method="index"` reads dates as their counts, and `Series.where` with a condition on a date index no longer fails.
+
 ### Added: GroupBy.resample
 
 `DataFrameGroupBy.resample` and `SeriesGroupBy.resample` resample each group's rows on their own and stack the answers under the group's key, as pandas does. Columns can be picked with `[]` or by attribute, the key columns among them. `group_keys=False` and `as_index=False` stack the answers without the key, `on=` bins by a column, and `include_groups=True` is refused in pandas' words. `transform` is refused for now.
