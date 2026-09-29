@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL UNPIVOT runs
+
+`UNPIVOT t ON a, b, c` and `FROM t UNPIVOT (v FOR n IN (a, b, c))` now lower and run, where they used to be parsed and then refused. Each row hands out one row per folded column, with the column's name in `name` and its value in `value` (or the names `INTO NAME ... VALUE ...` gives), and a null value drops its row, as in DuckDB. The columns not folded come along unchanged. A folded expression is named by its alias, or else by the one column it reads; an expression reading two columns is refused as DuckDB refuses it. More than one value column is refused by name.
+
 ### Added: Categories of numbers and flags
 
 `astype("category")`, `Series(..., dtype="category")` and `Categorical` now make a category column of whole numbers, floats or flags, whose categories keep the values' own type as pandas' do, where they refused anything but text. The categories are written as object cells, so the extension still encodes the column. The repr, `CategoricalDtype`, the `cat` methods, comparisons, `isin`, `astype` back, `value_counts`, grouping by the column and `fillna` all read them as values. `unique` and `values` on a category column now answer a `Categorical`, and `drop_duplicates` on one no longer raises.
@@ -19,7 +23,6 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: Group by answers with two levels of column labels
 
 `DataFrameGroupBy.agg` takes a list of reductions, and a mapping whose values are lists, and names each column by the pair of the column and the reduction, as pandas does, with lambdas numbered `<lambda_0>` and on and a repeated name raising `SpecificationError`. `DataFrameGroupBy.describe` and `DataFrameGroupBy.ohlc` are new and answer the same shape. Under `as_index=False` the keys come out as columns with an empty lower level. A header cut by `max_columns` now prints the whole label of the first column past the dots, as pandas does.
-
 ### Added: Columns with more than one level
 
 A frame whose column names are all tuples of one length of at least two now has `MultiIndex` columns, as in pandas. `df[("a", "x")]` selects one column, `df["a"]` selects every column under the first level `a` and drops that level, or answers a series when what is left of each name is empty text. The repr and `to_string` print one header line per level, sparsified the way pandas prints them, and `to_csv` writes one header row per level. Level names on the columns read as None for now.

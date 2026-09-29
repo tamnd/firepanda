@@ -619,6 +619,7 @@ from .ast import (
     STMT_QUERY,
     STMT_SELECT,
     STMT_SET_OPERATION,
+    STMT_UNPIVOT,
     STMT_VALUES,
 )
 from .catalog import NOT_FOUND, Catalog, KIND_FRAME, fold
@@ -5534,6 +5535,127 @@ def _unnest_from(
     return _From(at, schema^, origin^)
 
 
+def _unpivot(
+    ast: Ast,
+    statement: UInt32,
+    catalog: Catalog,
+    grammar: Grammar,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+    ctes: _Bindings,
+) raises -> Int:
+    """Lowers an `UNPIVOT`, a row for each column it folds on each row.
+
+    `UNPIVOT t ON a, b INTO NAME n VALUE v` is an unnest of two lists written
+    out over `t`, `['a', 'b']` into `n` and `[a, b]` into `v`, with the rows
+    whose value is null dropped. That is how DuckDB runs it too, so the value
+    column's type is the one type every folded column fits in and each row of
+    `t` hands out its folded columns in the order they were written. The
+    columns no folded expression reads come first, as they are, and the name
+    and the value last. Without an `INTO` the two are called `name` and
+    `value`.
+
+    A folded column is a whole expression over exactly one column, which is
+    DuckDB's rule, and it is named by its alias or, without one, by that
+    column, so `jan + 1` is still called `jan`.
+
+    Args:
+        ast: The arenas.
+        statement: The `STMT_UNPIVOT`.
+        catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names a folded
+            expression with no alias.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: Filled in with what the table reference put in reach.
+        ctes: The CTE names in reach.
+
+    Returns:
+        The node the statement produces.
+
+    Raises:
+        If it folds nothing, writes more than one value column, or folds an
+        expression that reads other than one column or that this does not
+        lower.
+    """
+    var node = ast.stmts[Int(statement)]
+    var folded = ast.items(node.children)
+    if len(folded) == 0:
+        raise Error("an UNPIVOT needs a column to fold")
+    if ast.length(node.b) > 1:
+        raise Error(
+            "firepanda lowers an UNPIVOT into one value column so far, and"
+            " this one names more than one"
+        )
+    var source = _source(
+        ast, node.a, catalog, grammar, plan, sources, scope, ctes
+    )
+    var walk = _Walk()
+    var labels = List[Int](capacity=len(folded))
+    var values = List[Int](capacity=len(folded))
+    var read = List[String]()
+    for i in range(len(folded)):
+        var item = ast.stmts[Int(folded[i])]
+        var value = _lower_expr(ast, item.a, plan, walk, scope, False)
+        var names = plan.exprs.names(value)
+        if len(names) != 1:
+            raise Error(
+                String(
+                    (
+                        "UNPIVOT clause must contain exactly one column, and"
+                        " expression "
+                    ),
+                    i + 1,
+                    " reads ",
+                    len(names),
+                )
+            )
+        read.append(fold(names[0]))
+        var label = names[0].copy()
+        if item.payload != 0:
+            label = String(ast.text(item.payload))
+        labels.append(plan.exprs.literal(Value(label^)))
+        values.append(value)
+
+    var name = String("name")
+    if node.payload != 0:
+        name = String(ast.text(node.payload))
+    var called = String("value")
+    if ast.length(node.b) == 1:
+        called = String(ast.text(ast.at(node.b, 0)))
+
+    var lists = List[Int]()
+    lists.append(plan.exprs.call("unnest", labels^, True))
+    lists.append(plan.exprs.call("unnest", values^, True))
+    var at = plan.unnest(
+        source.at, lists^, ["__unpivot_name", "__unpivot_value"]
+    )
+    at = plan.filter(
+        at,
+        plan.exprs.call(
+            "is_not_null", [plan.exprs.column("__unpivot_value")], True
+        ),
+    )
+
+    var outputs = List[Int]()
+    var output_names = List[String]()
+    for i in range(len(source.schema)):
+        var kept = String(source.schema[i].name)
+        if fold(kept) in read:
+            continue
+        if source.origin[i] != UNBOUND:
+            outputs.append(plan.exprs.column_of(source.origin[i], kept.copy()))
+        else:
+            outputs.append(plan.exprs.column(kept.copy()))
+        output_names.append(kept^)
+    outputs.append(plan.exprs.column("__unpivot_name"))
+    output_names.append(name^)
+    outputs.append(plan.exprs.column("__unpivot_value"))
+    output_names.append(called^)
+    return plan.project(at, outputs^, output_names^)
+
+
 def _subquery(
     ast: Ast,
     at: UInt32,
@@ -7149,7 +7271,8 @@ def _combine(
     orders: List[UInt32],
     mut ordered: List[Int],
 ) raises -> Int:
-    """Lowers one query body: a block, a `VALUES`, or a set operation over two.
+    """Lowers one query body: a block, a `VALUES`, an `UNPIVOT`, or a set
+    operation over two.
 
     A set operation nests rather than flattening. `a EXCEPT b EXCEPT c` and
     `a EXCEPT (b EXCEPT c)` are different answers, so the left leaning shape the
@@ -7158,7 +7281,8 @@ def _combine(
 
     Args:
         ast: The arenas.
-        body: The `STMT_QUERY`, `STMT_VALUES` or `STMT_SET_OPERATION`.
+        body: The `STMT_QUERY`, `STMT_VALUES`, `STMT_UNPIVOT` or
+            `STMT_SET_OPERATION`.
         catalog: What the table names are resolved against.
         grammar: A loaded grammar, for the printer that names an output
             column the query did not name.
@@ -7230,6 +7354,8 @@ def _combine(
         return plan.setop([left, right], read[0], read[1])
     if node.kind == STMT_VALUES:
         return _values(ast, body, plan)
+    if node.kind == STMT_UNPIVOT:
+        return _unpivot(ast, body, catalog, grammar, plan, sources, scope, ctes)
     return _block(
         ast,
         body,
