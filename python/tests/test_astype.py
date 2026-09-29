@@ -236,10 +236,6 @@ def test_a_name_nothing_answers_to_is_a_type_error(firepanda: ModuleType) -> Non
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("Int64", "nullable"),
-        ("UInt8", "nullable"),
-        ("Float32", "nullable"),
-        ("boolean", "nullable"),
         ("U", "no type that holds anything"),
         ("unicode", "no type that holds anything"),
         ("str_", "no type that holds anything"),
@@ -578,8 +574,11 @@ def test_a_constructor_dtype_that_does_not_exist_refuses(firepanda: ModuleType) 
     """The same resolution, so the same message, rather than a second table."""
     with pytest.raises(TypeError, match="not understood"):
         firepanda.Series(WHOLE, dtype="nonsense")
-    with pytest.raises(NotImplementedError, match="nullable"):
-        firepanda.DataFrame({"a": WHOLE}, dtype="Int64")
+
+
+def test_a_constructor_takes_a_masked_type_for_every_column(firepanda: ModuleType) -> None:
+    """pandas' capital `Int64` goes to each column, as `astype` would take it."""
+    assert str(firepanda.DataFrame({"a": WHOLE}, dtype="Int64")["a"].dtype) == "Int64"
 
 
 def test_a_cast_to_the_type_it_already_is_still_answers_a_new_column(

@@ -241,7 +241,7 @@ def test_spearman_against_a_frame_is_spearman_of_each_pair(firepanda: ModuleType
         assert answer[name] == pytest.approx(expected)
 
 
-def test_whole_floats_with_a_gap_stay_floats(firepanda: ModuleType) -> None:
-    """pandas makes this its nullable `Int64`; a whole number column here takes no gap."""
+def test_whole_floats_with_a_gap_become_masked_whole_numbers(firepanda: ModuleType) -> None:
+    """pandas makes this its masked `Int64`, and so does firepanda, the gap kept as `NA`."""
     column = firepanda.Series([1.0, None]).convert_dtypes()
-    assert str(column.dtype) == "float64"
+    assert str(column.dtype) == "Int64"

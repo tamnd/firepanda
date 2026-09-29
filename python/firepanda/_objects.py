@@ -33,6 +33,10 @@ A column pandas backs with Arrow, an `ArrowDtype` column, carries the letter
 `A` instead, then the Arrow type written as pyarrow writes it and U+0002, and
 then the value. The type moves with every cell, so a column keeps it through
 anything that moves rows, and its gaps read as `NA`. Document 98 describes it.
+
+A column of one of pandas' masked types, such as `Int64` or `boolean`, carries
+the letter `M` the same way, then the type's name and U+0002, and its gaps read
+as `NA` too. Document 99 describes it.
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ _CLOSE = {"[": "]", "(": ")"}
 _KINDS = frozenset("sibftdnp[(")
 _SPELLINGS = frozenset("NT")
 _ARROW = "A"
+_MASKED = "M"
 _TYPE_END = "\x02"
 _ARROW_TYPES: dict[str, Any] = {}
 """Each Arrow type a cell was written with, by the text the cell carries."""
@@ -151,7 +156,7 @@ def _start(text: str) -> int:
         return 1
     if text[1] in _SPELLINGS:
         return 2 if len(text) >= 4 and text[2] in _KINDS else 0
-    if text[1] == _ARROW:
+    if text[1] in (_ARROW, _MASKED):
         at = text.find(_TYPE_END)
         return at + 1 if at > 1 and len(text) > at + 2 and text[at + 1] in _KINDS else 0
     return 0
@@ -182,6 +187,24 @@ def arrow_type(text: Any) -> Any:
 def arrow_type_of(inner: Any) -> Any:
     """The Arrow type of an extension column pandas would back with Arrow, or None."""
     return arrow_type(_first(inner))
+
+
+def masked_cells(values: Any, name: str) -> list[Any]:
+    """Every value of a list as the cells of a column of one masked type, a gap for None."""
+    head = MARK + _MASKED + name + _TYPE_END
+    return [None if value is None else head + _written(value) for value in values]
+
+
+def masked_name(text: Any) -> str | None:
+    """The masked type a written cell carries, such as `Int64`, or None when it carries none."""
+    if not is_cell(text) or text[1] != _MASKED:
+        return None
+    return text[2 : text.find(_TYPE_END)]
+
+
+def masked_name_of(inner: Any) -> str | None:
+    """The masked type of an extension column, or None for any other column."""
+    return masked_name(_first(inner))
 
 
 def values(texts: list[Any]) -> list[Any]:
@@ -223,7 +246,7 @@ def spelling_of(inner: Any) -> str | None:
 def gap_of(inner: Any) -> Any:
     """What a gap of an object column reads as: None, NaN or NaT."""
     first = _first(inner)
-    if arrow_type(first) is not None:
+    if arrow_type(first) is not None or masked_name(first) is not None:
         from ._na import NA
 
         return NA

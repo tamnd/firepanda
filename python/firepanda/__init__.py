@@ -54,6 +54,19 @@ from ._expression import col
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._frequency import infer_freq
 from ._interval import Interval
+from ._masked import (
+    BooleanDtype,
+    Float32Dtype,
+    Float64Dtype,
+    Int8Dtype,
+    Int16Dtype,
+    Int32Dtype,
+    Int64Dtype,
+    UInt8Dtype,
+    UInt16Dtype,
+    UInt32Dtype,
+    UInt64Dtype,
+)
 from ._multi import MultiIndex
 from ._na import NA, IndexSlice
 from ._normalize import json_normalize
@@ -97,6 +110,7 @@ from .offsets import DateOffset
 __all__ = [
     "NA",
     "ArrowDtype",
+    "BooleanDtype",
     "Categorical",
     "CategoricalDtype",
     "CategoricalIndex",
@@ -104,9 +118,15 @@ __all__ = [
     "DateOffset",
     "DatetimeIndex",
     "Flags",
+    "Float32Dtype",
+    "Float64Dtype",
     "Grouper",
     "Index",
     "IndexSlice",
+    "Int8Dtype",
+    "Int16Dtype",
+    "Int32Dtype",
+    "Int64Dtype",
     "Interval",
     "MultiIndex",
     "NaT",
@@ -116,6 +136,10 @@ __all__ = [
     "Timedelta",
     "TimedeltaIndex",
     "Timestamp",
+    "UInt8Dtype",
+    "UInt16Dtype",
+    "UInt32Dtype",
+    "UInt64Dtype",
     "__version__",
     "api",
     "bdate_range",
