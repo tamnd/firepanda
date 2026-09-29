@@ -195,6 +195,41 @@ struct Dialect(Movable):
         """
         var ast = Ast()
         var statement = self.rules.parse_statement(sql, self.grammar, ast)
+        return self.run_ast(ast, statement, catalog)
+
+    def check_ast(self, ast: Ast, statement: UInt32, catalog: Catalog) raises:
+        """Lowers and binds a transformed query without running it.
+
+        Args:
+            ast: The arenas the transform filled.
+            statement: The query's root statement.
+            catalog: The names the query is allowed to say.
+
+        Raises:
+            Error: If the query does not lower or does not bind.
+        """
+        var built = lower(ast, statement, catalog, self.grammar, self.registry)
+        _ = bind(built.plan, built.root, built.sources)
+
+    def run_ast(
+        self, ast: Ast, statement: UInt32, catalog: Catalog
+    ) raises -> DataFrame:
+        """Runs a query the transform has already built.
+
+        `run` is this after a parse, and the statements in `ddl.mojo` call it
+        with the query a `CREATE TABLE ... AS` or an `INSERT` carries.
+
+        Args:
+            ast: The arenas the transform filled.
+            statement: The query's root statement.
+            catalog: The names the query is allowed to say.
+
+        Returns:
+            The frame the query produces.
+
+        Raises:
+            Error: As `run` does.
+        """
         var built = lower(ast, statement, catalog, self.grammar, self.registry)
 
         # Binding before the optimizer rather than leaving it to the passes, so
