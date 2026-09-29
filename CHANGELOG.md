@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: firepanda.testing, with assert_series_equal, assert_frame_equal and assert_index_equal
+
+A test suite written against pandas imports `pandas.testing` first, and firepanda had no such module, so every such suite failed on its import line. `firepanda.testing` has pandas' four assertions with pandas' keywords and defaults. Each check runs in pandas' order and raises pandas' message, so a failing test points at the same place under either library: the length, the index, the dtype, the values with the share that differ and the first position that does, the gaps of a text, masked or date column before its values, the name, and for a frame the shape, the columns and then each column by its position and label.
+
 ### Added: Series.list and Series.struct read off the class answer the accessor class
 
 pandas answers the accessor class for `Series.list` and `Series.struct`, the way it does for `Series.str`, so a program can read the accessor's members without a column. firepanda answered a property object there, which is not callable, so both names now go through the same descriptor as `str` and `dt`, and the accessors take `data=None` as pandas' do.
