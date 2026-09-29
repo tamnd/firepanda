@@ -447,7 +447,16 @@ class MultiIndex:
         tail = f"names={self._names!r}" if named else ""
         if not len(self):
             return f"MultiIndex([], {tail})"
-        rows = [repr(row) for row in self]
+        # Each value right aligned to the widest at its place, which is pandas' `_justify`.
+        parts = [[repr(value) for value in row] for row in self]
+        widths = [max(len(row[at]) for row in parts) for at in range(len(parts[0]))]
+        rows = [
+            "("
+            + ", ".join(text.rjust(width) for text, width in zip(row, widths, strict=True))
+            + ("," if len(row) == 1 else "")
+            + ")"
+            for row in parts
+        ]
         pad = " " * len("MultiIndex([")
         body = f",\n{pad}".join(rows)
         return f"MultiIndex([{body}],\n{' ' * len('MultiIndex(')}{tail})"

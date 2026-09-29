@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.compare, and stack over columns with levels
+
+`DataFrame.compare` is new and answers the differing values of two frames with columns named by the pair of the column and the side, or with `align_axis=0` rows named by the pair of the label and the side, with `keep_shape`, `keep_equal` and `result_names` as in pandas. `stack` over a frame whose columns have levels moves the asked levels to the rows, keeping the order the labels first appear and reading a missing pair as missing, as pandas' new stacking does. `droplevel`, `swaplevel` and `reorder_levels` with `axis=1` now work on the column levels. The repr of a `MultiIndex` right aligns each value to the widest at its place, as pandas prints it.
+
 ### Added: Group by answers with two levels of column labels
 
 `DataFrameGroupBy.agg` takes a list of reductions, and a mapping whose values are lists, and names each column by the pair of the column and the reduction, as pandas does, with lambdas numbered `<lambda_0>` and on and a repeated name raising `SpecificationError`. `DataFrameGroupBy.describe` and `DataFrameGroupBy.ohlc` are new and answer the same shape. Under `as_index=False` the keys come out as columns with an empty lower level. A header cut by `max_columns` now prints the whole label of the first column past the dots, as pandas does.

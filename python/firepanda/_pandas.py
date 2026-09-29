@@ -7993,7 +7993,7 @@ def _relevelled(owner: Any, axis: Any, change: Any, verb: str | None = None) -> 
     frame = isinstance(owner, DataFrame)
     owner_type = "DataFrame" if frame else "Series"
     number = _align_axis(axis, owner_type, (0, 1) if frame else (0,)) or 0
-    index = owner.index if number == 0 else _shown_names(owner)
+    index = owner.index if number == 0 else owner.columns
     if verb is not None and not isinstance(index, MultiIndex):
         raise TypeError(f"Can only {verb} levels on a hierarchical axis.")
     return _with_axis(owner, change(index), number)
@@ -9374,6 +9374,87 @@ class DataFrameMixin(_Carries):
             counts = counts.set_axis(MultiIndex.from_arrays([counts.index], names=names))
         return counts.rename("proportion" if normalize else "count")
 
+    def compare(
+        self,
+        other: Any,
+        align_axis: Any = 1,
+        keep_shape: bool = False,
+        keep_equal: bool = False,
+        result_names: Any = ("self", "other"),
+    ) -> DataFrame:
+        """The values that differ from another frame's, each column's two sides by each other.
+
+        Each column is `Series.compare` of that column, so two missing values
+        are the same and a value that is the same on both sides reads as
+        missing unless `keep_equal`. A row or a column where nothing differs is
+        left out unless `keep_shape`. The columns are named by the pair of the
+        column and the side, or with `align_axis=0` the sides take turns down
+        the rows and the rows are named by the pair of the label and the side.
+
+        Raises:
+            ValueError: When the labels differ, with pandas' words.
+            TypeError: For result names that are not a tuple, with pandas' words.
+        """
+        from ._frame import DataFrame
+        from ._multi import MultiIndex
+
+        if not isinstance(result_names, tuple):
+            raise TypeError(
+                f"Passing 'result_names' as a {type(result_names)} is not "
+                "supported. Provide 'result_names' as a tuple instead."
+            )
+        if not isinstance(other, DataFrame):
+            raise TypeError(f"Can only compare DataFrame objects, not {type(other).__name__}")
+        names = _shown_names(self)
+        if names != _shown_names(other) or not self.index.equals(other.index):
+            raise InvalidArgumentError(
+                "Can only compare identically-labeled (both index and columns) DataFrame objects"
+            )
+        axis = _align_axis(align_axis, "DataFrame", (0, 1))
+        pairs = {
+            name: self[name].compare(
+                other[name], keep_shape=True, keep_equal=True, result_names=("a", "b")
+            )
+            for name in names
+        }
+        differs = {
+            name: [
+                not (_missing(mine) and _missing(theirs)) and mine != theirs
+                for mine, theirs in zip(pair["a"].tolist(), pair["b"].tolist(), strict=True)
+            ]
+            for name, pair in pairs.items()
+        }
+        rows = list(range(len(self)))
+        if not keep_shape:
+            names = [name for name in names if any(differs[name])]
+            rows = [row for row in rows if any(differs[name][row] for name in names)]
+        if not keep_equal:
+            pairs = {
+                name: self[name].compare(
+                    other[name], keep_shape=True, result_names=("a", "b")
+                )
+                for name in names
+            }
+        first, second = result_names
+        if axis == 1:
+            columns = {}
+            for name in names:
+                columns[(name, first)] = pairs[name]["a"].take(rows)
+                columns[(name, second)] = pairs[name]["b"].take(rows)
+            return DataFrame(columns, index=self.index.take(rows))
+        mine = DataFrame({name: pairs[name]["a"].take(rows) for name in names})
+        theirs = DataFrame({name: pairs[name]["b"].take(rows) for name in names})
+        count = len(rows)
+        order = [place + side * count for place in range(count) for side in (0, 1)]
+        stacked = concat([mine, theirs], ignore_index=True).take(order)
+        labels = self.index.take(rows).tolist()
+        tuples = [
+            (*(label if isinstance(label, tuple) else (label,)), side)
+            for label in labels
+            for side in (first, second)
+        ]
+        return stacked.set_axis(MultiIndex.from_tuples(tuples), axis=0)
+
     def stack(
         self,
         level: Any = -1,
@@ -9410,6 +9491,8 @@ class DataFrameMixin(_Carries):
                 "stack with future_stack=False is the older stacking pandas is removing,"
                 " and firepanda has only the new one"
             )
+        if _column_depth(_shown_names(self)) > 1:
+            return _stacked_levels(self, level)
         if level not in (-1, 0):
             raise IndexError(
                 f"Too many levels: Index has only 1 level, not {level + 1 if level > 0 else 2}"
@@ -29298,6 +29381,68 @@ def _text_heads(frame: Any, labels: list[Any]) -> list[str]:
     if str(index.dtype).startswith(("datetime", "timedelta")):
         return [text.strip() for text in _text_labels(index, False, None)]
     return [_text_head(label) for label in labels]
+
+
+def _stacked_levels(frame: Any, level: Any) -> Any:
+    """`stack` of a frame whose columns have levels, as pandas' `stack_v3` does it.
+
+    The asked levels of the column labels move to the end of the row labels,
+    each row followed by one row for each value of them in the order the
+    values first appear. The columns left are the other levels, again in the
+    order they first appear, and a pair that has no column reads as missing.
+    Stacking every level answers a series of the columns that exist.
+
+    Raises:
+        IndexError: For a level past the ones the columns have, in pandas' words.
+    """
+    from ._frame import DataFrame, Series
+    from ._multi import MultiIndex
+
+    labels = _shown_names(frame)
+    depth = _column_depth(labels)
+    asked = list(level) if isinstance(level, (list, tuple)) else [level]
+    places = []
+    for each in asked:
+        if not isinstance(each, int) or not -depth <= each < depth:
+            raise IndexError(f"Too many levels: Index has only {depth} levels, not {each + 1}")
+        places.append(each % depth)
+    rows = [row if isinstance(row, tuple) else (row,) for row in frame.index.tolist()]
+    names = [*frame.index.names, *([None] * len(places))]
+    if sorted(set(places)) == list(range(depth)):
+        values = concat([frame[label] for label in labels], ignore_index=True)
+        height = len(frame)
+        order = [c * height + r for r in range(height) for c in range(len(labels))]
+        tuples = [
+            (*row, *(label[at] for at in places)) for row in rows for label in labels
+        ]
+        stacked = Series(values.take(order).tolist(), dtype=values.dtype)
+        return stacked.set_axis(MultiIndex.from_tuples(tuples, names=names))
+    rest = [at for at in range(depth) if at not in places]
+
+    def part(label: tuple[Any, ...], at: list[int]) -> Any:
+        picked = tuple(label[position] for position in at)
+        return picked[0] if len(picked) == 1 else picked
+
+    keys = list(dict.fromkeys(part(label, places) for label in labels))
+    kept = list(dict.fromkeys(part(label, rest) for label in labels))
+    held = {(part(label, places), part(label, rest)): label for label in labels}
+    height = len(frame)
+    pieces = []
+    for key in keys:
+        columns = {}
+        for name in kept:
+            label = held.get((key, name))
+            if label is None:
+                columns[name] = Series([float("nan")] * height, dtype="float64")
+            else:
+                columns[name] = frame[label].reset_index(drop=True)
+        pieces.append(DataFrame(columns))
+    joined = concat(pieces, ignore_index=True)
+    order = [k * height + r for r in range(height) for k in range(len(keys))]
+    tuples = [
+        (*row, *(key if len(places) > 1 else (key,))) for row in rows for key in keys
+    ]
+    return joined.take(order).set_axis(MultiIndex.from_tuples(tuples, names=names), axis=0)
 
 
 def _text_level_heads(labels: list[Any]) -> list[list[str]]:
