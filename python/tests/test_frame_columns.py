@@ -158,7 +158,61 @@ def test_select_dtypes_refuses_a_word_on_both_sides(firepanda):
 
 def test_select_dtypes_says_so_when_the_type_is_one_firepanda_has_not_got(firepanda):
     with pytest.raises(NotImplementedError):
-        made(firepanda).select_dtypes(include="object")
+        made(firepanda).select_dtypes(include="complex128")
+
+
+def masked(lib):
+    """A frame with the nullable types, an object column and a text column beside the numpy ones."""
+    frame = lib.DataFrame({"i": [1, 2], "f": [1.5, 2.0], "b": [True, False], "s": ["x", "y"]})
+    return frame.assign(
+        I=frame["i"].astype("Int64"),
+        U=frame["i"].astype("UInt8"),
+        F=frame["f"].astype("Float64"),
+        B=frame["b"].astype("boolean"),
+        o=frame["s"].astype(object),
+    )
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "number",
+        "integer",
+        "signedinteger",
+        "unsignedinteger",
+        "floating",
+        "bool",
+        "boolean",
+        "Int64",
+        "UInt8",
+        "Int8",
+        "Float64",
+        "int",
+        "float",
+        "int64",
+        "uint8",
+        "object",
+        "O",
+        object,
+        "string",
+        "str",
+        str,
+    ],
+)
+def test_select_dtypes_reads_the_nullable_and_object_columns_as_pandas_does(firepanda, word):
+    for side in ("include", "exclude"):
+        mine = masked(firepanda).select_dtypes(**{side: word})
+        them = masked(pd).select_dtypes(**{side: word})
+        assert list(mine.columns) == list(them.columns)
+
+
+def test_select_dtypes_reads_a_nullable_name_as_its_numpy_twin(firepanda):
+    with pytest.raises(ValueError, match="include and exclude overlap"):
+        masked(firepanda).select_dtypes(include="Int64", exclude="int64")
+    mine = masked(firepanda).select_dtypes(include="object", exclude="string")
+    assert list(mine.columns) == list(
+        masked(pd).select_dtypes(include="object", exclude="string").columns
+    )
 
 
 def test_truncate_keeps_both_of_the_labels_it_was_given(firepanda):
