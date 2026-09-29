@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: plotting with matplotlib
+
+`Series.plot` and `DataFrame.plot` are pandas' `PlotAccessor`, with every kind pandas draws: line, bar, barh, box, hist, kde, area, pie, scatter and hexbin. `Series.hist`, `DataFrame.hist`, `DataFrame.boxplot`, the groupby `plot`, `hist` and `boxplot`, and the whole `firepanda.plotting` namespace are there too, including `scatter_matrix`, `parallel_coordinates`, `table` and `plot_params`. The matplotlib backend is a port of pandas' own, so a plot draws the same lines, bars, tick labels and legend, in the same colours, and a mistake raises the same error. matplotlib is imported only when a plot is drawn, and the `plotting.backend` option finds third party backends the way pandas does. An object column now hands back the object that was put in it, rather than a copy, for values of a class outside the standard library.
+
 ### Added: sparse columns
 
 `SparseDtype`, `Series.sparse` and `DataFrame.sparse` are implemented. A sparse column answers with pandas' dtype names and the fill value pandas picks for arithmetic, comparisons, `where`, `fillna`, `map`, `astype` and the rest, refuses the reductions pandas refuses with pandas' errors, and the accessors give the fill value, the stored points, the density and the dense column. `DataFrame.__getattr__` now lets an accessor's own error through, as pandas does.

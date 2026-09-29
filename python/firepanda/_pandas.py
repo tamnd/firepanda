@@ -53,6 +53,7 @@ from . import (
     _names,
     _objects,
     _period,
+    _plotting,
     _row_dates,
     _row_formats,
     _sparse,
@@ -32404,3 +32405,20 @@ _ewm = _dense_first(_ewm)
 
 SeriesMixin.sparse = Namespace(_sparse.SparseAccessor)  # type: ignore[attr-defined]
 DataFrameMixin.sparse = Namespace(_sparse.SparseFrameAccessor)  # type: ignore[attr-defined]
+
+# Plotting draws through `_plotting`, which loads matplotlib only when a plot is drawn.
+SeriesMixin.plot = Namespace(_plotting.PlotAccessor)  # type: ignore[attr-defined]
+DataFrameMixin.plot = Namespace(_plotting.PlotAccessor)  # type: ignore[attr-defined]
+SeriesMixin.hist = _plotting.hist_series  # type: ignore[attr-defined]
+DataFrameMixin.hist = _plotting.hist_frame  # type: ignore[attr-defined]
+DataFrameMixin.boxplot = _plotting.boxplot_frame  # type: ignore[attr-defined]
+GroupByMixin.plot = property(_plotting.GroupByPlot)  # type: ignore[attr-defined]
+DataFrameGroupByMixin.boxplot = _plotting.boxplot_frame_groupby  # type: ignore[attr-defined]
+
+
+def _group_hist(self: Any, *args: Any, **kwargs: Any) -> Any:
+    """`grouped.hist`, each group's histogram, as pandas draws them."""
+    return _plotting.GroupByPlot(self)._each(lambda group: group.hist(*args, **kwargs))
+
+
+GroupByMixin.hist = _group_hist  # type: ignore[attr-defined]
