@@ -12080,6 +12080,56 @@ class DataFrameMixin(_Carries):
 
         to_feather(self, path, **kwargs)
 
+    def to_stata(
+        self,
+        path: Any,
+        *,
+        convert_dates: Any = None,
+        write_index: bool = True,
+        byteorder: str | None = None,
+        time_stamp: Any = None,
+        data_label: str | None = None,
+        variable_labels: Any = None,
+        version: int | None = 114,
+        convert_strl: Any = None,
+        compression: Any = "infer",
+        storage_options: Any = None,
+        value_labels: Any = None,
+    ) -> None:
+        """Writes the frame as a Stata dta file, byte for byte as pandas writes it.
+
+        Args:
+            path: A path or a binary handle.
+            convert_dates: Column to Stata date format, such as `{"t": "tc"}`.
+            write_index: Whether to write the row labels as a column.
+            byteorder: `"<"`, `">"`, `"little"` or `"big"`, native by default.
+            time_stamp: The moment the header records, now by default.
+            data_label: The label of the whole file, up to 80 characters.
+            variable_labels: Column to label.
+            version: 114, 117, 118, 119, or None for 118 or 119 by width.
+            convert_strl: Columns to store as long strings, from version 117.
+            compression: As pandas names it, or inferred from the path.
+            storage_options: Refused for local files, as pandas refuses them.
+            value_labels: Column to a mapping from number to label.
+        """
+        from ._stata_write import to_stata
+
+        to_stata(
+            self,
+            path,
+            convert_dates=convert_dates,
+            write_index=write_index,
+            byteorder=byteorder,
+            time_stamp=time_stamp,
+            data_label=data_label,
+            variable_labels=variable_labels,
+            version=version,
+            convert_strl=convert_strl,
+            compression=compression,
+            storage_options=storage_options,
+            value_labels=value_labels,
+        )
+
     def to_orc(
         self,
         path: Any = None,
