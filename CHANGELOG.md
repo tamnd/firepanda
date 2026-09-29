@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: dt.to_pydatetime, str.encode, str.decode and DataFrame.to_records
 
 `dt.to_pydatetime` answers an object column of Python datetimes with NaT for a gap, as pandas 3 does. `str.encode` answers an object column of bytes and `str.decode` reads bytes back as text, with anything that is not bytes as a gap. `DataFrame.to_records` answers a numpy record array with the row labels first, named and typed as pandas names and types them, including `column_dtypes` and `index_dtypes`.
+### Added: SQL ASOF RIGHT and FULL joins
+
+`ASOF RIGHT JOIN` and `ASOF FULL JOIN` now lower, where they used to be refused. As in DuckDB, each left row still takes the nearest right row, and a right row no left row took comes out once more at the end with the left side's columns null. A full one also keeps a left row with no match, as `ASOF LEFT JOIN` does. With `USING`, a right one hands out the right side's values of the named columns, as any right join does. A full one with `USING` is refused by name, as every full `USING` join is so far.
 
 ### Added: nested Arrow columns read with pandas' numbers
 
@@ -19,7 +22,6 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: explode, and nested Arrow columns read as object columns
 
 `Series.explode` and `DataFrame.explode` spread each list, tuple or set over rows of its own and repeat the row labels, with `ignore_index` and several columns at once, and refuse an empty, repeated or mismatched list of columns as pandas does. `DataFrame.from_arrow` reads a table with list, map or struct columns by holding each nested column as an object column of lists and dicts, where it used to refuse the whole table.
-
 ### Added: SQL LEFT JOIN LATERAL
 
 `LEFT JOIN LATERAL (...) ON true` now lowers, where it used to be refused. A left row the subquery finds nothing for is kept once, with nulls where the subquery's columns would be, as in DuckDB. The subquery has to be correlated by equalities alone, its select list may not read the left side, and the `ON` has to be `true`; anything else is refused by name. A right or full join to a `LATERAL` is refused as before.

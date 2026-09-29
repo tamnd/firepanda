@@ -280,13 +280,39 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime ASOF_LEFT = Self(10)
     """An ASOF join that keeps a left row with no match, the right side null."""
 
+    comptime ASOF_RIGHT = Self(11)
+    """An ASOF join that also hands out every right row no left row took, the
+    left side null."""
+
+    comptime ASOF_OUTER = Self(12)
+    """An ASOF join that keeps both: a left row with no match and a right row
+    no left row took."""
+
     def is_asof(self) -> Bool:
-        """Reports whether this is one of the two ASOF joins.
+        """Reports whether this is one of the four ASOF joins.
 
         Returns:
-            True for ASOF and ASOF_LEFT.
+            True for ASOF, ASOF_LEFT, ASOF_RIGHT and ASOF_OUTER.
         """
-        return self == Self.ASOF or self == Self.ASOF_LEFT
+        return (
+            self == Self.ASOF
+            or self == Self.ASOF_LEFT
+            or self == Self.ASOF_RIGHT
+            or self == Self.ASOF_OUTER
+        )
+
+    def keeps_unmatched_right(self) -> Bool:
+        """Reports whether a right row nothing matched still produces a row.
+
+        Returns:
+            True for right, outer, ASOF right and ASOF outer.
+        """
+        return (
+            self == Self.RIGHT
+            or self == Self.OUTER
+            or self == Self.ASOF_RIGHT
+            or self == Self.ASOF_OUTER
+        )
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
@@ -323,10 +349,11 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
         """Reports whether a left row with no match still produces a row.
 
         Returns:
-            True for left, outer, anti, mark and ASOF left.
+            True for left, outer, anti, mark, ASOF left and ASOF outer.
         """
         return (
             self == Self.ASOF_LEFT
+            or self == Self.ASOF_OUTER
             or self == Self.LEFT
             or self == Self.OUTER
             or self == Self.ANTI
@@ -359,6 +386,10 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("asof")
         elif self == Self.ASOF_LEFT:
             writer.write("asof left")
+        elif self == Self.ASOF_RIGHT:
+            writer.write("asof right")
+        elif self == Self.ASOF_OUTER:
+            writer.write("asof outer")
         else:
             writer.write("cross")
 

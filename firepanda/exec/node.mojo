@@ -5794,7 +5794,10 @@ struct AsOf(Movable):
     lookup of its group and one binary search inside it.
 
     An inner ASOF join drops a left row that found nothing and a left one keeps
-    it with the right side's columns null.
+    it with the right side's columns null. A right and a full one also note
+    which right rows were taken as chunks go past, the way a right `Join` does,
+    and `finish` hands out the ones nothing took with the left side's columns
+    null. Those two are not row local.
 
     The values are compared as int64, which covers every integer and every date
     and time type, unless either side is a float, and then both are compared as
@@ -5833,6 +5836,19 @@ struct AsOf(Movable):
     var keep: Bool
     """Whether a left row with no match is kept, which is ASOF LEFT JOIN."""
 
+    var keep_right: Bool
+    """Whether a right row no left row took is handed out at the end, which is
+    ASOF RIGHT JOIN, or ASOF FULL JOIN with `keep`."""
+
+    var _left: Schema
+    """The chunk's columns, which `finish` writes nulls of."""
+
+    var _hit: List[Bool]
+    """One flag per right row, set once a left row takes it."""
+
+    var _drained: Bool
+    """Whether `finish` has handed out the rows nothing took."""
+
     var _groups: Dict[String, Int]
     """Each key tuple on the right side, packed, and the group it numbers."""
 
@@ -5861,6 +5877,7 @@ struct AsOf(Movable):
         backward: Bool,
         strict: Bool,
         keep: Bool,
+        keep_right: Bool = False,
     ) raises:
         """Takes the right side and the condition in.
 
@@ -5873,6 +5890,7 @@ struct AsOf(Movable):
             backward: Whether the match is at or before the left value.
             strict: Whether an equal value does not match.
             keep: Whether a left row with no match is kept.
+            keep_right: Whether a right row no left row took is kept.
 
         Raises:
             If a column's chunks cannot be stacked, or the two key lists are
@@ -5898,6 +5916,12 @@ struct AsOf(Movable):
         self.backward = backward
         self.strict = strict
         self.keep = keep
+        self.keep_right = keep_right
+        self._left = Schema()
+        self._hit = List[Bool]()
+        if keep_right:
+            self._hit = List[Bool](length=self.height, fill=False)
+        self._drained = False
         self._groups = Dict[String, Int]()
         self._starts = List[Int]()
         self._rows = List[Int]()
@@ -5916,7 +5940,8 @@ struct AsOf(Movable):
 
         Returns:
             Both schemas end to end, the right side's columns nullable when a
-            left row with no match is kept.
+            left row with no match is kept and the chunk's when a right row
+            nothing took is.
 
         Raises:
             If the compared columns are not numbers or dates and times, or an
@@ -5950,7 +5975,11 @@ struct AsOf(Movable):
                 )
         self._floaty = mine.is_float() or theirs.is_float()
         self._build()
+        self._left = Schema(copy=input)
         var out = input^
+        if self.keep_right:
+            for c in range(len(out)):
+                out.fields[c].nullable = True
         for c in range(len(self.side)):
             var field = self.side[c].copy()
             if self.keep:
@@ -6019,6 +6048,15 @@ struct AsOf(Movable):
             else:
                 self._ints.append(values.as_typed_view[DType.int64]()[i])
 
+    def holds_hits(self) -> Bool:
+        """Reports whether this join hands out the right rows nothing took.
+
+        Returns:
+            True for an ASOF right and an ASOF full join, which write a flag
+            per right row as chunks go past and so are not row local.
+        """
+        return self.keep_right
+
     def process(
         self, var chunk: Chunk, spread: Bool = True
     ) raises -> Optional[Chunk]:
@@ -6027,6 +6065,79 @@ struct AsOf(Movable):
         Args:
             chunk: The chunk. Consumed.
             spread: Whether the gathers may hand themselves out to workers.
+
+        Returns:
+            Each kept left row with its match beside it, or nothing when no
+            row is kept.
+
+        Raises:
+            If the join notes the right rows it takes, which `track` does, or
+            if a key cannot be packed or a column cannot be gathered.
+        """
+        if self.holds_hits():
+            raise Error(
+                "asof: a right or a full ASOF join writes which right rows it"
+                " took, so it takes its chunks through `track`"
+            )
+        var none = List[Bool]()
+        return self._match(chunk^, spread, none)
+
+    def track(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Matches one chunk and notes which right rows it took.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            Each kept left row with its match beside it, or nothing when no
+            row is kept.
+
+        Raises:
+            If a key cannot be packed or a column cannot be gathered.
+        """
+        var hits = List[Bool]()
+        swap(hits, self._hit)
+        var out = self._match(chunk^, True, hits)
+        swap(hits, self._hit)
+        return out^
+
+    def finish(mut self) raises -> Optional[Chunk]:
+        """Hands out the right rows no left row took, once.
+
+        Returns:
+            Those rows, with the chunk's columns null, or None when there are
+            none or this is not a right or a full ASOF join.
+
+        Raises:
+            If a gather raises.
+        """
+        if not self.holds_hits() or self._drained:
+            return None
+        self._drained = True
+        var rest = List[Int]()
+        for i in range(len(self._hit)):
+            if not self._hit[i]:
+                rest.append(i)
+        if len(rest) == 0:
+            return None
+        var padded = List[Int](length=len(rest), fill=-1)
+        var out = List[AnyArray](capacity=len(self._left) + len(self.right))
+        for c in range(len(self._left)):
+            out.append(take_any(empty_any(self._left[c].dtype), padded, True))
+        for c in range(len(self.right)):
+            out.append(take_any(self.right[c], rest, True))
+        return Chunk(out^, len(rest))
+
+    def _match(
+        self, var chunk: Chunk, spread: Bool, mut hits: List[Bool]
+    ) raises -> Optional[Chunk]:
+        """Matches every row of the chunk against the right side.
+
+        Args:
+            chunk: The chunk. Consumed.
+            spread: Whether the gathers may hand themselves out to workers.
+            hits: One flag per right row to set for every row a left row
+                takes, or empty to note nothing.
 
         Returns:
             Each kept left row with its match beside it, or nothing when no
@@ -6085,6 +6196,8 @@ struct AsOf(Movable):
                     )
                 if at >= 0:
                     hit = self._rows[at]
+                    if len(hits) > 0:
+                        hits[hit] = True
             if hit >= 0 or self.keep:
                 left_at.append(i)
                 right_at.append(hit)
@@ -8806,7 +8919,7 @@ def node_is_row_local(node: Node) -> Bool:
         or (node.isa[Join]() and not node[Join].holds_hits())
         or node.isa[Settle]()
         or node.isa[Cross]()
-        or node.isa[AsOf]()
+        or (node.isa[AsOf]() and not node[AsOf].holds_hits())
     )
 
 
@@ -9080,6 +9193,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     if node.isa[Cross]():
         return node[Cross].process(chunk^)
     if node.isa[AsOf]():
+        if node[AsOf].holds_hits():
+            return node[AsOf].track(chunk^)
         return node[AsOf].process(chunk^)
     if node.isa[Positional]():
         return node[Positional].process(chunk^)
@@ -9214,6 +9329,8 @@ def node_finish(mut node: Node) raises -> Optional[Chunk]:
         return node[Unique].finish()
     if node.isa[Join]():
         return node[Join].finish()
+    if node.isa[AsOf]():
+        return node[AsOf].finish()
     if node.isa[Positional]():
         return node[Positional].finish()
     return None

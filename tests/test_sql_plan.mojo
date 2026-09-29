@@ -1704,9 +1704,15 @@ def test_an_asof_join_needs_exactly_one_inequality() raises:
         _ = _plan(_asof("t.a >= t.a"))
 
 
-def test_the_asof_joins_not_lowered_yet_say_so() raises:
-    with assert_raises(contains="ASOF RIGHT or FULL"):
-        _ = _plan("SELECT a FROM t ASOF RIGHT JOIN u ON t.a >= u.k")
+def test_an_asof_right_and_full_join_are_kinds_of_their_own() raises:
+    assert_true(
+        "JOIN asof right [a >= k]"
+        in _plan("SELECT a FROM t ASOF RIGHT JOIN u ON t.a >= u.k")
+    )
+    assert_true(
+        "JOIN asof outer [a >= k]"
+        in _plan("SELECT a FROM t ASOF FULL JOIN u ON t.a >= u.k")
+    )
 
 
 def test_each_outer_join_keeps_the_side_its_word_names() raises:
