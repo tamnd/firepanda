@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Period
+
+`pd.Period` is here, a span of time at a frequency, as pandas has it: made from text, a number, a date, a timestamp or its fields, with the same errors for frequencies it does not take. It moves between frequencies with `asfreq`, gives its first and last moments with `to_timestamp`, `start_time` and `end_time`, answers every field pandas answers, writes itself out with `strftime` and its period codes, and adds and subtracts whole steps, offsets and time spans the way pandas does. `Timestamp.to_period` now gives one too.
+
 ### Added: Resampler upsampling
 
 `ffill`, `bfill`, `nearest`, `asfreq` and `interpolate` on a resampler now fill the new bins the way pandas does, on the bin edges pandas picks for `closed` and `label`, with `limit` and `fill_value`. A column picked from the resampler fills within each bin on the original rows, and the methods pandas refuses there, after `on=`, and on a grouped resampler raise pandas' errors. `interpolate(method="time")` now works over dates and spans, `method="index"` reads dates as their counts, and `Series.where` with a condition on a date index no longer fails.
