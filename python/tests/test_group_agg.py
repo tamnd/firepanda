@@ -138,8 +138,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: frame(m).groupby("k").agg(["min", "max"]),
-    lambda m: frame(m).groupby("k").agg({"v": ["min", "max"]}),
     lambda m: frame(m).groupby("k")["v"].agg(["sum", "sum"]),
     lambda m: frame(m).groupby("k").agg("sum", engine="numba"),
     lambda m: frame(m).groupby("k")["v"].agg("sum", 1),
@@ -148,7 +146,7 @@ REFUSED: list[Callable[[Any], Any]] = [
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """A function, two levels of column labels, a repeated name and the engine."""
+    """A repeated name, the engine and arguments for a name."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 

@@ -22008,6 +22008,9 @@ class GroupByMixin[Answer]:
                 out = answer.to_frame(name)
             else:
                 out = out._assigned(name, answer)
+        if not self._as_index and isinstance(names[0], tuple):
+            blank = ("",) * (len(names[0]) - 1)
+            out = out.rename(columns={key: (key, *blank) for key in self._by})
         return out
 
     def _column_group(self, column: str) -> SeriesGroupBy:
@@ -22793,6 +22796,31 @@ class GroupByMixin[Answer]:
         raise NotImplementedError(kind)
 
 
+def _reduction_labels(hows: list[Any]) -> list[str]:
+    """The names pandas gives the columns a list of reductions answers.
+
+    A name is itself and a function is its `__name__`. In a list of more than
+    one, lambdas are numbered `<lambda_0>`, `<lambda_1>` and on, which is what
+    pandas' `maybe_mangle_lambdas` does.
+
+    Raises:
+        SpecificationError: If two reductions answer the same name, as pandas does.
+    """
+    labels = []
+    lambdas = 0
+    for how in hows:
+        label = how if isinstance(how, str) else getattr(how, "__name__", str(how))
+        if label == "<lambda>" and len(hows) > 1:
+            label = f"<lambda_{lambdas}>"
+            lambdas += 1
+        labels.append(label)
+    if len(set(labels)) != len(labels):
+        raise SpecificationError(
+            "Function names must be unique if there is no new column names assigned"
+        )
+    return labels
+
+
 class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
     """The hand written half of `DataFrameGroupBy`.
 
@@ -22879,6 +22907,68 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
     def _column_group(self, column: str) -> SeriesGroupBy:
         """One column of this group by, as `self[column]` gives it."""
         return cast("SeriesGroupBy", self[column])
+
+    def describe(
+        self, percentiles: Any = None, include: Any = None, exclude: Any = None
+    ) -> DataFrame:
+        """What `SeriesGroupBy.describe` gives, a column at a time, under two levels of labels.
+
+        Each column's statistics are named by the pair of the column and the
+        statistic, as pandas names them. The columns of numbers are described
+        when there are any, which is what `DataFrame.describe` picks for each
+        group in pandas. `include` and `exclude` are refused.
+        """
+        _refuse("include", include, "only the columns of numbers are described for now")
+        _refuse("exclude", exclude, "only the columns of numbers are described for now")
+        columns = self._value_columns()
+        numeric = [name for name in columns if _text_numeric(str(self._frame[name].dtype))]
+        return self._levelled(
+            {name: self._column_group(name).describe(percentiles) for name in numeric or columns}
+        )
+
+    def ohlc(self) -> DataFrame:
+        """What `SeriesGroupBy.ohlc` gives, a column at a time, under two levels of labels.
+
+        Raises:
+            DataError: When a column is not numbers, in pandas' words.
+        """
+        columns = self._value_columns()
+        return self._levelled({name: self._column_group(name).ohlc() for name in columns})
+
+    def _levelled(self, parts: dict[Any, DataFrame]) -> DataFrame:
+        """Frames on the same groups set side by side, each column named by its part and itself.
+
+        Args:
+            parts: One frame a column of this group by, keyed by that column.
+
+        Returns:
+            The frame whose columns are the pairs, as pandas labels them.
+        """
+        from ._frame import DataFrame
+
+        out: Any = None
+        for column, part in parts.items():
+            for name in _shown_names(part):
+                if name in self._by:
+                    continue
+                if out is None:
+                    out = part[[name]].rename(columns={name: (column, name)})
+                else:
+                    out = out._assigned((column, name), part[name])
+        if out is None:
+            return DataFrame()
+        if self._as_index:
+            return out
+        # The keys come out as columns named with an empty lower level, as pandas names them.
+        keys = [key for key in self._by if key in _shown_names(next(iter(parts.values())))]
+        if keys:
+            first = next(iter(parts.values()))
+            out = out.set_axis(first.index, axis=0)
+            for place, key in enumerate(keys):
+                out.insert(place, (key, ""), first[key])
+            return out
+        out = out.reset_index()
+        return out.rename(columns={key: (key, "") for key in self._by})
 
     def apply(self, func: Any, *args: Any, include_groups: bool = False, **kwargs: Any) -> Any:
         """Calls `func` once a group on the group's rows less the keys, as `_applied` says.
@@ -23020,20 +23110,25 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             KeyError: If a column is not in the frame, as pandas words it.
         """
         if not isinstance(func, dict):
-            raise NotImplementedError(
-                "agg with a list over a frame is not supported yet, because pandas"
-                " answers it with two levels of column labels"
-            )
+            hows = list(func)
+            labels = _reduction_labels(hows)
+            return [
+                ((name, label), name, how)
+                for name in self._value_columns()
+                for label, how in zip(labels, hows, strict=True)
+            ]
         missing = [name for name in func if name not in _shown_names(self._frame)]
         if missing:
             raise KeyError(f"Label(s) {missing!r} do not exist")
-        for how in func.values():
-            if isinstance(how, (list, tuple)):
-                raise NotImplementedError(
-                    "agg with a list for a column is not supported yet, because"
-                    " pandas answers it with two levels of column labels"
-                )
-        return [(name, name, how) for name, how in func.items()]
+        if not any(isinstance(how, (list, tuple)) for how in func.values()):
+            return [(name, name, how) for name, how in func.items()]
+        # One list among the values names every column by a pair, as pandas does.
+        plan = []
+        for name, hows in func.items():
+            hows = list(hows) if isinstance(hows, (list, tuple)) else [hows]
+            labels = _reduction_labels(hows)
+            plan += [((name, label), name, how) for label, how in zip(labels, hows, strict=True)]
+        return plan
 
     def _named_plan(self, named: dict[str, Any]) -> list[tuple[str, str, Any]]:
         """Keywords of `name=(column, function)`, `pd.NamedAgg` among them.
@@ -29389,7 +29484,12 @@ def _text_table(
         heads = [[str(h)] for h in header]
     elif header and _column_depth(labels) > 1:
         depth = _column_depth(labels)
-        heads = _text_level_heads(labels)
+        # pandas sparsifies the columns left after the cut, so the first one past the dots
+        # prints its whole label.
+        heads = [[] for _ in labels]
+        kept_heads = _text_level_heads([labels[position] for position in kept_cols])
+        for position, head in zip(kept_cols, kept_heads, strict=True):
+            heads[position] = head
     elif header:
         written = _text_heads(frame, labels)
         heads = [
