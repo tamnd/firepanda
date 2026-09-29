@@ -28723,6 +28723,43 @@ def _binned(
     return text.astype("category").cat.set_categories(names, ordered=ordered), edges
 
 
+def _cut_by_intervals(values: Any, column: Any, bins: Any) -> Any:
+    """Each value's interval out of an index of intervals, which pandas' `cut` answers
+    as a category of those intervals, ordered, whatever `labels` says.
+
+    Raises:
+        ValueError: For intervals that overlap, with pandas' words.
+        NotImplementedError: For values that are not a column.
+    """
+    from ._frame import Series
+
+    if not bins.is_non_overlapping_monotonic:
+        raise InvalidArgumentError("Overlapping IntervalIndex is not accepted.")
+    if column is None:
+        raise NotImplementedError(
+            "cut: pandas answers a Categorical for values that are not a column, which"
+            " firepanda does not have, so pass a Series"
+        )
+    numpy = _numpy()
+    kind, closed = str(bins.dtype), bins.closed
+    cells = _objects.interval_cells(_interval.interval_pairs(bins.tolist(), kind), kind)
+    lefts = numpy.asarray(bins.left.tolist(), dtype="float64")
+    rights = numpy.asarray(bins.right.tolist(), dtype="float64")
+    # The one interval a value can be in is the first whose right end is not below it.
+    places = numpy.searchsorted(rights, values, side="right" if closed == "left" else "left")
+    found: list[Any] = [None] * len(values)
+    if cells:
+        at = numpy.minimum(places, len(cells) - 1)
+        low, high = lefts[at], rights[at]
+        above = values >= low if closed in ("left", "both") else values > low
+        below = values <= high if closed in ("right", "both") else values < high
+        inside = (places < len(cells)) & above & below
+        found = [cells[a] if kept else None for a, kept in zip(at, inside, strict=True)]
+    text = Series(found, dtype="str", index=column.index, name=column.name)
+    held = Series._wrap(text._inner.cast("category", True))
+    return held.cat._against(cells, True)
+
+
 def cut(
     x: Any,
     bins: Any,
@@ -28749,6 +28786,9 @@ def cut(
     """
     numpy = _numpy()
     values, column = _cut_values(x, "cut")
+    if isinstance(bins, _interval.IntervalIndex):
+        answer = _cut_by_intervals(values, column, bins)
+        return (answer, bins) if retbins else answer
     if not _list_like(bins):
         edges = _edges_from_count(values, bins, right)
     else:

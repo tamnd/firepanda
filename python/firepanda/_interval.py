@@ -12,8 +12,9 @@ below were measured against pandas 3.0.
 
 A list of intervals of numbers that share `closed` is an interval column,
 held as written cells the way document 102 describes, and `IntervalDtype` and
-`IntervalIndex` are pandas' names for its type and for an index of intervals.
-`interval_range` and intervals of instants or spans are not written yet.
+`IntervalIndex` are pandas' names for its type and for an index of intervals,
+and `interval_range` builds one of evenly spaced numbers. Intervals of instants
+or spans are not written yet.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from typing import Any
 from ._scalars import Timedelta, Timestamp
 from .errors import InvalidArgumentError
 
-__all__ = ["Interval", "IntervalDtype", "IntervalIndex"]
+__all__ = ["Interval", "IntervalDtype", "IntervalIndex", "interval_range"]
 
 _CLOSED = ("right", "left", "both", "neither")
 
@@ -675,3 +676,70 @@ def _plain(value: Any) -> Any:
     if item is not None and type(value).__module__ == "numpy":
         return item()
     return value
+
+
+def _moment(value: Any) -> bool:
+    """Whether an end is an instant or a span, which pandas ranges over by dates."""
+    kinds = (datetime.date, datetime.timedelta, Timestamp, Timedelta)
+    return isinstance(value, kinds) or type(value).__name__ in ("datetime64", "timedelta64")
+
+
+def interval_range(
+    start: Any = None,
+    end: Any = None,
+    periods: Any = None,
+    freq: Any = None,
+    name: Any = None,
+    closed: str = "right",
+) -> IntervalIndex:
+    """Evenly spaced intervals of numbers, which is `pandas.interval_range`.
+
+    Three of `start`, `end`, `periods` and `freq` decide the fourth, and `freq`
+    is one when only two of the others are given. The breaks are whole numbers
+    when every one of the three given is, as pandas makes them.
+
+    Raises:
+        InvalidArgumentError: For other than three of the four, and an end that
+            is not a number, with pandas' words.
+        TypeError: For a count that is not whole and a `freq` that is not a number.
+        NotImplementedError: For instants and spans, which range over dates.
+    """
+    import numpy
+
+    endpoint = start if start is not None else end
+    if _moment(start) or _moment(end):
+        raise NotImplementedError(
+            "interval_range: intervals of instants or spans are not supported yet"
+        )
+    if freq is None and None in (periods, start, end):
+        freq = 1
+    if sum(value is not None for value in (start, end, periods, freq)) != 3:
+        raise InvalidArgumentError(
+            "Of the four parameters: start, end, periods, and freq, exactly three must be specified"
+        )
+    for side, value in (("start", start), ("end", end)):
+        if value is not None and not _number(value):
+            raise InvalidArgumentError(f"{side} must be numeric or datetime-like, got {value}")
+    if isinstance(periods, float) and periods.is_integer():
+        periods = int(periods)
+    if periods is not None and not isinstance(periods, numbers.Integral):
+        raise TypeError(f"periods must be an integer, got {periods}")
+    if freq is not None and not _number(freq):
+        raise TypeError("start, end, freq need to be type compatible")
+    given = [value for value in (start, end, freq) if value is not None]
+    if periods is not None:
+        periods += 1
+    if start is not None and end is not None and freq is not None:
+        breaks = numpy.arange(start, end + (freq * 0.1), freq)
+    else:
+        if periods is None:
+            periods = int((end - start) // freq) + 1
+        elif start is None:
+            start = end - (periods - 1) * freq
+        elif end is None:
+            end = start + (periods - 1) * freq
+        breaks = numpy.linspace(start, end, periods)
+    whole = all(isinstance(value, numbers.Integral) for value in given)
+    if whole and _number(endpoint) and numpy.all(breaks == numpy.round(breaks)):
+        breaks = breaks.astype("int64")
+    return IntervalIndex.from_breaks(breaks, closed=closed, name=name)
