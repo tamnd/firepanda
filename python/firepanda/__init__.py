@@ -36,7 +36,20 @@ from __future__ import annotations
 
 import sys
 
-from . import _attrs, _firepanda, api, arrays, errors, offsets, testing, tseries, util
+from . import (
+    _attrs,
+    _firepanda,
+    api,
+    arrays,
+    compat,
+    core,
+    errors,
+    io,
+    offsets,
+    testing,
+    tseries,
+    util,
+)
 from ._array import array
 from ._arrowtyped import ArrowDtype
 from ._attrs import Flags
@@ -164,7 +177,9 @@ __all__ = [
     "arrays",
     "bdate_range",
     "col",
+    "compat",
     "concat",
+    "core",
     "crosstab",
     "cut",
     "date_range",
@@ -178,6 +193,7 @@ __all__ = [
     "get_option",
     "infer_freq",
     "interval_range",
+    "io",
     "isna",
     "isnull",
     "json_normalize",
