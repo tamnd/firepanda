@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_sql and read_sql over sqlite3
+
+`DataFrame.to_sql`, `Series.to_sql`, `read_sql`, `read_sql_query` and `read_sql_table` work over a sqlite3 connection the way pandas works without SQLAlchemy. Writing gives the same `CREATE TABLE` text and column types, the same index on the row labels, the same `if_exists`, `chunksize`, `dtype` and `method="multi"` handling, and the same row count. Reading types each column the way pandas reads the values sqlite3 hands back, and takes `params`, `index_col`, `parse_dates`, `dtype` and `chunksize`. `read_sql_table` finds the table and then refuses as pandas does without SQLAlchemy. A URI or another kind of connection is refused, and a result column of nothing but NULLs reads as NaN gaps where pandas holds None.
+
 ### Added: A LIMIT inside a LATERAL subquery
 
 `FROM t, LATERAL (SELECT x FROM s WHERE s.k = t.k ORDER BY x DESC LIMIT 1)` now runs, where an `ORDER BY` or a `LIMIT` inside a lateral subquery used to be refused, and so does `LEFT JOIN LATERAL` over one and an `OFFSET`. The rows of each left row are one partition of the subquery's rows on the columns it correlates on, so they are numbered in the order the `ORDER BY` gives and the ones the `LIMIT` and `OFFSET` keep are joined back, which is DuckDB's answer. A limit whose correlation is not equalities alone, or that sits on a fold, is refused by name.
