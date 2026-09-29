@@ -9226,6 +9226,31 @@ class DataFrameMixin(_Carries):
                 out = out._assigned(_names.shown(name), dates)
         return out
 
+    def unstack(self, level: Any = -1, fill_value: Any = None, sort: bool = True) -> Any:
+        """A level of the row labels moved into the column names, the way pandas does it.
+
+        With a MultiIndex each column is unstacked on its own and the columns
+        are named by the pair of the old name and the value of the level, in
+        pandas' order. With flat labels there is no level left for the rows,
+        so pandas answers a series labelled by the column and then the row,
+        one column after another.
+
+        Raises:
+            ValueError: For a pair of labels held twice, in pandas' words.
+            NotImplementedError: Wherever `Series.unstack` refuses.
+        """
+        from ._frame import DataFrame
+        from ._multi import MultiIndex
+
+        if not isinstance(self.index, MultiIndex):
+            names = list(self.columns)
+            return concat([self[name] for name in names], keys=names)
+        parts = [(name, self[name].unstack(level, fill_value, sort)) for name in self.columns]
+        columns = {
+            (name, head): part[head] for name, part in parts for head in part.columns
+        }
+        return DataFrame(columns, index=parts[0][1].index) if parts else DataFrame()
+
     def __getitem__(self, key: Any) -> DataFrame | Series:
         """One column as a series, or several as a frame.
 
@@ -11947,6 +11972,61 @@ class DataFrameMixin(_Carries):
         )
         return _text_written(text, buf, encoding)
 
+    def to_markdown(
+        self,
+        buf: Any = None,
+        *,
+        mode: str = "wt",
+        index: bool = True,
+        storage_options: Any = None,
+        **kwargs: Any,
+    ) -> str | None:
+        """The frame as a Markdown table, written by the optional `tabulate` package as pandas does.
+
+        pandas hands the frame to `tabulate` with the column names as headers,
+        the pipe format and the row labels shown, and so does this, so the table
+        is the one `tabulate` writes for the same values.
+
+        Args:
+            buf: A path or anything with a `write` method, or None for the text.
+            mode: The mode a path is opened in.
+            index: Whether to show the row labels.
+            storage_options: Refused, as pandas refuses them for a local file.
+            **kwargs: Handed to `tabulate.tabulate`.
+
+        Returns:
+            The text when `buf` is None, and None otherwise.
+
+        Raises:
+            ValueError: For `showindex`, which pandas spells `index`.
+            ImportError: When `tabulate` is not installed, in pandas' words.
+        """
+        if "showindex" in kwargs:
+            raise InvalidArgumentError("Pass 'index' instead of 'showindex")
+        kwargs.setdefault("headers", "keys")
+        kwargs.setdefault("tablefmt", "pipe")
+        kwargs.setdefault("showindex", index)
+        try:
+            import tabulate
+        except ImportError:
+            raise ImportError(
+                "`Import tabulate` failed.  Use pip or conda to install the tabulate package."
+            ) from None
+        text = tabulate.tabulate(self, **kwargs)
+        if buf is None:
+            return text
+        if storage_options is not None:
+            raise InvalidArgumentError(
+                "storage_options passed with file object or non-fsspec file path"
+            )
+        buf = os.fspath(buf) if isinstance(buf, os.PathLike) else buf
+        if hasattr(buf, "write"):
+            buf.write(text)
+        else:
+            with open(buf, mode, encoding="utf-8") as handle:
+                handle.write(text)
+        return None
+
     def to_html(
         self,
         buf: Any = None,
@@ -14478,6 +14558,32 @@ class SeriesMixin(_Carries):
             order, names, cells, str(self.dtype), row_name=row_name, fill_value=fill_value
         )
 
+    @classmethod
+    def from_arrow(cls, data: Any) -> Series:
+        """Builds a column from an Arrow array or stream, the way pandas reads one.
+
+        pandas reads the array into its own types, so an integer column with a
+        missing row comes back as float64 with a NaN in the gap, the way
+        `DataFrame.from_arrow` reads a column, and the column has no name.
+
+        Raises:
+            TypeError: For something that speaks neither `__arrow_c_array__`
+                nor `__arrow_c_stream__`, in pandas' words.
+        """
+        import pyarrow as pa
+
+        from ._frame import DataFrame
+
+        if not isinstance(data, pa.Array | pa.ChunkedArray):
+            if not (hasattr(data, "__arrow_c_array__") or hasattr(data, "__arrow_c_stream__")):
+                raise TypeError(
+                    "Expected an Arrow-compatible array-like object (i.e. having an "
+                    "'_arrow_c_array__' or '__arrow_c_stream__' method), got "
+                    f"'{type(data).__name__}' instead."
+                )
+            data = pa.chunked_array(data)
+        return DataFrame.from_arrow(pa.table({"values": data}))["values"].rename(None)
+
     def infer_objects(self, copy: Any = NO_DEFAULT) -> Series:
         """The column itself as a copy, or an object column's values given the type they share."""
         if _objects.is_object(self._inner):
@@ -16034,6 +16140,20 @@ class SeriesMixin(_Carries):
             },
         )
         return _text_written(text, buf, None)
+
+    def to_markdown(
+        self,
+        buf: Any = None,
+        *,
+        mode: str = "wt",
+        index: bool = True,
+        storage_options: Any = None,
+        **kwargs: Any,
+    ) -> str | None:
+        """The column as a Markdown table, written as the table of the column's frame."""
+        return self.to_frame().to_markdown(
+            buf, mode=mode, index=index, storage_options=storage_options, **kwargs
+        )
 
     def to_dict(self, *, into: Any = dict) -> Any:
         """The column as a mapping from row label to value.
