@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas.util
+
+`firepanda.util` has `hash_pandas_object` and `hash_array`, which give the same uint64 row hashes pandas gives for every column kind, index and key, through a SipHash-2-4 port and pandas' bit mixing and row folding. `firepanda.util.version` reads and orders PEP 440 version strings like pandas' copy of `packaging.version`.
+
 ### Added: pandas.tseries
 
 `firepanda.tseries` is now a package with `api`, `frequencies` and `offsets` modules like pandas has. `to_offset` reads the same text as pandas and fails with the same nested words for retired aliases, bad suffixes and unknown names, `get_period_alias` maps offsets to period names, and `guess_datetime_format` is public. `firepanda.pandas` names the package itself.
