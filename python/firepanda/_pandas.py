@@ -42,7 +42,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from . import _config, _firepanda, _names, _row_dates, _row_formats
+from . import _config, _firepanda, _names, _objects, _row_dates, _row_formats
 from ._attrs import Flags, carried, flags_of, hold
 from ._expression import applied
 from ._na import NA
@@ -120,12 +120,227 @@ def _beyond_nanoseconds(column: Series) -> None:
             ) from None
 
 
+def _is_object_dtype(dtype: Any) -> bool:
+    """Whether a dtype argument asks for pandas' object dtype, in any of its spellings."""
+    if dtype is object or (isinstance(dtype, str) and dtype in ("object", "O")):
+        return True
+    return type(dtype).__module__ == "numpy" and getattr(dtype, "kind", None) == "O"
+
+
+def _objectified(column: Any) -> Any:
+    """A series as an object column holding its values, with its labels and its name."""
+    from ._frame import Series
+
+    if _objects.is_object(column._inner):
+        return column
+    values = _values_of(column._inner)
+    return Series(_objects.cells(values), index=column.index, name=column.name)
+
+
+def _from_objects(column: Any, dtype: Any, strictly: bool) -> Any:
+    """An object column converted to another type, through its values.
+
+    Text is every value written with `str`, which is what pandas does, and every
+    other type is the values built as a column of their own and then cast.
+    """
+    from ._frame import Series
+
+    values = _values_of(column._inner)
+    if _named_dtype(dtype) == "string":
+        texts = [None if value is None else str(value) for value in values]
+        return Series(texts, dtype="str", index=column.index, name=column.name)
+    built = Series(values, index=column.index, name=column.name)
+    if _objects.is_object(built._inner):
+        if strictly:
+            raise TypeError(f"an object column of mixed values cannot be converted to {dtype}")
+        return column
+    return built.astype(dtype, errors="raise" if strictly else "ignore")
+
+
+_OBJECT_OPERATORS = {
+    "add": operator.add,
+    "sub": operator.sub,
+    "mul": operator.mul,
+    "truediv": operator.truediv,
+    "floordiv": operator.floordiv,
+    "mod": operator.mod,
+    "pow": operator.pow,
+    "eq": operator.eq,
+    "ne": operator.ne,
+    "lt": operator.lt,
+    "le": operator.le,
+    "gt": operator.gt,
+    "ge": operator.ge,
+}
+
+
+def _holds_objects(column: Any, other: Any) -> bool:
+    """Whether either side of an operator is an object column."""
+    if _objects.is_object(column._inner):
+        return True
+    return isinstance(other, SeriesMixin) and _objects.is_object(other._inner)
+
+
+def _object_operator(column: Any, other: Any, op: str, flip: bool) -> Any:
+    """An operator run one value at a time in Python, which is how pandas runs it on objects.
+
+    A comparison answers flags, with a gap on either side answering False, or
+    True for `!=`. Arithmetic answers an object column, with a gap on either side
+    answering a gap, and a value Python cannot add is Python's own `TypeError`.
+    Two series have to have the same labels in the same order, since lining up
+    labels that differ is written for the typed columns only.
+    """
+    from ._frame import Series
+
+    run = _OBJECT_OPERATORS.get(op)
+    if run is None:
+        raise NotImplementedError(f"the operator {op} is not supported on an object column yet")
+    left = _values_of(column._inner)
+    if isinstance(other, SeriesMixin):
+        if not column.index.equals(other.index):
+            if op in ("eq", "ne", "lt", "le", "gt", "ge"):
+                raise ValueError("Can only compare identically-labeled Series objects")
+            raise NotImplementedError(
+                "an operator between an object column and a series on other labels is not"
+                " supported yet"
+            )
+        right = _values_of(other._inner)
+    elif isinstance(other, (list, tuple)) or _is_numpy(other):
+        right = list(other)
+        if len(right) != len(left):
+            raise ValueError("Lengths must match to compare")
+    else:
+        right = [other] * len(left)
+    compared = op in ("eq", "ne", "lt", "le", "gt", "ge")
+    out = []
+    for a, b in zip(left, right, strict=True):
+        if flip:
+            a, b = b, a
+        if _levels_gap(a) or _levels_gap(b):
+            out.append(op == "ne" if compared else None)
+        else:
+            out.append(bool(run(a, b)) if compared else run(a, b))
+    if compared:
+        return Series(out, index=column.index, name=column.name, dtype="bool")
+    return Series(_objects.cells(out), index=column.index, name=column.name)
+
+
+def _levels_gap(value: Any) -> bool:
+    """Whether a value is a gap: None, NaN, `NaT` or `NA`."""
+    from ._levels import _gap
+
+    return _gap(value)
+
+
+def _objects_in(column: Any, wanted: Any) -> Any:
+    """Whether each value of an object column is one of `wanted`, compared as Python compares."""
+    from ._frame import Series
+
+    if isinstance(wanted, str) or not hasattr(wanted, "__iter__"):
+        raise TypeError(
+            "only list-like objects are allowed to be passed to isin(), you passed a"
+            f" `{type(wanted).__name__}`"
+        )
+    pool = list(wanted.tolist() if hasattr(wanted, "tolist") else wanted)
+    flags = [value is not None and value in pool for value in _values_of(column._inner)]
+    return Series(flags, index=column.index, name=column.name, dtype="bool")
+
+
+def _objects_sorted(column: Any, ascending: Any, na_position: Any, ignore_index: Any) -> Any:
+    """An object column in the order Python sorts its values, which raises on a mix it cannot.
+
+    The sort is stable both ways, so equal values keep the order they came in,
+    which is what pandas' default sort gives.
+    """
+    if na_position not in ("first", "last"):
+        raise ValueError(f"invalid na_position: {na_position}")
+    values = _values_of(column._inner)
+    held = [at for at, value in enumerate(values) if not _levels_gap(value)]
+    gaps = [at for at, value in enumerate(values) if _levels_gap(value)]
+    held.sort(key=values.__getitem__)
+    if not ascending:
+        held.reverse()
+        held = _stable_reversed(held, values)
+    order = gaps + held if na_position == "first" else held + gaps
+    out = column.take(order)
+    return out.reset_index(drop=True) if ignore_index else out
+
+
+def _stable_reversed(order: list[int], values: list[Any]) -> list[int]:
+    """A descending order with each run of equal values back in the order it came in."""
+    out: list[int] = []
+    at = 0
+    while at < len(order):
+        end = at
+        while end + 1 < len(order) and values[order[end + 1]] == values[order[at]]:
+            end += 1
+        out.extend(sorted(order[at : end + 1]))
+        at = end + 1
+    return out
+
+
+def _objects_filled(column: Any, value: Any) -> Any:
+    """An object column with each gap replaced by one value."""
+    from ._frame import Series
+
+    values = [value if _levels_gap(held) else held for held in _values_of(column._inner)]
+    return Series(_objects.cells(values), index=column.index, name=column.name)
+
+
+def _object_texts(column: Any) -> Any:
+    """An object column as the text column the string accessor reads.
+
+    pandas runs a string method on each value that is text and answers a gap for
+    each one that is not, so a value that is not text is a gap here. pandas also
+    runs `len`, indexing and `join` on a list in a cell, and those are not
+    written yet, so a column holding lists is refused rather than read as gaps.
+    """
+    from ._frame import Series
+
+    values = _values_of(column._inner)
+    if any(isinstance(value, (list, tuple)) for value in values):
+        raise NotImplementedError(
+            "the string accessor on an object column of lists is not supported yet"
+        )
+    texts = [value if isinstance(value, str) else None for value in values]
+    return Series(texts, dtype="str", index=column.index, name=column.name)
+
+
+_OBJECT_FOLDS = ("min", "max", "sum", "prod")
+"""The reductions that read an object column's values, where the others count its cells."""
+
+
+def _objects_reduced(column: Any, kind: str, skipna: bool, min_count: int) -> Any:
+    """A reduction over an object column, run in Python as pandas runs it.
+
+    `sum` and `prod` fold with `+` and `*`, so text joins and lists concatenate,
+    and `min` and `max` compare as Python compares. A reduction with nothing to
+    read answers NaN, except an empty `sum` and `prod`, which answer 0 and 1 the
+    way pandas does. The other reductions are refused until they are written.
+    """
+    values = _values_of(column._inner)
+    held = [value for value in values if not _levels_gap(value)]
+    if (not skipna and len(held) < len(values)) or len(held) < min_count:
+        return math.nan
+    if kind in ("min", "max"):
+        return (min if kind == "min" else max)(held) if held else math.nan
+    if not held:
+        return 0 if kind == "sum" else 1
+    run = operator.add if kind == "sum" else operator.mul
+    answer = held[0]
+    for value in held[1:]:
+        answer = run(answer, value)
+    return answer
+
+
 def _values_of(inner: Any) -> list[Any]:
     """A column's or an index's values as pandas hands them out, a moment as a `Timestamp`.
 
     A gap is spelled the way pandas spells it for the column's type, which is
-    `_gapped`.
+    `_gapped`. An object column hands out its values as they were written, a gap as None.
     """
+    if _objects.is_object(inner):
+        return _held_values(inner)
     return _gapped(_held_values(inner), inner.dtype())
 
 
@@ -137,6 +352,10 @@ def _held_values(inner: Any) -> list[Any]:
     """
     dtype = inner.dtype()
     values = list(inner.to_list())
+    if dtype == "string":
+        first = next((value for value in values if value is not None), None)
+        if isinstance(first, str) and first.startswith(_objects.MARK):
+            return _objects.values(values)
     if dtype == "uint64":
         values = [value + (1 << 64) if value is not None and value < 0 else value
                   for value in values]
@@ -182,10 +401,13 @@ def _named_as[Column](column: Column, name: Any) -> Column:
 
 def _cell_of(inner: Any, row: int, column: int | None = None) -> Any:
     """One value out of a series, or out of a frame by row and column position."""
-    if column is None:
-        return _gapped([_outward_one(inner.cell(row), inner.dtype())], inner.dtype())[0]
-    held = inner.column(inner.names()[column])
-    return _gapped([_outward_one(inner.cell(row, column), held.dtype())], held.dtype())[0]
+    held = inner if column is None else inner.column(inner.names()[column])
+    raw = inner.cell(row) if column is None else inner.cell(row, column)
+    if isinstance(raw, str) and raw.startswith(_objects.MARK):
+        return _objects.value(raw)
+    if raw is None and _objects.is_object(held):
+        return None
+    return _gapped([_outward_one(raw, held.dtype())], held.dtype())[0]
 
 
 def _reduced_outward(answer: Any, kind: str, dtype: str) -> Any:
@@ -8038,7 +8260,8 @@ def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
             if na_action == "ignore":
                 answers.append(None)
                 continue
-            value = gap
+            # An object column hands its gap over as it holds it, which is None.
+            value = None if printed == "object" else gap
         answers.append(apply(value))
     kind = getattr(apply, "kind", None)
     numeric = kind is None or re.fullmatch(r"u?int\d+|float\d+|bool", kind)
@@ -8223,6 +8446,15 @@ def _column_to_numpy(column: Any, dtype: Any, na_value: Any) -> Any:
     """
     np = _numpy()
     printed = str(column.dtype)
+    if printed == "object" and dtype is None:
+        values = column.tolist()
+        if na_value is not NO_DEFAULT:
+            values = [na_value if _missing(value) else value for value in values]
+        # Filled one at a time, so a list in a cell stays one cell rather than a second axis.
+        answer = np.empty(len(values), dtype=object)
+        for at, value in enumerate(values):
+            answer[at] = value
+        return answer
     gaps = bool(column.isna().any())
     kind = _numpy_type(printed, gaps)
     spans = _SPANS.fullmatch(printed)
@@ -8486,11 +8718,36 @@ class DataFrameMixin(_Carries):
                     try:
                         out = DataFrame._wrap(_firepanda.DataFrame(plain))
                     except Exception:
-                        raise translate(error) from None
+                        return DataFrameMixin._columnwise(data, error)
                     for name, made in temporal.items():
                         out = out._assigned(name, Series._wrap(made))
                     return out._inner
+                return DataFrameMixin._columnwise(data, error)
             raise translate(error) from None
+
+    @staticmethod
+    def _columnwise(data: Any, error: Exception) -> Any:
+        """The frame built one column at a time, so a column of mixed values is an object column.
+
+        Each column is built as a series is, which is where values that share no
+        column type are written as objects. The first refusal is the one raised
+        when that does not help, since it names the column the extension saw.
+        """
+        from ._frame import DataFrame, Series
+
+        if not all(isinstance(values, (list, tuple)) for values in data.values()):
+            raise translate(error) from None
+        try:
+            made = {name: Series(list(values)) for name, values in data.items()}
+        except Exception:
+            raise translate(error) from None
+        lengths = {len(values) for values in data.values()}
+        if len(lengths) > 1:
+            raise translate(error) from None
+        out = DataFrame(index=range(lengths.pop()) if lengths else None)
+        for name, column in made.items():
+            out = out._assigned(name, column)
+        return out._inner
 
     @staticmethod
     def _copied(data: Any, index: Any, columns: Any) -> Any:
@@ -8734,7 +8991,12 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import Series
 
-        made = _labelled(self._inner.names(), self._inner.dtypes())
+        names = self._inner.names()
+        kinds = [
+            "object" if kind == "string" and _objects.is_object(self._inner.column(name)) else kind
+            for name, kind in zip(names, self._inner.dtypes(), strict=True)
+        ]
+        made = _labelled(names, kinds)
         return Series._wrap(made._inner.relabel(None).renamed_axis(None))
 
     def memory_usage(self, index: Any = True, deep: Any = False) -> Series:
@@ -13232,6 +13494,10 @@ class SeriesMixin(_Carries):
         """
         keyed = isinstance(data, collections.abc.Mapping) and len(data) > 0
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
+        if _is_object_dtype(dtype):
+            self._inner = _objectified(type(self)(data, index=index, name=name))._inner
+            _named_as(self, name)
+            return
         index = _written_index(index)
         if name is None and isinstance(data, IndexMixin):
             # pandas names a column built from an index after the index.
@@ -13288,9 +13554,15 @@ class SeriesMixin(_Carries):
             if made is not None:
                 return made
             plain = _unwrapped(source)
-            if plain is source:
-                raise
-            return _firepanda.Series(plain, label)
+            try:
+                if plain is source:
+                    raise
+                return _firepanda.Series(plain, label)
+            except Exception:
+                if not isinstance(source, (list, tuple)):
+                    raise
+                # Values that share no column type are an object column, as `_objects` explains.
+                return _firepanda.Series(_objects.cells(source), label)
 
     def __getitem__(self, key: Any) -> Any:
         """Reads by label, except for a slice of numbers, which is by position.
@@ -13633,7 +13905,9 @@ class SeriesMixin(_Carries):
         )
 
     def infer_objects(self, copy: Any = NO_DEFAULT) -> Series:
-        """The column itself, as a copy, since it already has a type."""
+        """The column itself as a copy, or an object column's values given the type they share."""
+        if _objects.is_object(self._inner):
+            return type(self)(_values_of(self._inner), index=self.index, name=self.name)
         return self.copy()
 
     def filter(
@@ -14017,6 +14291,8 @@ class SeriesMixin(_Carries):
         from ._categorical import CategoricalDtype
 
         kind = self._inner.dtype()
+        if kind == "string" and _objects.is_object(self._inner):
+            return "object"
         return CategoricalDtype._of(self) if kind == "category" else kind
 
     def groupby(
@@ -14087,6 +14363,8 @@ class SeriesMixin(_Carries):
         """
         from ._frame import Series
 
+        if _objects.is_object(self._inner):
+            return _objects_in(self, values)
         return Series._wrap(_isin_mask(self, _isin_set(values, _ISIN_SERIES)))
 
     def duplicated(self, keep: Any = "first") -> Series:
@@ -14169,6 +14447,12 @@ class SeriesMixin(_Carries):
         _refuse("key", key, "running a function over the values before sorting is not written")
         _axis_number(axis, "Series", 0, (0,))
         inplace = _flag("inplace", inplace)
+        if _objects.is_object(self._inner):
+            out = _objects_sorted(self, ascending, na_position, ignore_index)
+            if inplace:
+                self._inner = out._inner
+                return None
+            return out
         try:
             sorted_column: Series = Series._wrap(
                 self._inner.sort_values(_directions(ascending, 1)[0], _na_first(na_position))
@@ -14400,6 +14684,12 @@ class SeriesMixin(_Carries):
         _axis_number(axis, "Series", 0, (0,))
         if _limit_wanted(limit):
             raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+        if _objects.is_object(self._inner) and value is not None and _is_scalar(value):
+            out = _objects_filled(self, value)
+            if inplace:
+                self._inner = out._inner
+                return None
+            return out
         if _is_frame(value):
             raise DTypeError(_NO_FILL_FRAME)
         if isinstance(value, dict):
@@ -15236,6 +15526,8 @@ class SeriesMixin(_Carries):
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
+        if _holds_objects(self, other):
+            return _object_operator(self, other, op, flip)
         if isinstance(other, BaseOffset) and not _is_spans(self):
             return _offset_operand(self, other, op, flip)
         _no_scaling_by_nat(self, other, op, flip)
@@ -15275,6 +15567,8 @@ class SeriesMixin(_Carries):
 
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
+        if fill_value is None and _holds_objects(self, other):
+            return _object_operator(self, other, op, flip)
         _no_scaling_by_nat(self, other, op, flip)
         other = _temporal_operand(self, _listed_operand(self, other, op))
         scaled = None
@@ -15501,6 +15795,8 @@ class SeriesMixin(_Carries):
         """
         _reducing_axis(axis, "Series")
         skipna = _flag("skipna", skipna)
+        if kind in _OBJECT_FOLDS and _objects.is_object(self._inner):
+            return _objects_reduced(self, kind, skipna, min_count)
         _held_at(
             "numeric_only",
             numeric_only,
@@ -15885,6 +16181,10 @@ class SeriesMixin(_Carries):
         from ._frame import Series
 
         strictly = _cast_keywords(copy, errors)
+        if _is_object_dtype(dtype):
+            return _objectified(self)
+        if _objects.is_object(self._inner):
+            return _from_objects(self, dtype, strictly)
         if _decided_categories(dtype):
             return _as_decided(self._astype("category", copy, errors), dtype)
         unit = _unit_change(str(self.dtype), dtype)
@@ -19123,6 +19423,8 @@ class StringMixin:
         the last word is ours, because inventing a second vocabulary for types
         so that one message can read like pandas would be the wrong trade.
         """
+        if _objects.is_object(data._inner):
+            data = _object_texts(data)
         if not data._inner.string_is_text():
             raise AttributeError(f"Can only use .str accessor with string values, not {data.dtype}")
         self._series = data
@@ -28257,6 +28559,9 @@ def _text_values(
     if whole and formatter is not None and None not in values:
         return [formatter(v) for v in values]
     gap = "<NA>" if whole or dtype == "bool" else na_rep
+    if dtype == "object" and na_rep == "NaN":
+        # An object column holds its gap as None, and pandas prints a None as itself.
+        gap = "None"
     space = " " if leading else ""
     texts = []
     for value in values:
