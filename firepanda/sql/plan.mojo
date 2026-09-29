@@ -464,8 +464,8 @@ and the joins over them. So is a `LATERAL` derived table written after a comma
 or on the right of an inner or a cross join, which is lowered to a join between
 it and what is to its left. One with a fold, a `DISTINCT`, an `ORDER BY` or a
 `LIMIT` inside it is refused by name, as is a left join to one.
-An `ASOF` join is lowered when it is written with `ON`, and refused by name
-with `USING` or as a right or full join. A `POSITIONAL` join is lowered, and it pairs the two sides by row
+An `ASOF` join is lowered when it is written with `ON` or `USING`, and refused
+by name as a right or full join. A `POSITIONAL` join is lowered, and it pairs the two sides by row
 number and so reads no column at all. A `USING` or `NATURAL` join over a subquery is
 refused as well, since the merged name is on both sides and a column a subquery
 computed carries no table to tell the two apart. Each is a refusal by
@@ -5245,6 +5245,17 @@ def _merged(
             whose = right.origin[there]
         scope.merge(String(name), whose)
 
+    if len(names) == 0 and kind.is_asof():
+        raise Error(
+            String(
+                "an ASOF ",
+                word,
+                (
+                    " join whose two sides share no column name, and an ASOF"
+                    " join needs one to match the nearest row by"
+                ),
+            )
+        )
     if len(names) == 0 and not kind.keeps_right_columns():
         raise Error(
             String(
@@ -5261,10 +5272,27 @@ def _merged(
             )
         )
 
-    # No shared column at all is every pairing, which is what a NATURAL join of
-    # two tables with nothing in common means and what DuckDB answers.
-    var built = JoinKind.CROSS if len(names) == 0 else kind
-    var at = plan.join(left.at, right.at, left_keys^, right_keys^, built)
+    var at: Int
+    if kind.is_asof():
+        # The last column named is the one the nearest row is measured by, and
+        # the rest are equalities, so `USING (k, t)` is `ON l.k = r.k AND
+        # l.t >= r.t`. That is DuckDB's reading, and the merged `t` is the left
+        # one, since the right's is only ever at most it.
+        at = plan.asof_join(
+            left.at,
+            right.at,
+            left_keys^,
+            right_keys^,
+            kind == JoinKind.ASOF_LEFT,
+            True,
+            False,
+        )
+    else:
+        # No shared column at all is every pairing, which is what a NATURAL
+        # join of two tables with nothing in common means and what DuckDB
+        # answers.
+        var built = JoinKind.CROSS if len(names) == 0 else kind
+        at = plan.join(left.at, right.at, left_keys^, right_keys^, built)
 
     var schema = Schema(copy=left.schema)
     var origin = left.origin.copy()
@@ -6226,12 +6254,7 @@ def _joined(
         # key to find. The grammar gives it no condition to write.
         return _pair(plan, left, right, List[Int](), List[Int](), kind)
 
-    if kind.is_asof():
-        if node.kind == REF_JOIN_USING:
-            raise Error(
-                "firepanda lowers an ASOF join written with ON, and not one"
-                " written with USING yet"
-            )
+    if kind.is_asof() and node.kind != REF_JOIN_USING:
         return _asof(ast, node.children, plan, left, right, scope, kind)
 
     if node.kind == REF_JOIN_USING:
