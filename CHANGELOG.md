@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: CREATE TABLE, CREATE VIEW, INSERT and DROP in SQL
+
+`firepanda.sql.execute` runs one statement against a catalog it may change. `CREATE TABLE` with columns and types, with `NOT NULL`, and `CREATE TABLE ... AS` a query make a frame under the name; `INSERT INTO` adds rows from `VALUES`, a query or `DEFAULT VALUES`, by position, by a column list or `BY NAME`, casts each to the column's type, and answers DuckDB's one-row `Count`; `CREATE VIEW` keeps the query's text, which is parsed again wherever the view is named, so a view sees rows inserted after it; and `DROP TABLE` and `DROP VIEW` take the name away. `OR REPLACE`, `IF NOT EXISTS` and `IF EXISTS` behave as in DuckDB, and every refusal a mismatch earns is DuckDB's message: a name made twice, a count of values that does not fit, a column the table lacks, a null in a `NOT NULL` column, a drop of the wrong kind, and a view that reaches itself. What a frame cannot hold (a key, a default, a check, a generated column, `ON CONFLICT`, `RETURNING`, `CASCADE`) is refused by name rather than read and dropped.
+
 ### Added: pandas.array and pandas.arrays
 
 `firepanda.array` is now available, as `pandas.array`. It infers the masked types for plain numbers and bools and text for strings, keeps the type of a Series, an Index or an array, and refuses a scalar as pandas does. Arrays now carry pandas' class names, `IntegerArray`, `FloatingArray`, `BooleanArray`, `ArrowStringArray`, `NumpyExtensionArray`, `DatetimeArray`, `TimedeltaArray`, `PeriodArray`, `IntervalArray` and `ArrowExtensionArray`, which `firepanda.arrays` exports with `Categorical`. They print as pandas prints them, and have arithmetic, comparisons, `fillna`, `dropna`, `copy`, `astype`, `value_counts`, `to_numpy` and the reductions. `isna` on an array now answers a numpy array of bools. Document 106 describes the design.
@@ -23,10 +27,6 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: Period columns
 
 A Series or DataFrame column of `Period` values of one frequency is now a period column with the dtype `period[M]`, as in pandas. It can be asked for with `dtype="period[M]"` or `astype`, prints each period in its short form with `NaT` for gaps, sorts, groups and compares by period, moves by integers, and gives offsets when a period is subtracted. Scaling a period column and ordering it against another frequency are refused with pandas' messages. Document 103 describes the cell design and what waits for `PeriodIndex`.
-### Added: CREATE TABLE, CREATE VIEW, INSERT and DROP in SQL
-
-`firepanda.sql.execute` runs one statement against a catalog it may change. `CREATE TABLE` with columns and types, with `NOT NULL`, and `CREATE TABLE ... AS` a query make a frame under the name; `INSERT INTO` adds rows from `VALUES`, a query or `DEFAULT VALUES`, by position, by a column list or `BY NAME`, casts each to the column's type, and answers DuckDB's one-row `Count`; `CREATE VIEW` keeps the query's text, which is parsed again wherever the view is named, so a view sees rows inserted after it; and `DROP TABLE` and `DROP VIEW` take the name away. `OR REPLACE`, `IF NOT EXISTS` and `IF EXISTS` behave as in DuckDB, and every refusal a mismatch earns is DuckDB's message: a name made twice, a count of values that does not fit, a column the table lacks, a null in a `NOT NULL` column, a drop of the wrong kind, and a view that reaches itself. What a frame cannot hold (a key, a default, a check, a generated column, `ON CONFLICT`, `RETURNING`, `CASCADE`) is refused by name rather than read and dropped.
-
 ### Added: PeriodDtype
 
 `pd.PeriodDtype` is the real type now, made from a frequency's text, `period[...]` text or an offset, with pandas' errors for the rest. It gives its frequency back as an offset, compares with text the way pandas does, pickles, and answers `construct_from_string`, `is_dtype` and the numpy style attributes pandas gives it. `pandas_dtype` and `is_period_dtype` in `api.types` read period text through it, so a frequency that does not exist is refused there too.
