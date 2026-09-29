@@ -35,6 +35,9 @@ A column can hold any Python value, as pandas' object dtype does. A list whose v
 
 `ASOF JOIN ... USING (a, b, t)` and `ASOF LEFT JOIN ... USING` now lower, where they used to be refused. As in DuckDB, every named column but the last must be equal on both sides, and the last is the inequality: each left row takes the right row with the greatest value that is at most its own. The named columns come out once, as with any `USING`. `ASOF RIGHT` and `ASOF FULL` are still refused.
 
+### Added: SQL unnest over a list written out
+
+`unnest([...])` in a select list writes each row once for every element of the list, so `SELECT x, unnest([x, x * 2]) FROM t` has two rows for each row of `t`. With several unnests the row is written as many times as the longest list is long and the shorter ones are padded with nulls, and an empty list or a `NULL` writes no rows, as in DuckDB. An unnest can be part of a larger expression, as in `unnest([1, 2]) + 1`, and its column is named `unnest(main.list_value(1, 2))`, the name DuckDB gives it. `FROM unnest([...])` is a table with one column called `unnest`. A plan node, `UNNEST`, and an operator of the same name do the work. firepanda has no column that holds lists yet, so the list has to be written out in the query, and an unnest in a query that aggregates is refused for now.
 ### Fixed: SQL ORDER BY ... DESC puts its nulls last
 
 A descending sort key in an `ORDER BY` now puts its nulls last, as DuckDB does for both directions, where it used to put them first. `NULLS FIRST` still puts them first. A window's order already did this.
