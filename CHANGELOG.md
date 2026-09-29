@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas.test
+
+`firepanda.test(extra_args=None, run_doctests=False)` runs the test suite with pytest the way `pandas.test` runs pandas', with the same default marks, the same printed command and the same exit with pytest's status. It points at the tests next to the package in a source checkout, and at the package itself otherwise.
+
 ### Added: ewm(...).online()
 
 `ExponentialMovingWindow.online()` returns an `OnlineExponentialMovingWindow` whose `mean()` remembers its state, so `mean(update=...)` carries on from the last row the way pandas does with numba, and `reset()` starts over. The kernel is plain Python, so no numba is needed. The other reductions, `update_times` and any engine but numba are refused with pandas' messages, and the window now prints the way pandas prints it.

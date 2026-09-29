@@ -125,6 +125,7 @@ from ._query import eval
 from ._range_index import RangeIndex
 from ._scalars import NaT, Timedelta, Timestamp
 from ._sql import read_sql, read_sql_query, read_sql_table
+from ._tester import test
 from ._textread import read_fwf, read_table
 from ._timedelta import TimedeltaIndex, timedelta_range
 from ._versions import show_versions
@@ -229,6 +230,7 @@ __all__ = [
     "set_eng_float_format",
     "set_option",
     "show_versions",
+    "test",
     "testing",
     "timedelta_range",
     "to_datetime",
