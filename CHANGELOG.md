@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_period, to_timestamp and PeriodProperties
+
+`DatetimeIndex.to_period`, `Series.dt.to_period`, and `to_period` and `to_timestamp` on Series and DataFrame labels are now available, as in pandas. With no frequency, `to_period` uses the index's own or an inferred one, read as its period frequency, and refuses as pandas does when there is none. `s.dt` on a period column answers a `PeriodProperties` with the period fields, `start_time`, `end_time`, `freq`, `to_timestamp`, `asfreq` and `strftime`. `PeriodIndex.to_timestamp` now infers the frequency of the starts. Document 105 describes the design.
+
 ### Added: PeriodIndex and period_range
 
 `PeriodIndex` and `period_range` are now available, as in pandas. The index is built from periods, their text or instants with a frequency or a period dtype, or with `from_fields` and `from_ordinals`. It answers the period fields, `start_time`, `end_time`, `to_timestamp`, `asfreq`, `strftime`, `shift` and integer arithmetic, and finds labels by a period or its text, including label slices. Series and frames labelled by periods print `Freq:`, and grouping by a period column, `value_counts`, `pd.Index` of periods, `reindex` onto periods and a category of periods all give a `PeriodIndex`. Document 104 describes the design.
