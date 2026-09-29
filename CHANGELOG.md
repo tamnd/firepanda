@@ -27,15 +27,22 @@ A descending sort key in an `ORDER BY` now puts its nulls last, as DuckDB does f
 ### Added: SQL recursive CTEs
 
 `WITH RECURSIVE` now runs. The anchor is everything left of the last `UNION`, and it runs once. The recursive term then runs again and again over the rows the last round kept, until a round keeps nothing. `UNION ALL` keeps every row, and `UNION` keeps only rows no earlier round kept, so a walk over a graph with a cycle stops. The term's rows are cast to the anchor's types, rounding the way a SQL cast does, as in DuckDB. The term may read the CTE more than once, for example to join it to itself, and a later CTE or the query may read the recursive one as often as it likes. A filter written above a recursive CTE stays above it. A recursive CTE whose union lines up by name, or which holds a `WITH` of its own, is refused by name.
+
 ### Added: The operations that make number names
 
 `pivot`, `pivot_table`, `unstack` and `crosstab` spread number and instant values across the columns, `get_dummies` encodes numbers, bools and `dummy_na` under their own values, and `dot` with a matrix, `from_dict` and `from_records` with rows, `concat` of unnamed series along the columns and `Series.to_frame()` name their columns 0, 1, 2 as pandas does. `str.partition`, `str.rpartition`, `str.extract`, `str.split(expand=True)` and `str.rsplit(expand=True)` name their columns by number rather than by text, `read_csv(header=None)` numbers the columns and names the index 0 with `index_col=0`, and `read_json` reads names like `"0"` as numbers under `convert_axes`. An index name can be a number too, through `rename_axis`, `Index.rename` and `set_names`. Each is compared with pandas in `python/tests/test_made_names.py`.
+
 ### Added: SQL named windows
 
 A `WINDOW w AS (...)` clause now lowers. `OVER w` is the window as it is written, and `OVER (w ORDER BY ...)` or `OVER (w ROWS ...)` starts from it and adds what `w` leaves out. One named window may start from another, written before or after it. As in DuckDB, a window that adds a partition or an order `w` already has, or starts from a `w` with a frame, is refused, as are a name given twice and a name that is not given. A column named after its call spells the window out, so `sum(x) OVER w` is called `sum(x) OVER (PARTITION BY g)`, the name DuckDB gives it.
+
 ### Added: Column names that are not text
 
 A frame's columns and a series' name can be whole numbers, floats, bools, instants or spans, as in pandas. A frame built from a list of lists, a numpy array or a flat list names its columns 0, 1, 2 and so on, `columns` answers a `RangeIndex` or an int64 index for them, and `transpose` works for row labels of any of those kinds, dates included. Selecting, `loc`, `at`, `drop`, `rename`, `sort_values`, `groupby`, `set_index`, `astype`, `merge`, `concat`, `drop_duplicates`, `nlargest`, `reindex` and the repr all read such names, `concat(axis=1, ignore_index=True)` numbers the columns, and the Arrow export names each field with the text of its name. The extension still holds text, so a name that is not text is written into text on the way in and read back on the way out, as document 94 of the compat notes describes. Names that mix text with other kinds print and work, and only `columns` refuses them, because pandas answers an index of objects there.
+
+### Changed: a group by on two wide integer keys packs them without factorizing either
+
+A group by whose keys are integers of one dtype packs the raw values into one uint32 when their ranges multiply out to more than 64 times what a table is laid over, as long as the product fits. The per key factorizes and the pass that packed their codes are skipped, and the packed column is hashed as before. TPC-H q20 groups about 910,000 lines by part and supplier, whose ranges multiply out to two billion. On a busy 8 core VM, interleaved best of 25 runs, its group ordinals went from 109, 119 and 184 ms to 79, 55 and 117 ms. The ordinals are the same first appearance order either route gives.
 
 ### Added: The columns of a frame as an index
 
@@ -44,6 +51,7 @@ A frame's columns and a series' name can be whole numbers, floats, bools, instan
 ### Added: Group by windows take pandas' arguments by name
 
 `GroupBy.rolling`, `GroupBy.expanding` and `GroupBy.ewm` now have the same parameters as pandas, in the same order and with the same defaults, rather than passing any arguments through, so a signature check and a misspelled keyword both behave as they do in pandas.
+
 ### Added: SQL windows with an ORDER BY, a frame and the window functions
 
 A window in SQL can now be ordered and framed. `OVER (PARTITION BY ... ORDER BY ...)` runs the fold up to the row's last peer, and `ROWS`, `RANGE` and `GROUPS` frames take `UNBOUNDED`, `n PRECEDING`, `n FOLLOWING` and `CURRENT ROW` bounds with `EXCLUDE CURRENT ROW`, `GROUP`, `TIES` and `NO OTHERS`. `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value` and `nth_value` are lowered, the five that read another row take `IGNORE NULLS`, and a `QUALIFY` can filter on any of them. Sums, counts, averages, minimums and maximums over a frame are answered from blocks folded once, so a running total costs a logarithm per row rather than the width of the frame. An order key's nulls go last whichever way it sorts, as in DuckDB.
