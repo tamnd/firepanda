@@ -69,6 +69,7 @@ from ._config import (
 from ._date_range import bdate_range, date_range
 from ._datetime import DatetimeIndex
 from ._dtypes import DatetimeTZDtype, StringDtype
+from ._excel import ExcelFile, read_excel
 from ._expression import col
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._frequency import infer_freq
@@ -145,6 +146,7 @@ __all__ = [
     "DateOffset",
     "DatetimeIndex",
     "DatetimeTZDtype",
+    "ExcelFile",
     "Flags",
     "Float32Dtype",
     "Float64Dtype",
@@ -218,6 +220,7 @@ __all__ = [
     "qcut",
     "read_clipboard",
     "read_csv",
+    "read_excel",
     "read_feather",
     "read_fwf",
     "read_html",
