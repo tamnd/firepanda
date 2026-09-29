@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.unstack, Series.from_arrow and to_markdown
+
+`DataFrame.unstack` moves a level of a MultiIndex into the column names, naming each column by the pair of its old name and the level's value, and on flat labels it answers a series labelled by column and then row, as pandas does. The one difference is that firepanda has no name for the column axis, so the header row pandas prints with the level's name is missing, as it already is for `pivot` and `Series.unstack`. `Series.from_arrow` reads an Arrow array or stream the way `DataFrame.from_arrow` reads a column. `DataFrame.to_markdown` and `Series.to_markdown` hand the frame to the optional `tabulate` package with pandas' defaults and raise pandas' ImportError when it is missing.
+
 ### Added: interval_range, and cut by an IntervalIndex
 
 `interval_range` builds an `IntervalIndex` of evenly spaced numbers from three of `start`, `end`, `periods` and `freq`, with whole number ends when every one given is whole, as pandas does. `cut` now takes an `IntervalIndex` as `bins` and answers an ordered category of those intervals, and it refuses intervals that overlap in pandas' words. Ranges of instants or spans still raise.
