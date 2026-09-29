@@ -20036,6 +20036,28 @@ class EwmMixin(_ReadingMixin):
 
         return isinstance(self._data, DataFrame)
 
+    def __repr__(self) -> str:
+        """The class and what it was given, as pandas prints a decay."""
+        names = ("com", "span", "halflife", "alpha", "min_periods", "adjust", "ignore_na")
+        shown = [
+            f"{name}={getattr(self, name)}" for name in names if getattr(self, name) is not None
+        ]
+        return f"{type(self).__name__} [{','.join(shown)},method=single]"
+
+    def online(self, engine: str = "numba", engine_kwargs: Any = None) -> Any:
+        """The same decay as one that can be fed more rows later with `mean(update=...)`.
+
+        pandas runs it with numba and accepts no other engine. Here the
+        recurrence is plain Python, so it works without numba installed, and
+        any engine but numba is refused with pandas' sentence.
+
+        Raises:
+            InvalidArgumentError: If the engine is not numba.
+        """
+        from ._online import OnlineExponentialMovingWindow
+
+        return OnlineExponentialMovingWindow(self, engine, engine_kwargs)
+
     def _over(self, data: Series | DataFrame) -> Any:
         """The same decay over other data, for a column of a frame or a swapped pair."""
         decay = object.__new__(type(self))
