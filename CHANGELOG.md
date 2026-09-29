@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: StringDtype, DatetimeTZDtype, dt.timetz and selecting a group by's key
+
+`StringDtype` and `DatetimeTZDtype` are pandas' dtype objects with pandas' attributes, repr, equality and mistakes, and each is equal to the text firepanda names the same type by, so either can be passed as `dtype=`. `dt.timetz` gives each instant's time of day with its clock. A group by now lets a key column be selected as a value, as in `df.groupby("a")["a"].sum()`, which used to fail inside the extension, reads its columns as attributes including the keys, and lists them in `dir()`. A key from outside the frame beside another key now keeps its name on the labels.
+
 ### Added: DataFrame.unstack, Series.from_arrow and to_markdown
 
 `DataFrame.unstack` moves a level of a MultiIndex into the column names, naming each column by the pair of its old name and the level's value, and on flat labels it answers a series labelled by column and then row, as pandas does. The one difference is that firepanda has no name for the column axis, so the header row pandas prints with the level's name is missing, as it already is for `pivot` and `Series.unstack`. `Series.from_arrow` reads an Arrow array or stream the way `DataFrame.from_arrow` reads a column. `DataFrame.to_markdown` and `Series.to_markdown` hand the frame to the optional `tabulate` package with pandas' defaults and raise pandas' ImportError when it is missing.

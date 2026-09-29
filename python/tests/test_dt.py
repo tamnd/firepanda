@@ -21,8 +21,8 @@ pandas and missing here, and pandas is that way because its answer is a numpy
 bool array, which has nowhere to put a missing value. Arrow has somewhere, so
 this says missing.
 
-The second is the two names that are not here at all: `timetz` and `to_period`.
-Each of them needs a type firepanda does not have, and neither is declared and
+The second is the name that is not here at all, `to_period`.
+It needs a type firepanda does not have, and it is not declared and
 refused, which is the opposite of what the arguments do. An absent name is
 honest about being unimplemented and a declared one that always raises is not,
 and the line between the two is that a caller can see a name before they call it
@@ -112,7 +112,7 @@ FLAGS = [
 ]
 """The parts that answer a yes or a no."""
 
-ABSENT = ["timetz", "to_period"]
+ABSENT = ["to_period"]
 """The two pandas has and this does not, for the reason the module docstring gives."""
 
 
@@ -385,9 +385,8 @@ def test_the_unwritten_names_are_absent_rather_than_refusing(
 ) -> None:
     """pandas has them and this does not, and the difference is deliberate.
 
-    Every one needs something that does not exist yet: a time of day with its
-    zone for `timetz`, a period for `to_period`, and frequency inference over
-    an index for `freq`. A
+    Every one needs something that does not exist yet: a period for
+    `to_period`, and frequency inference over an index for `freq`. A
     name that is declared and always raises reads as a failure on a conformance
     board and a name that is not there reads as unimplemented, and unimplemented
     is what these are.

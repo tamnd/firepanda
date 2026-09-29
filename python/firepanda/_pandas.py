@@ -17292,11 +17292,12 @@ class DatetimeMixin:
             raise translate(error) from None
         return found or None
 
-    def _clock_times(self) -> Series:
+    def _clock_times(self, zoned: bool = False) -> Series:
         """The time of day of each instant, read on the column's own clock.
 
         pandas answers an object column of `datetime.time`, with NaT for a gap,
         and so does this, since there is no column type for a time of day.
+        `zoned` gives each time the column's clock as its tzinfo, as `timetz` does.
 
         Raises:
             AttributeError: For a column of spans, which have no time of day.
@@ -17307,7 +17308,7 @@ class DatetimeMixin:
         if not str(column.dtype).startswith("datetime64"):
             raise AttributeError("'TimedeltaProperties' object has no attribute 'time'")
         times = [
-            None if _objects.is_gap(value) else value.time()
+            None if _objects.is_gap(value) else (value.timetz() if zoned else value.time())
             for value in _values_of(column._inner)
         ]
         cells = _objects.cells(times, "T")
@@ -18079,6 +18080,11 @@ def _shown_as(owner: Any, answer: Any, rows: bool) -> Any:
     label = answer.index.name
     if isinstance(label, str) and label in shown:
         answer = answer.rename_axis(shown[label])
+    levels = list(answer.index.names)
+    if len(levels) > 1 and any(isinstance(level, str) and level in shown for level in levels):
+        answer = answer.rename_axis(
+            [shown.get(level, level) if isinstance(level, str) else level for level in levels]
+        )
     return answer
 
 
@@ -23395,11 +23401,20 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
     def __getattr__(self, name: str) -> Any:
         """A column read as an attribute, `df.groupby("k").v` for `df.groupby("k")["v"]`.
 
-        A key column is left out, since selecting a key as a value is not written.
+        A key column is one too, as in pandas, and reduces as a value.
         """
-        if not name.startswith("_") and name in _shown_names(self._frame) and name not in self._by:
+        if not name.startswith("_") and name in _shown_names(self._frame):
             return self[name]
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def __dir__(self) -> list[str]:
+        """The names on the class and each column a name can reach, keys included, as in pandas."""
+        columns = {
+            name
+            for name in _shown_names(self._frame)
+            if isinstance(name, str) and name.isidentifier() and not name.startswith(_HIDDEN)
+        }
+        return sorted(set(super().__dir__()) | columns)
 
     def __getitem__(self, key: Any) -> DataFrameGroupBy | SeriesGroupBy:
         """Narrows the group by to one column or to several.
@@ -23426,6 +23441,8 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             if not isinstance(name, (str, int, float)) or _names.held(name) not in held:
                 raise KeyError(name)
         names = _names.held_all(asked)
+        if any(name in self._by for name in names):
+            return self._key_selected(key, names)
         narrowed = DataFrame._wrap(self._frame._inner.select(self._by + names))
         if one:
             key = _names.held(key)
@@ -23438,6 +23455,39 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         out._single = getattr(self, "_single", False)
         out._group_keys = getattr(self, "_group_keys", True)
         return out
+
+    def _key_selected(self, key: Any, names: list[str]) -> DataFrameGroupBy | SeriesGroupBy:
+        """`self[key]` when `key` names a key column, which pandas reduces as a value too.
+
+        Each selected key is copied into a hidden column that groups the rows
+        and is shown under the key's name, the way a key from outside the
+        frame is, so the column itself is free to be a value.
+
+        Raises:
+            NotImplementedError: With `as_index=False`, for a category key, and
+                beside a key from outside the frame.
+        """
+        from ._frame import DataFrameGroupBy
+
+        if not self._as_index:
+            raise NotImplementedError(
+                "selecting a key column with as_index=False answers the column without its key"
+            )
+        if getattr(self, "_shown", None) is not None:
+            raise NotImplementedError(
+                "selecting a key column beside a key from outside the frame"
+            )
+        frame, by, shown = self._frame, list(self._by), {}
+        for number, name in enumerate(by):
+            if name in names:
+                hidden = f"{_HIDDEN}selected key {number}"
+                frame = frame.assign(**{hidden: frame[_names.shown(name)]})
+                by[number] = hidden
+                shown[hidden] = _names.shown(name)
+        regrouped = DataFrameGroupBy(frame, by, self._as_index, self._sort, self._dropna)
+        regrouped._single = getattr(self, "_single", False)
+        regrouped._group_keys = getattr(self, "_group_keys", True)
+        return _rekeyed(regrouped[key], shown)
 
     def _shape(self, kind: str, param: float) -> DataFrame:
         """One reduction over every column that is not a key.
