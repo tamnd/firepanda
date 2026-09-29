@@ -37,6 +37,11 @@ anything that moves rows, and its gaps read as `NA`. Document 98 describes it.
 A column of one of pandas' masked types, such as `Int64` or `boolean`, carries
 the letter `M` the same way, then the type's name and U+0002, and its gaps read
 as `NA` too. Document 99 describes it.
+
+An interval column carries the letter `I`, then its type such as
+`interval[float64, right]` and U+0002, and then the two ends as a tuple. A cell
+reads back as an `Interval` closed on the side the type names, and a gap reads
+as NaN. Document 102 describes it.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ _KINDS = frozenset("sibftdnp[(")
 _SPELLINGS = frozenset("NT")
 _ARROW = "A"
 _MASKED = "M"
+_INTERVAL = "I"
 _TYPE_END = "\x02"
 _ARROW_TYPES: dict[str, Any] = {}
 """Each Arrow type a cell was written with, by the text the cell carries."""
@@ -156,7 +162,7 @@ def _start(text: str) -> int:
         return 1
     if text[1] in _SPELLINGS:
         return 2 if len(text) >= 4 and text[2] in _KINDS else 0
-    if text[1] in (_ARROW, _MASKED):
+    if text[1] in (_ARROW, _MASKED, _INTERVAL):
         at = text.find(_TYPE_END)
         return at + 1 if at > 1 and len(text) > at + 2 and text[at + 1] in _KINDS else 0
     return 0
@@ -164,9 +170,15 @@ def _start(text: str) -> int:
 
 def value(text: Any) -> Any:
     """The value a written cell holds, or the text itself when it was not written."""
-    if is_cell(text):
-        return _parsed(text, _start(text))[0]
-    return text
+    if not is_cell(text):
+        return text
+    found = _parsed(text, _start(text))[0]
+    if text[1] == _INTERVAL:
+        from ._interval import Interval
+
+        kind = text[2 : text.find(_TYPE_END)]
+        return Interval(found[0], found[1], kind[kind.rfind(" ") + 1 : -1])
+    return found
 
 
 def arrow_cells(values: Any, arrow_type: Any) -> list[Any]:
@@ -205,6 +217,33 @@ def masked_name(text: Any) -> str | None:
 def masked_name_of(inner: Any) -> str | None:
     """The masked type of an extension column, or None for any other column."""
     return masked_name(_first(inner))
+
+
+def interval_cells(pairs: Any, name: str) -> list[Any]:
+    """Each pair of ends as the cells of a column of one interval type, a gap for None."""
+    head = MARK + _INTERVAL + name + _TYPE_END
+    return [None if pair is None else head + _written(tuple(pair)) for pair in pairs]
+
+
+def interval_name(text: Any) -> str | None:
+    """The interval type a written cell carries, or None when it carries none."""
+    if not is_cell(text) or text[1] != _INTERVAL:
+        return None
+    return text[2 : text.find(_TYPE_END)]
+
+
+def interval_name_of(inner: Any) -> str | None:
+    """The interval type of an extension column, or None for any other column."""
+    return interval_name(_first(inner))
+
+
+def cell_like(value: Any, like: Any) -> Any:
+    """A category label written the way a column's other categories are, `like` being one."""
+    kind = interval_name(like)
+    if kind is None or is_gap(value) or not hasattr(value, "closed"):
+        return cell(value, "N")
+    cast = int if kind.startswith("interval[int") else float
+    return interval_cells([(cast(value.left), cast(value.right))], kind)[0]
 
 
 def values(texts: list[Any]) -> list[Any]:
@@ -251,7 +290,7 @@ def gap_of(inner: Any) -> Any:
 
         return NA
     letter = spelling(first)
-    if letter == "N":
+    if letter == "N" or interval_name(first) is not None:
         return math.nan
     if letter == "T":
         from ._scalars import NaT

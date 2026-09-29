@@ -2,8 +2,8 @@
 
 pandas puts each value in a bin and answers the bin's position or its label.
 A count of bins spreads them evenly over the values, and `qcut` puts the edges
-at quantiles. pandas labels bins with intervals by default, which firepanda
-does not have, so it answers positions with `labels=False` and ordered
+at quantiles. pandas labels bins with intervals by default, which
+test_interval_columns.py checks, positions with `labels=False` and ordered
 categories of text with a list of labels.
 """
 
@@ -123,15 +123,14 @@ def test_mistakes_fail_as_pandas_fails(firepanda: ModuleType, build: Callable[[A
 @pytest.mark.parametrize(
     "build",
     [
-        lambda m: m.cut(m.Series([1, 2, 3]), 2),
-        lambda m: m.qcut(m.Series([1, 2, 3]), 2),
         lambda m: m.cut(m.Series([1, 2, 3]), 2, labels=[1, 2]),
+        lambda m: m.cut([1, 2, 3], 2),
         lambda m: m.cut([1, 2, 3], 2, labels=["a", "b"]),
     ],
 )
 def test_what_firepanda_cannot_hold_is_refused(
     firepanda: ModuleType, build: Callable[[Any], Any]
 ) -> None:
-    """Interval labels, labels that are not text, and a Categorical of a list."""
+    """Labels that are not text, and a Categorical of a list."""
     with pytest.raises(NotImplementedError, match="cut"):
         build(firepanda)

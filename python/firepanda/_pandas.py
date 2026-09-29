@@ -44,7 +44,17 @@ import warnings
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from . import _arrowtyped, _config, _firepanda, _masked, _names, _objects, _row_dates, _row_formats
+from . import (
+    _arrowtyped,
+    _config,
+    _firepanda,
+    _interval,
+    _masked,
+    _names,
+    _objects,
+    _row_dates,
+    _row_formats,
+)
 from ._attrs import Flags, carried, flags_of, hold
 from ._expression import applied
 from ._na import NA
@@ -136,6 +146,9 @@ def _object_kind(inner: Any) -> Any:
     masked = _objects.masked_name_of(inner)
     if masked is not None:
         return _masked.masked_dtype(masked)
+    interval = _objects.interval_name_of(inner)
+    if interval is not None:
+        return _interval.IntervalDtype(interval)
     arrow = _objects.arrow_type_of(inner)
     if arrow is None:
         return "object"
@@ -6995,7 +7008,13 @@ def _written_category(inner: Any) -> bool:
 
 def _written_categories(printed: str) -> bool:
     """Whether a column of this type becomes a category of written values, spec 97."""
-    return _numeric_kind(printed) is not None or printed == "bool"
+    return _numeric_kind(printed) is not None or printed in ("bool", "interval")
+
+
+def _interval_typed(inner: Any, kind: str) -> Any:
+    """An interval column written again as the interval type `kind` names."""
+    pairs = _interval.interval_pairs(_held_values(inner), kind)
+    return _firepanda.Series(_objects.interval_cells(pairs, kind), inner.label())
 
 
 def _category_values(column: Any) -> Any:
@@ -7006,6 +7025,9 @@ def _category_values(column: Any) -> Any:
     kept = levels.tolist()
     values = [kept[code] if code >= 0 else None for code in column.cat.codes.tolist()]
     kind = str(levels.dtype)
+    if kind.startswith("interval"):
+        # A gap among intervals makes their ends floats, which the values decide.
+        return Series(values, index=column.index, name=column.name)
     if None in values and kind.startswith("int"):
         kind = "float64"
     return Series(values, dtype=kind, index=column.index, name=column.name)
@@ -7026,8 +7048,12 @@ def _number_categories(column: Series, widen: bool = True) -> Series:
     if widen and gaps and str(column.dtype).startswith(("int", "uint")):
         values = [value if _objects.is_gap(value) else float(value) for value in values]
     kept = sorted({value for value in values if not _objects.is_gap(value)})
+    kind = _objects.interval_name_of(column._inner)
+    written = [_objects.cell(value, "N") for value in values]
+    if kind is not None:
+        written = _objects.interval_cells(_interval.interval_pairs(values, kind), kind)
     texts = Series(
-        [_objects.cell(value, "N") for value in values],
+        written,
         dtype="str",
         index=column.index,
         name=column.name,
@@ -7931,16 +7957,47 @@ def _arrow_inner(frame: Any) -> Any:
     held = inner.names()
     if any(_names.is_held(name) for name in held):
         inner = inner.renamed_columns(held, [str(_names.shown(name)) for name in held])
-    if "" in inner.names() or any(_objects.is_object(inner.column(n)) for n in inner.names()):
+    if "" in inner.names() or any(_values_exported(inner.column(n)) for n in inner.names()):
         return _object_batch(inner)
     return inner
 
 
 def _arrow_column(series: Any) -> Any:
-    """The column to export to Arrow, an object column as its values rather than its cells."""
+    """The column to export to Arrow, an object column as its values rather than its cells.
+
+    A category of written values goes out as a dictionary of those values, which is
+    how pandas exports a category of numbers or of intervals.
+    """
     if _objects.is_object(series._inner):
         return _Exported(_object_array(series._inner))
+    if series._inner.dtype() == "category":
+        return _Exported(_category_array(series._inner))
     return series._inner
+
+
+def _category_array(inner: Any) -> Any:
+    """A category of written values as an Arrow dictionary of the values, not the cells.
+
+    An index has no door to its categories, so they are read from the export itself,
+    and a category of text goes out as the extension exported it.
+    """
+    import pyarrow as pa
+
+    raw = pa.Array._import_from_c_capsule(*inner.arrow_c_array(None))
+    cells = raw.dictionary.to_pylist()
+    if not cells or not _objects.is_cell(cells[0]):
+        return raw
+    kind = _objects.interval_name(cells[0])
+    if kind is not None:
+        levels = _interval.interval_arrow(_objects.values(cells), kind)
+    else:
+        levels = pa.array(_objects.values(cells), from_pandas=True)
+    return pa.DictionaryArray.from_arrays(raw.indices, levels, ordered=raw.type.ordered)
+
+
+def _values_exported(column: Any) -> bool:
+    """Whether a column goes to Arrow as the values its cells stand for."""
+    return _objects.is_object(column) or _written_category(column)
 
 
 def _object_array(column: Any) -> Any:
@@ -7952,6 +8009,9 @@ def _object_array(column: Any) -> Any:
     import pyarrow as pa
 
     arrow = _objects.arrow_type_of(column)
+    kind = _objects.interval_name_of(column)
+    if kind is not None:
+        return _interval.interval_arrow(_held_values(column), kind)
     if arrow is None:
         return pa.array(_held_values(column), from_pandas=True)
     from ._arrowtyped import arrow_values
@@ -7984,6 +8044,8 @@ def _object_batch(inner: Any) -> Any:
         column = inner.column(name)
         if _objects.is_object(column):
             arrays.append(_object_array(column))
+        elif _written_category(column):
+            arrays.append(_category_array(column))
         else:
             arrays.append(table.column(position).combine_chunks())
     return _Exported(pa.RecordBatch.from_arrays(arrays, names=names))
@@ -14013,6 +14075,8 @@ class SeriesMixin(_Carries):
                 elif data is not None and _is_scalar(data):
                     data = [data] * (1 if index is None else len(list(index)))
                 self._inner = self._made(data, name)
+                if str(dtype).startswith("interval[") and _objects.interval_name_of(self._inner):
+                    self._inner = _interval_typed(self._inner, str(dtype))
                 if typed is not None and dtype is None:
                     self._inner = _retyped(self._inner, typed)
                 if index is not None:
@@ -14025,6 +14089,8 @@ class SeriesMixin(_Carries):
                     self._inner = held.relabel(_names.held(name))
         except Exception as error:
             raise translate(error) from None
+        if str(dtype).startswith("interval") and _objects.interval_name_of(self._inner):
+            dtype = None
         if dtype is not None:
             arrow = type(dtype).__name__ == "ArrowDtype" or _masked.masked_name(dtype) is not None
             wanted = None if arrow else _named_dtype(dtype)
@@ -14064,7 +14130,12 @@ class SeriesMixin(_Carries):
             except Exception:
                 if not isinstance(source, (list, tuple)):
                     raise
-                # Values that share no column type are an object column, as `_objects` explains.
+                # Values that share no column type are an object column, as `_objects` explains,
+                # and intervals that share a side are an interval column, document 102.
+                kind = _interval.interval_kind(source)
+                if kind is not None:
+                    pairs = _interval.interval_pairs(source, kind)
+                    return _firepanda.Series(_objects.interval_cells(pairs, kind), label)
                 return _firepanda.Series(_objects.cells(source), label)
 
     def __getitem__(self, key: Any) -> Any:
@@ -16771,6 +16842,8 @@ class SeriesMixin(_Carries):
             return _unmasked_cast(self, dtype, copy, errors)
         if _is_object_dtype(dtype):
             return _objectified(self)
+        if _objects.interval_name_of(self._inner) and str(dtype) == "category":
+            return _number_categories(self)
         if _objects.is_object(self._inner):
             return _from_objects(self, dtype, strictly)
         if _written_category(self._inner) and _named_dtype(dtype) != "category":
@@ -17317,6 +17390,10 @@ class CategoricalMixin:
         raw = self._raw_levels()
         if not self._written():
             return raw
+        first = self._series._inner.categories().to_list()[:1]
+        kind = _objects.interval_name(first[0]) if first else None
+        if kind is not None:
+            return _interval.IntervalIndex(_objects.values(raw.tolist()), dtype=kind)
         return Index(_objects.values(raw.tolist()))
 
     def _raw_levels(self) -> Index:
@@ -17423,7 +17500,8 @@ class CategoricalMixin:
         """
         one = [value] if isinstance(value, str) or _is_scalar(value) else list(value)
         if self._written():
-            return [_objects.cell(label, "N") for label in one]
+            like = self._series._inner.categories().to_list()[:1] or [None]
+            return [_objects.cell_like(label, like[0]) for label in one]
         for label in one:
             if not isinstance(label, str):
                 raise NotImplementedError(
@@ -18093,7 +18171,9 @@ def _as_categories(codes: Any, categories: list[str], ordered: bool) -> Any:
         from ._frame import Index
 
         values = [categories[int(c)] if c == c and c is not None else None for c in codes.tolist()]
-        kind = str(Index(categories).dtype)
+        intervals = isinstance(categories[0], _interval.Interval)
+        levels = _interval.IntervalIndex(categories) if intervals else Index(categories)
+        kind = str(levels.dtype)
         plain = Series(values, dtype=kind, index=codes.index, name=codes.name)
         built = _number_categories(plain, False)
         return built.cat.set_categories(categories, ordered=ordered)
@@ -28527,6 +28607,37 @@ def _edges_from_count(values: Any, count: Any, right: bool) -> Any:
     return edges
 
 
+def _round_frac(value: Any, precision: int) -> Any:
+    """An edge rounded for its label, to `precision` digits after the point, or after
+    the first digit that is not zero for a number below one, as pandas rounds it."""
+    numpy = _numpy()
+    if not numpy.isfinite(value) or value == 0:
+        return value
+    fraction, whole = numpy.modf(value)
+    digits = precision
+    if whole == 0:
+        digits = -int(numpy.floor(numpy.log10(abs(fraction)))) - 1 + precision
+    return numpy.around(value, digits)
+
+
+def _bin_labels(edges: Any, precision: int, right: bool, include_lowest: bool) -> Any:
+    """pandas' own labels for the bins, an interval for each, with the edges rounded.
+
+    A digit is added until no two rounded edges are the same, and `include_lowest`
+    moves the first left end down by one unit of the last digit kept.
+    """
+    numpy = _numpy()
+    for digits in range(precision, 20):
+        if len({_round_frac(edge, digits) for edge in edges}) == edges.size:
+            precision = digits
+            break
+    breaks = [_round_frac(edge, precision) for edge in edges]
+    if right and include_lowest:
+        breaks[0] = breaks[0] - 10 ** (-precision)
+    breaks = numpy.asarray(breaks)
+    return _interval.IntervalIndex.from_breaks(breaks, closed="right" if right else "left")
+
+
 def _binned(
     values: Any,
     edges: Any,
@@ -28540,8 +28651,8 @@ def _binned(
     Raises:
         ValueError: For repeated edges, and labels that are not one fewer than
             the edges or repeat when ordered, with pandas' words.
-        NotImplementedError: For pandas' own labels, which are intervals, labels
-            that are not text, and labels for values that are not a column.
+        NotImplementedError: For labels that are not text, and for values that
+            are not a column.
     """
     from ._frame import Index, Series
 
@@ -28573,10 +28684,18 @@ def _binned(
             answer = Series(found, dtype=str(codes.dtype), index=column.index, name=column.name)
         return answer, edges
     if labels is None:
-        raise NotImplementedError(
-            f"{caller}: pandas labels each bin with an Interval, which firepanda does not"
-            " have, so pass labels= a list of text or labels=False"
-        )
+        if column is None:
+            raise NotImplementedError(
+                f"{caller}: pandas answers a Categorical for values that are not a column,"
+                " which firepanda does not have, so pass a Series"
+            )
+        bins = _bin_labels(edges, kw.get("precision", 3), right, kw.get("include_lowest"))
+        kind = str(bins.dtype)
+        cells = _objects.interval_cells(_interval.interval_pairs(bins.tolist(), kind), kind)
+        found = [None if gap else cells[place - 1] for place, gap in zip(places, gaps, strict=True)]
+        text = Series(found, dtype="str", index=column.index, name=column.name)
+        held = Series._wrap(text._inner.cast("category", True))
+        return held.cat._against(cells, True), edges
     if not _list_like(labels):
         raise ValueError(
             "Bin labels must either be False, None or passed in as a list-like argument"
@@ -28625,8 +28744,8 @@ def cut(
     Raises:
         ValueError: For edges that do not increase or repeat, and the other
             mistakes pandas refuses, with pandas' words.
-        NotImplementedError: For pandas' interval labels, instants and spans,
-            labels that are not text, and labels for values that are not a column.
+        NotImplementedError: For instants and spans, labels that are not text,
+            and values that are not a column.
     """
     numpy = _numpy()
     values, column = _cut_values(x, "cut")
@@ -28646,6 +28765,7 @@ def cut(
         include_lowest=include_lowest,
         duplicates=duplicates,
         ordered=ordered,
+        precision=precision,
     )
     return (answer, edges) if retbins else answer
 
@@ -28667,8 +28787,8 @@ def qcut(
     Raises:
         ValueError: For repeated edges, and the other mistakes pandas refuses,
             with pandas' words.
-        NotImplementedError: For pandas' interval labels, instants and spans,
-            labels that are not text, and labels for values that are not a column.
+        NotImplementedError: For instants and spans, labels that are not text,
+            and values that are not a column.
     """
     numpy = _numpy()
     values, column = _cut_values(x, "qcut")
@@ -28686,7 +28806,14 @@ def qcut(
         else numpy.full(len(fractions), numpy.nan)
     )
     answer, edges = _binned(
-        values, edges, column, labels, "qcut", include_lowest=True, duplicates=duplicates
+        values,
+        edges,
+        column,
+        labels,
+        "qcut",
+        include_lowest=True,
+        duplicates=duplicates,
+        precision=precision,
     )
     return (answer, edges) if retbins else answer
 
@@ -29578,11 +29705,16 @@ def _text_values(
         ]
     if dtype == "category" and _written_category(column._inner):
         # Each row prints as its category does in a column of the categories' own type.
-        shown = _text_values(
-            column.cat.categories.to_series(), formatter, float_format, na_rep, decimal, leading
-        )
+        levels = column.cat.categories.to_series()
+        codes = column.cat.codes.tolist()
+        if str(levels.dtype).startswith("interval[int") and -1 in codes:
+            # pandas takes the rows out of the intervals, and a gap makes their ends floats.
+            from ._frame import Series
+
+            levels = Series([*levels.tolist(), None]).iloc[:-1]
+        shown = _text_values(levels, formatter, float_format, na_rep, decimal, leading)
         gap = f" {na_rep}" if leading else na_rep
-        return [shown[code] if code >= 0 else gap for code in column.cat.codes.tolist()]
+        return [shown[code] if code >= 0 else gap for code in codes]
     values = _held_values(column._inner)
     if dtype.startswith("float"):
         return _text_floats(values, formatter, float_format, na_rep, decimal, leading, justify)
@@ -29590,7 +29722,7 @@ def _text_values(
         return _text_moments(values, formatter, "," in dtype)
     if dtype.startswith("timedelta64"):
         return _text_spans(values, formatter)
-    whole = dtype.startswith(("int", "uint"))
+    whole = dtype.startswith(("int", "uint")) and not dtype.startswith("interval")
     if whole and formatter is not None and None not in values:
         return [formatter(v) for v in values]
     gap = "<NA>" if whole or dtype == "bool" else na_rep
@@ -30133,6 +30265,7 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
         parts.append(f"Length: {rows}")
     if kw["dtype"]:
         dtype = str(column.dtype)
+        dtype = "interval" if dtype.startswith("interval[") else dtype
         parts.append(f"dtype: {'str' if dtype == 'string' else dtype}")
     footer = ", ".join(parts)
     if str(column.dtype) == "category":
