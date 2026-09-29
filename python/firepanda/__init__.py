@@ -127,6 +127,7 @@ from ._period_index import PeriodIndex, period_range
 from ._pickle import read_pickle, to_pickle
 from ._query import eval
 from ._range_index import RangeIndex
+from ._sas import read_sas
 from ._scalars import NaT, Timedelta, Timestamp
 from ._sparse import SparseDtype
 from ._spss import read_spss
@@ -234,6 +235,7 @@ __all__ = [
     "read_orc",
     "read_parquet",
     "read_pickle",
+    "read_sas",
     "read_spss",
     "read_sql",
     "read_sql_query",

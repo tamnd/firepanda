@@ -6,6 +6,6 @@ the way `pandas.io.api` does.
 
 from __future__ import annotations
 
-from . import api, stata
+from . import api, sas, stata
 
-__all__ = ["api", "stata"]
+__all__ = ["api", "sas", "stata"]

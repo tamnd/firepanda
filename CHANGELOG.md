@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: read_sas and the SAS readers
+
+`read_sas` reads SAS transport files and SAS7BDAT data sets the way pandas does, and `firepanda.io.sas` holds `SASReader`, `XportReader` and `SAS7BDATReader` where pandas keeps them. Both readers are ported to plain Python with `struct`, including the IBM float conversion of transport files and the run length and Ross decompressors of data sets, so they need no other package. Names, types, values, dates, chunks, reader attributes and errors match pandas on pandas' own SAS test files, with and without an encoding.
+
 ### Added: DataFrame.to_stata and the Stata writers
 
 `DataFrame.to_stata`, `StataWriter`, `StataWriter117`, `StataWriterUTF8`, `StataStrLWriter`, `StataValueLabel` and `StataNonCatValueLabel` now write Stata dta files in versions 114, 117, 118 and 119. The writer is a pure struct port of pandas' own, so with the same time stamp the file is byte for byte the one pandas writes, including type narrowing, renamed columns, value labels, dates in every Stata format, long strings, byte order and compression, and it raises pandas' warnings and errors in pandas' words.
