@@ -1017,6 +1017,13 @@ def _node_json(
                 plan.exprs, node.exprs, node.names, 0, len(node.exprs), on_exprs
             ),
         )
+    elif node.kind == NodeKind.UNNEST:
+        out += String(
+            '"kind": "unnest", "columns": ',
+            _named_json(
+                plan.exprs, node.exprs, node.names, 0, len(node.exprs), on_exprs
+            ),
+        )
     elif node.kind == NodeKind.AGGREGATE:
         out += String(
             '"kind": "aggregate", "keys": ',
@@ -1945,12 +1952,12 @@ def _over_one_of(
     mut ids: Dict[Int, Int],
     mut expr_ids: Dict[Int, Int],
 ) raises -> Int:
-    """Reads back one of the seven kinds that sit over a single input.
+    """Reads back one of the eight kinds that sit over a single input.
 
     Args:
         bytes: The document.
         members: The object's members.
-        kind: Which of the seven it says it is.
+        kind: Which of the eight it says it is.
         plan: The plan being built.
         ids: Where each written node id ended up.
         expr_ids: Where each written expression id ended up.
@@ -1959,7 +1966,7 @@ def _over_one_of(
         The index of the node.
 
     Raises:
-        Error: If it is not one of the seven, or is not a well formed one.
+        Error: If it is not one of the eight, or is not a well formed one.
     """
     # The node's own expressions are read before its input, which is the order
     # they were written in, and the order matters as soon as one of them carries
@@ -1999,6 +2006,18 @@ def _over_one_of(
         )
         var input = _node_of(bytes, members[over].value, plan, ids, expr_ids)
         return plan.window(input, outputs^, names^)
+    if kind == "unnest":
+        var names = List[String]()
+        var lists = _pairs_of(
+            bytes,
+            members[_need(bytes, members, "columns", "an unnest")].value,
+            "the columns of an unnest",
+            plan.exprs,
+            expr_ids,
+            names,
+        )
+        var input = _node_of(bytes, members[over].value, plan, ids, expr_ids)
+        return plan.unnest(input, lists^, names^)
     if kind == "aggregate":
         var names = List[String]()
         var keys = _pairs_of(

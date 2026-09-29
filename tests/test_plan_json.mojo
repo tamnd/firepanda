@@ -385,6 +385,27 @@ def test_a_window_carries_the_columns_it_adds() raises:
     )
 
 
+def test_an_unnest_carries_its_lists_and_their_names() raises:
+    var plan = Plan()
+    var t = plan.scan("orders", ["o_custkey", "o_totalprice"], 0)
+    var who = plan.exprs.column("o_custkey")
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var list = plan.exprs.call("unnest", [who, one], False)
+    var at = plan.unnest(t, [list], ["u"])
+    assert_true(
+        to_json(plan, at).find('"kind": "unnest"') != -1,
+        "the node says which kind it is",
+    )
+    var back = _trip(plan, at)
+    ref node = back.plan.nodes[back.root]
+    assert_equal(node.names[0], "u", "under the same name")
+    assert_equal(
+        len(back.plan.exprs.nodes[node.exprs[0]].children),
+        2,
+        "and with both elements",
+    )
+
+
 def test_a_window_node_and_a_window_expression_are_told_apart() raises:
     # Both write `"kind": "window"` and they are read in different places, so
     # this says that reading one of them where the other belongs is not

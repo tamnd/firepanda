@@ -24,8 +24,8 @@ of it. No recursion and no visited set, the same shape `bind` already uses.
 
 ## What it rewrites
 
-Four of the twelve kinds carry a list of columns that this narrows, and the
-other eight do not.
+Four of the thirteen kinds carry a list of columns that this narrows, and the
+other nine do not.
 
 A scan gets its column list narrowed, which is the point of the pass and where
 the reading stops happening. A scan with no list means the whole table, so a
@@ -50,13 +50,17 @@ A filter, a sort, a limit, a distinct, a join and a union hand their input's
 columns through unchanged, so a position above one of them is the same position
 below it and there is nothing on the node itself to narrow.
 
+An unnest hands its input's columns through at the positions they had, the way
+a window does, and keeps every list it writes out even when nothing reads the
+column, because each list decides how many times a row comes out.
+
 A values carries a list of columns and is left alone anyway. It is the one node
 that costs nothing to read, since its rows are already in the plan, and narrowing
 it would mean rewriting a row major list around the columns that went. That is
 work for no saving, so it demands nothing and is rewritten not at all, the same
 as a scan of no columns.
 
-Two of the twelve ask for more than anything above them wants. A distinct with no
+Two of the thirteen ask for more than anything above them wants. A distinct with no
 keys compares whole rows, and so does a union that drops duplicates, so a column
 nothing above reads is still a column that decides whether two rows are one. Both
 of them demand every column of their input whatever the node above asked for,
@@ -245,6 +249,21 @@ def _demand(
             _want_all(
                 need[input],
                 plan.exprs.positions(plan.nodes[at].exprs[keep[i]]),
+            )
+        return
+
+    if kind == NodeKind.UNNEST:
+        # A position below the input's width is that same position below, and
+        # one at or above it is a list this node writes out. Every list is read
+        # whether anything above reads its column or not, because a list
+        # nobody reads still decides how many times each row comes out.
+        var width = len(bound[input].schema)
+        for i in range(len(here)):
+            if here[i] < width:
+                _want(need[input], here[i])
+        for i in range(len(plan.nodes[at].exprs)):
+            _want_all(
+                need[input], plan.exprs.positions(plan.nodes[at].exprs[i])
             )
         return
 

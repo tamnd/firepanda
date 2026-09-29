@@ -716,6 +716,34 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                     )
                 )
         return want
+    if name == "unnest":
+        # The elements of a list written out, one per row, so what the call
+        # answers is what the elements promote to, the way a `coalesce` answers
+        # what its arguments do. A list with nothing in it is DuckDB's integer
+        # list, and so is a null where the list goes.
+        var element = LogicalType.INT32
+        if len(args) != 0:
+            element = args[0]
+        for i in range(1, len(args)):
+            try:
+                element = promote(element, args[i])
+            except e:
+                raise Error(
+                    String(
+                        "a list holds one type, and element ",
+                        i + 1,
+                        " is a ",
+                        args[i],
+                        " among ",
+                        element,
+                        ": ",
+                        e,
+                    )
+                )
+        # A list of nothing but nulls is DuckDB's integer list too.
+        if element == LogicalType.NULL:
+            return LogicalType.INT32
+        return element
     if name == "is_null" or name == "is_not_null":
         # No check on the type. Every column can hold a null, and a column that
         # cannot is still a fair thing to ask about: the answer is then the same
@@ -1280,6 +1308,24 @@ def _bind_node(
                 )
             )
             whose.append(_origin_of(plan.exprs, exprs[i]))
+        return Bound(wider^, whose^)
+
+    if kind == NodeKind.UNNEST:
+        # Wider in the way a window is, and every column it adds is nullable
+        # whatever the elements are, because a list shorter than the longest
+        # one beside it is padded with nulls. None of them is a column of any
+        # relation.
+        var wider = Schema(copy=input.schema)
+        var whose = input.origin.copy()
+        for i in range(len(exprs)):
+            wider.append(
+                Field(
+                    plan.nodes[at].names[i],
+                    plan.exprs.nodes[exprs[i]].type,
+                    True,
+                )
+            )
+            whose.append(UNBOUND)
         return Bound(wider^, whose^)
 
     var out = Schema()

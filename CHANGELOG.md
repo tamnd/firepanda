@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL unnest over a list written out
+
+`unnest([...])` in a select list writes each row once for every element of the list, so `SELECT x, unnest([x, x * 2]) FROM t` has two rows for each row of `t`. With several unnests the row is written as many times as the longest list is long and the shorter ones are padded with nulls, and an empty list or a `NULL` writes no rows, as in DuckDB. An unnest can be part of a larger expression, as in `unnest([1, 2]) + 1`, and its column is named `unnest(main.list_value(1, 2))`, the name DuckDB gives it. `FROM unnest([...])` is a table with one column called `unnest`. A plan node, `UNNEST`, and an operator of the same name do the work. firepanda has no column that holds lists yet, so the list has to be written out in the query, and an unnest in a query that aggregates is refused for now.
+
 ### Fixed: SQL ORDER BY ... DESC puts its nulls last
 
 A descending sort key in an `ORDER BY` now puts its nulls last, as DuckDB does for both directions, where it used to put them first. `NULLS FIRST` still puts them first. A window's order already did this.
@@ -18,7 +22,6 @@ A descending sort key in an `ORDER BY` now puts its nulls last, as DuckDB does f
 ### Added: The operations that make number names
 
 `pivot`, `pivot_table`, `unstack` and `crosstab` spread number and instant values across the columns, `get_dummies` encodes numbers, bools and `dummy_na` under their own values, and `dot` with a matrix, `from_dict` and `from_records` with rows, `concat` of unnamed series along the columns and `Series.to_frame()` name their columns 0, 1, 2 as pandas does. `str.partition`, `str.rpartition`, `str.extract`, `str.split(expand=True)` and `str.rsplit(expand=True)` name their columns by number rather than by text, `read_csv(header=None)` numbers the columns and names the index 0 with `index_col=0`, and `read_json` reads names like `"0"` as numbers under `convert_axes`. An index name can be a number too, through `rename_axis`, `Index.rename` and `set_names`. Each is compared with pandas in `python/tests/test_made_names.py`.
-
 ### Added: SQL named windows
 
 A `WINDOW w AS (...)` clause now lowers. `OVER w` is the window as it is written, and `OVER (w ORDER BY ...)` or `OVER (w ROWS ...)` starts from it and adds what `w` leaves out. One named window may start from another, written before or after it. As in DuckDB, a window that adds a partition or an order `w` already has, or starts from a `w` with a frame, is refused, as are a name given twice and a name that is not given. A column named after its call spells the window out, so `sum(x) OVER w` is called `sum(x) OVER (PARTITION BY g)`, the name DuckDB gives it.
