@@ -87,9 +87,18 @@ def arrow_values(inner: Any) -> list[Any]:
 
 def arrow_series(array: Any, index: Any = None, name: Any = None) -> Series:
     """A pyarrow array as a column of its own Arrow type."""
-    from ._frame import Series
+    import pyarrow as pa
 
-    cells = _objects.arrow_cells(array.to_pylist(), array.type)
+    from ._frame import Series
+    from ._scalars import Timedelta, Timestamp
+
+    values = array.to_pylist()
+    # pandas hands back its own scalars for moments and durations, where pyarrow gives datetime's.
+    if pa.types.is_timestamp(array.type):
+        values = [None if v is None else Timestamp(v) for v in values]
+    elif pa.types.is_duration(array.type):
+        values = [None if v is None else Timedelta(v) for v in values]
+    cells = _objects.arrow_cells(values, array.type)
     return Series(cells, dtype="str", index=index, name=name)
 
 

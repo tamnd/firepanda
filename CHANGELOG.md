@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: convert_dtypes with the pyarrow backend
+
+`convert_dtypes(dtype_backend="pyarrow")` now gives Arrow types as pandas does, such as `int64[pyarrow]`, `double[pyarrow]`, `string[pyarrow]` and `timestamp[us][pyarrow]`, keeping each column's width and following the four switches, while categories and columns of objects stay as they are. A column of flags becomes whole numbers when `convert_boolean` is off, as it does in pandas. A column backed by Arrow hands out `Timestamp` and `Timedelta` for moments and durations. A frame built from a dict with moments next to a column of mixed objects no longer refuses the moments. `read_spss(dtype_backend="pyarrow")` now matches pandas through this.
+
 ### Added: read_iceberg, to_iceberg and read_spss
 
 `read_iceberg` and `DataFrame.to_iceberg` read and write Apache Iceberg tables through pyiceberg, with pandas' arguments for the catalog, the columns, the row filter, the snapshot and appending, and labels other than the default are kept as a column the way pandas keeps them. `read_spss` reads an SPSS file through pyreadstat with `usecols`, `convert_categoricals` and `dtype_backend`, and puts the file's metadata in `attrs` as pandas does. A missing package raises pandas' sentence.
