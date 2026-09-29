@@ -102,6 +102,7 @@ from ._pandas import (
     wide_to_long,
 )
 from ._period import Period, PeriodDtype
+from ._period_index import PeriodIndex, period_range
 from ._pickle import read_pickle, to_pickle
 from ._query import eval
 from ._range_index import RangeIndex
@@ -142,6 +143,7 @@ __all__ = [
     "NamedAgg",
     "Period",
     "PeriodDtype",
+    "PeriodIndex",
     "RangeIndex",
     "Series",
     "StringDtype",
@@ -183,6 +185,7 @@ __all__ = [
     "offsets",
     "option_context",
     "options",
+    "period_range",
     "pivot",
     "pivot_table",
     "qcut",

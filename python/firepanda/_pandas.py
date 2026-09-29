@@ -1062,6 +1062,15 @@ def _written_index(index: Any) -> Any:
     return index
 
 
+def _core_labels(labels: Any) -> Any:
+    """Labels to reindex on as the core reads them, a period as its cell."""
+    if isinstance(labels, IndexMixin):
+        return labels._inner.to_list() if _objects.period_name_of(labels._inner) else labels
+    if isinstance(labels, list | tuple) and (kind := _period.period_kind(labels)):
+        return _objects.period_cells(_period.period_ordinals(labels, kind), kind)
+    return labels
+
+
 def _has_levels(owner: Any) -> bool:
     """Whether a frame or column is labelled by a `MultiIndex`, read without decoding it."""
     from ._levels import is_written
@@ -1854,6 +1863,10 @@ def _instant_index(data: Any, label: Any) -> Any:
     """
     if not isinstance(data, (list, tuple)):
         return None
+    if _period.period_kind(data) is not None:
+        from ._period_index import PeriodIndex
+
+        return PeriodIndex(list(data), name=label)
     kinds = set()
     for value in data:
         if _missing(value):
@@ -7144,6 +7157,8 @@ def _number_categories(column: Series, widen: bool = True) -> Series:
     written = [_objects.cell(value, "N") for value in values]
     if kind is not None:
         written = _objects.interval_cells(_interval.interval_pairs(values, kind), kind)
+    elif _objects.period_name_of(column._inner) is not None:
+        written = column._inner.to_list()
     texts = Series(
         written,
         dtype="str",
@@ -13898,7 +13913,7 @@ class DataFrameMixin(_Carries):
                     DataFrame._wrap(inner), index, method, value, limit, tolerance
                 )
             if index is not None:
-                inner = inner.reindex(index, value)
+                inner = inner.reindex(_core_labels(index), value)
                 if isinstance(index, IndexMixin):
                     inner = inner.renamed_axis(None if index.name is None else str(index.name))
             return DataFrame._wrap(inner)
@@ -17149,7 +17164,8 @@ class SeriesMixin(_Carries):
             return _objectified(self)
         if _is_period_type(dtype):
             return Series._wrap(_period_typed(self._inner, dtype, moved=True))
-        if _objects.interval_name_of(self._inner) and str(dtype) == "category":
+        periods = _objects.period_name_of(self._inner)
+        if (_objects.interval_name_of(self._inner) or periods) and str(dtype) == "category":
             return _number_categories(self)
         if _objects.is_object(self._inner):
             return _from_objects(self, dtype, strictly)
@@ -17238,7 +17254,7 @@ class SeriesMixin(_Carries):
         if _reindex_here(self, index, method):
             return _reindex_by_position(self, index, method, value, limit, tolerance)
         try:
-            inner = self._inner.reindex(index, value, True)
+            inner = self._inner.reindex(_core_labels(index), value, True)
             if isinstance(index, IndexMixin):
                 inner = inner.renamed_axis(None if index.name is None else str(index.name))
             return Series._wrap(inner)
@@ -17702,6 +17718,11 @@ class CategoricalMixin:
         kind = _objects.interval_name(first[0]) if first else None
         if kind is not None:
             return _interval.IntervalIndex(_objects.values(raw.tolist()), dtype=kind)
+        periods = _objects.period_name(first[0]) if first else None
+        if periods is not None:
+            from ._period_index import PeriodIndex
+
+            return PeriodIndex(_objects.values(raw.tolist()), dtype=periods)
         return Index(_objects.values(raw.tolist()))
 
     def _raw_levels(self) -> Index:
@@ -24848,7 +24869,8 @@ class IndexMixin:
                     raise IndexError(f"index {key} is out of bounds for axis 0 with size {size}")
                 return Index._wrap(self._inner.slice_rows(at, at + 1)).tolist()[0]
             if isinstance(key, int):
-                return self._inner.at(key)
+                found = self._inner.at(key)
+                return _objects.value(found) if _objects.is_cell(found) else found
             if isinstance(key, slice):
                 start, stop, step = key.indices(self._inner.length())
                 if step == 1:
@@ -25209,6 +25231,10 @@ class IndexMixin:
             from ._timedelta import TimedeltaIndex
 
             return TimedeltaIndex
+        if kind == "string" and _objects.period_name_of(inner) is not None:
+            from ._period_index import PeriodIndex
+
+            return PeriodIndex
         return cls
 
     @property
@@ -30219,7 +30245,8 @@ def _text_values(
 
             levels = Series([*levels.tolist(), None]).iloc[:-1]
         shown = _text_values(levels, formatter, float_format, na_rep, decimal, leading)
-        gap = f" {na_rep}" if leading else na_rep
+        word = "NaT" if str(levels.dtype).startswith("period[") and na_rep == "NaN" else na_rep
+        gap = f" {word}" if leading else word
         return [shown[code] if code >= 0 else gap for code in codes]
     values = _held_values(column._inner)
     if dtype.startswith("float"):
