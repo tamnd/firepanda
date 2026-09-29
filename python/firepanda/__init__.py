@@ -101,6 +101,7 @@ from ._pandas import (
     unique,
     wide_to_long,
 )
+from ._period import Period
 from ._pickle import read_pickle, to_pickle
 from ._query import eval
 from ._range_index import RangeIndex
@@ -139,6 +140,7 @@ __all__ = [
     "MultiIndex",
     "NaT",
     "NamedAgg",
+    "Period",
     "RangeIndex",
     "Series",
     "StringDtype",

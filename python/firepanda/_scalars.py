@@ -1342,18 +1342,17 @@ class Timestamp(_datetime.datetime):
         return days + fraction + self.nanosecond / 86_400_000_000_000
 
     def to_period(self, freq: Any = None) -> Any:
-        """The period this moment falls in, which needs a type firepanda has not got.
+        """The period of a frequency this moment falls in.
 
         Args:
-            freq: The period length.
+            freq: The period's frequency.
 
         Raises:
-            NotImplementedError: Always, since there is no `Period` yet.
+            ValueError: With no frequency, as in pandas.
         """
-        raise UnsupportedError(
-            "to_period is not supported yet, because it hands back a Period and"
-            " firepanda has no Period type; it is its own namespace on the board"
-        )
+        from ._period import Period
+
+        return Period(self, freq=freq)
 
     def isoformat(self, sep: str = "T", timespec: str = "auto") -> str:
         """The ISO 8601 spelling, with the nanoseconds in it when there are any.
