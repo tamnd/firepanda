@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: GroupBy.resample
+
+`DataFrameGroupBy.resample` and `SeriesGroupBy.resample` resample each group's rows on their own and stack the answers under the group's key, as pandas does. Columns can be picked with `[]` or by attribute, the key columns among them. `group_keys=False` and `as_index=False` stack the answers without the key, `on=` bins by a column, and `include_groups=True` is refused in pandas' words. `transform` is refused for now.
+
 ### Added: to_clipboard and read_clipboard
 
 `DataFrame.to_clipboard`, `Series.to_clipboard` and `firepanda.read_clipboard` work as pandas' do. They reach the clipboard through the same system commands pandas' copy of pyperclip finds, in the same order, and raise its error when there are none. `to_clipboard` writes what `to_csv` writes, tab separated, or the printed frame with `excel=False`, and warns where pandas warns. `read_clipboard` reads the text with `read_csv`, guessing tabs and row labels the way pandas guesses them.
