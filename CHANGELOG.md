@@ -8,6 +8,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: dt.to_pydatetime, str.encode, str.decode and DataFrame.to_records
+
+`dt.to_pydatetime` answers an object column of Python datetimes with NaT for a gap, as pandas 3 does. `str.encode` answers an object column of bytes and `str.decode` reads bytes back as text, with anything that is not bytes as a gap. `DataFrame.to_records` answers a numpy record array with the row labels first, named and typed as pandas names and types them, including `column_dtypes` and `index_dtypes`.
 ### Added: SQL ASOF RIGHT and FULL joins
 
 `ASOF RIGHT JOIN` and `ASOF FULL JOIN` now lower, where they used to be refused. As in DuckDB, each left row still takes the nearest right row, and a right row no left row took comes out once more at the end with the left side's columns null. A full one also keeps a left row with no match, as `ASOF LEFT JOIN` does. With `USING`, a right one hands out the right side's values of the named columns, as any right join does. A full one with `USING` is refused by name, as every full `USING` join is so far.

@@ -27,6 +27,7 @@ exactly the shape the generator cannot write and exactly the shape `_refuse` and
 from __future__ import annotations
 
 import bisect
+import codecs
 import collections
 import contextlib
 import datetime
@@ -9938,6 +9939,46 @@ class DataFrameMixin(_Carries):
         """The values as a two dimensional numpy array, which is `to_numpy()`."""
         return _frame_to_numpy(self, None, NO_DEFAULT)
 
+    def to_records(
+        self, index: bool = True, column_dtypes: Any = None, index_dtypes: Any = None
+    ) -> Any:
+        """The rows as a numpy record array, the row labels first unless `index` is False.
+
+        The fields are named as pandas names them: each column by its name as
+        text, and the row labels `index`, or `level_0` and on for several levels,
+        unless the labels carry a name. A dtype for a field is looked up by its
+        name and then by its position, as pandas looks it up.
+        """
+        import numpy as np
+
+        arrays: list[Any] = []
+        names: list[str] = []
+        formats: list[Any] = []
+
+        def add(values: Any, name: Any, at: int, dtypes: Any) -> None:
+            array = np.asarray(values)
+            wanted = dtypes
+            if isinstance(dtypes, dict):
+                wanted = dtypes.get(name, dtypes.get(at))
+            arrays.append(array)
+            names.append(str(name))
+            formats.append(array.dtype if wanted is None else wanted)
+
+        if index:
+            labels = self.index
+            levels = getattr(labels, "nlevels", 1)
+            if levels > 1:
+                for at in range(levels):
+                    level = labels.names[at]
+                    name = f"level_{at}" if level is None else level
+                    add(labels.get_level_values(at).to_numpy(), name, at, index_dtypes)
+            else:
+                name = "index" if labels.name is None else labels.name
+                add(labels.to_numpy(), name, 0, index_dtypes)
+        for at, name in enumerate(self.columns.tolist()):
+            add(self[name].to_numpy(), name, at, column_dtypes)
+        return np.rec.fromarrays(arrays, dtype={"names": names, "formats": formats})
+
     def items(self) -> Iterator[tuple[str, Series]]:
         """Each column name with its column.
 
@@ -16705,6 +16746,23 @@ class DatetimeMixin:
             raise AttributeError("'DatetimeProperties' object has no attribute 'to_pytimedelta'")
         return [NaT if one is NaT else one.to_pytimedelta() for one in self._series.tolist()]
 
+    def to_pydatetime(self) -> Series:
+        """Every instant as a Python datetime, in an object column with NaT for a gap.
+
+        pandas 3 answers a series rather than the numpy array it used to, built
+        from the values alone, so the answer has fresh row labels and no name.
+        """
+        from ._frame import Series
+
+        column = self._series
+        if not str(column.dtype).startswith("datetime64"):
+            raise AttributeError("'TimedeltaProperties' object has no attribute 'to_pydatetime'")
+        moments = [
+            None if _objects.is_gap(value) else value.to_pydatetime()
+            for value in _values_of(column._inner)
+        ]
+        return Series(_objects.cells(moments, "T"), dtype="str")
+
     def _rounded(self, kind: str, freq: Any, ambiguous: Any, nonexistent: Any) -> Series:
         """Moves every clock to a frequency, one of three ways.
 
@@ -20468,6 +20526,34 @@ class StringMixin:
                 raise
             raise InvalidArgumentError(str(error)) from None
         return Series(rows, index=self._series.index, name=self._series.name, dtype="string")
+
+    def encode(self, encoding: str, errors: str = "strict") -> Series:
+        """Every row as bytes in an encoding, in an object column with NaN for a gap."""
+        from ._frame import Series
+
+        column = self._held if self._held is not None else self._series
+        found = []
+        for value in _values_of(column._inner):
+            found.append(value.encode(encoding, errors) if isinstance(value, str) else None)
+        cells = _objects.cells(found, "N")
+        return Series(cells, index=column.index, name=column.name, dtype="str")
+
+    def decode(self, encoding: str, errors: str = "strict", dtype: Any = None) -> Series:
+        """Every row of bytes read as text in an encoding, and anything else as a gap.
+
+        pandas answers its text dtype, or the `dtype` asked for.
+        """
+        from ._frame import Series
+
+        column = self._held if self._held is not None else self._series
+        found = []
+        for value in _values_of(column._inner):
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                found.append(codecs.decode(bytes(value), encoding, errors))
+            else:
+                found.append(None)
+        answer = Series(found, index=column.index, name=column.name, dtype="str")
+        return answer if dtype is None else answer.astype(dtype)
 
     def _characters_joined(self, sep: Any) -> Series:
         """Every row with the separator between each pair of its characters.
