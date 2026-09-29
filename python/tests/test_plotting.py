@@ -259,3 +259,30 @@ def test_a_grouped_plot_answers_a_series_of_axes() -> None:
         assert all(hasattr(ax, "get_lines") for ax in drawn)
     finally:
         plt.close("all")
+
+
+@needs_pandas
+@pytest.mark.parametrize("path", ["DataFrameGroupBy", "SeriesGroupBy"])
+def test_a_grouped_hist_has_pandas_signature(path: str) -> None:
+    from pandas.core import groupby
+
+    frame = numbers(fp).assign(k=["x", "y", "x", "y"])
+    grouped = frame.groupby("k") if path == "DataFrameGroupBy" else frame.groupby("k")["a"]
+    theirs = inspect.signature(getattr(groupby, path).hist)
+    ours = inspect.signature(grouped.hist)
+    assert list(ours.parameters) == list(theirs.parameters)[1:]
+
+
+@needs_matplotlib
+def test_a_grouped_hist_draws_each_group() -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    frame = numbers(fp).assign(k=["x", "y", "x", "y"])
+    try:
+        assert list(frame.groupby("k").hist(bins=2).index) == ["x", "y"]
+        assert list(frame.groupby("k")["a"].hist(bins=2).index) == ["x", "y"]
+    finally:
+        plt.close("all")

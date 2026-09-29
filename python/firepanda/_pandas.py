@@ -1037,7 +1037,9 @@ def _unwrapped(values: Any) -> Any:
     numpy = any(type(value).__module__ == "numpy" for value in values)
     if numpy:
         values = [
-            value.item() if type(value).__module__ == "numpy" and hasattr(value, "item") else value
+            value.item()
+            if type(value).__module__ == "numpy" and getattr(value, "ndim", None) == 0
+            else value
             for value in values
         ]
     if any(value is NaT for value in values):
@@ -8455,8 +8457,16 @@ def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
 
 
 def _missing(value: Any) -> bool:
-    """Whether a value read out of a column is a missing one, None or a NaN."""
-    return value is None or value is NA or value != value
+    """Whether a value read out of a column is a missing one, None or a NaN.
+
+    An array compares elementwise and has no single answer, so it is not missing.
+    """
+    if value is None or value is NA:
+        return True
+    try:
+        return bool(value != value)
+    except (TypeError, ValueError):
+        return False
 
 
 def _label_texts(index: Any) -> list[str]:
@@ -30330,6 +30340,9 @@ def _text_plain(value: Any) -> str:
     """A value as pandas prints a label or a cell, with tabs and newlines escaped."""
     if type(value) in (list, tuple, set, frozenset):
         return _text_container(value)
+    if type(value).__module__ == "numpy" and getattr(value, "ndim", 0) > 0:
+        # pandas prints an array in a cell as the list of its items.
+        return _text_container(value.tolist())
     text = str(value)
     for raw, escaped in _TEXT_ESCAPES:
         text = text.replace(raw, escaped)
@@ -32416,9 +32429,77 @@ GroupByMixin.plot = property(_plotting.GroupByPlot)  # type: ignore[attr-defined
 DataFrameGroupByMixin.boxplot = _plotting.boxplot_frame_groupby  # type: ignore[attr-defined]
 
 
-def _group_hist(self: Any, *args: Any, **kwargs: Any) -> Any:
-    """`grouped.hist`, each group's histogram, as pandas draws them."""
-    return _plotting.GroupByPlot(self)._each(lambda group: group.hist(*args, **kwargs))
+def _frame_group_hist(
+    self: Any,
+    column: Any = None,
+    by: Any = None,
+    grid: bool = True,
+    xlabelsize: Any = None,
+    xrot: Any = None,
+    ylabelsize: Any = None,
+    yrot: Any = None,
+    ax: Any = None,
+    sharex: bool = False,
+    sharey: bool = False,
+    figsize: Any = None,
+    layout: Any = None,
+    bins: Any = 10,
+    backend: Any = None,
+    legend: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """`grouped.hist`, each group's histograms, as pandas draws them."""
+    keywords = {
+        "column": column,
+        "by": by,
+        "grid": grid,
+        "xlabelsize": xlabelsize,
+        "xrot": xrot,
+        "ylabelsize": ylabelsize,
+        "yrot": yrot,
+        "ax": ax,
+        "sharex": sharex,
+        "sharey": sharey,
+        "figsize": figsize,
+        "layout": layout,
+        "bins": bins,
+        "backend": backend,
+        "legend": legend,
+    }
+    return _plotting.GroupByPlot(self)._each(lambda group: group.hist(**keywords, **kwargs))
 
 
-GroupByMixin.hist = _group_hist  # type: ignore[attr-defined]
+def _series_group_hist(
+    self: Any,
+    by: Any = None,
+    ax: Any = None,
+    grid: bool = True,
+    xlabelsize: Any = None,
+    xrot: Any = None,
+    ylabelsize: Any = None,
+    yrot: Any = None,
+    figsize: Any = None,
+    bins: Any = 10,
+    backend: Any = None,
+    legend: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """`grouped.hist` on one column, each group's histogram, as pandas draws them."""
+    keywords = {
+        "by": by,
+        "ax": ax,
+        "grid": grid,
+        "xlabelsize": xlabelsize,
+        "xrot": xrot,
+        "ylabelsize": ylabelsize,
+        "yrot": yrot,
+        "figsize": figsize,
+        "bins": bins,
+        "backend": backend,
+        "legend": legend,
+    }
+    return _plotting.GroupByPlot(self)._each(lambda group: group.hist(**keywords, **kwargs))
+
+
+DataFrameGroupByMixin.hist = _frame_group_hist  # type: ignore[attr-defined]
+SeriesGroupByMixin.hist = _series_group_hist  # type: ignore[attr-defined]

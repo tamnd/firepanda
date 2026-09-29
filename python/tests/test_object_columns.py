@@ -286,3 +286,14 @@ def test_a_value_pandas_copies_is_still_written_as_a_value() -> None:
     assert _objects._written(decimal.Decimal("1.5")).startswith("p")
     assert _objects._written({"a": 1}).startswith("p")
     assert _objects._written(Thing()).startswith("r")
+
+
+def test_a_column_of_arrays_builds_and_prints_as_pandas() -> None:
+    np = pytest.importorskip("numpy")
+
+    def build(lib: ModuleType) -> Any:
+        return lib.Series([np.array([1.5, 2]), np.array([[3]], dtype=object)], dtype="object")
+
+    ours, theirs = build(fp), build(pd)
+    assert repr(ours) == repr(theirs)
+    assert [a.tolist() for a in ours.tolist()] == [a.tolist() for a in theirs.tolist()]
