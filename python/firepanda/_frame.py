@@ -625,6 +625,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def extractall(self, pat: Any, flags: Any = 0) -> DataFrame:
+        """What each group of every match held, one row per match."""
+        try:
+            return self._extracted_all(pat, flags)
+        except Exception as error:
+            raise translate(error) from None
+
     def cat(
         self, others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = "left"
     ) -> Any:

@@ -87,6 +87,20 @@ CASES: list[Callable[[ModuleType], Any]] = [
     lambda lib: list(lib.concat([lib.DataFrame({"a": [1]}), lib.Series([1])])),
     lambda lib: lib.Index([1, 2]).rename(3).name,
     lambda lib: lib.Index([1, 2], name="x").rename(None).name,
+    lambda lib: lib.Series(["a1b2", "c3", None, "zz"]).str.extractall(r"(\w)(\d)"),
+    lambda lib: (
+        lib.Series(["a1b", "c3"], index=["x", "y"])
+        .rename_axis("k")
+        .str.extractall(r"(?P<letter>[a-z])(\d)?")
+    ),
+    lambda lib: lib.Series(["zz"]).str.extractall(r"(\w)(\d)"),
+    lambda lib: lib.Series(["A1a2"]).str.extractall(r"(a)(\d)", flags=2),
+    lambda lib: lib.Series(["a1b2"]).str.extractall(r"(\w)(\d)").index,
+    lambda lib: (
+        lib.Series(["a1", "b2c3"], index=lib.MultiIndex.from_tuples([("p", 1), ("q", 2)]))
+        .str.extractall(r"([a-z])(\d)")
+        .index
+    ),
 ]
 
 
@@ -97,3 +111,8 @@ def test_the_answer_is_pandas_answer(call: Callable[[ModuleType], Any]) -> None:
 
 def test_a_tuple_level_name_is_still_its_text() -> None:
     assert fp.Index([1, 2]).rename(("a", 1)).name == "('a', 1)"
+
+
+def test_extractall_needs_a_group() -> None:
+    with pytest.raises(ValueError, match="no capture groups"):
+        fp.Series(["zz"]).str.extractall(r"\w")

@@ -19973,10 +19973,8 @@ class StringMixin:
         The labels are the one place this reads a rule rather than a value. A
         named group is labelled with its name and an unnamed one is labelled
         with its own position counted from zero, so `(?P<letter>[a-z])(\\d)`
-        answers `letter` and `1`. pandas writes that second one as the integer 1
-        and a frame here holds text labels, so it comes back as `"1"`, which is
-        the divergence `partition` already carries rather than a new one. A name
-        can never collide with a position, because a group name has to be a
+        answers `letter` and `1`, the second being the integer 1 as in pandas. A
+        name can never collide with a position, because a group name has to be a
         Python identifier and a position is digits.
 
         When the answer is a column rather than a frame and the group had a
@@ -20014,6 +20012,59 @@ class StringMixin:
         return DataFrame(
             {label: Series._wrap(column) for label, column in zip(labels, columns, strict=True)}
         )
+
+    def _extracted_all(self, pat: Any, flags: Any) -> DataFrame:
+        """What each group of every match held, one row per match.
+
+        pandas runs Python's `re` over each value for this rather than Arrow, so
+        this does the same over the column's values. A row with no match and a
+        gap give no rows at all, and a group that took no part in a match is a
+        gap. The rows are labelled by the row they came from and the number of
+        the match within it, counted from zero, on a level named `match`, and
+        the columns are labelled as `extract` labels them.
+        """
+        import re
+
+        from ._frame import DataFrame, Series
+        from ._multi import MultiIndex
+
+        pat = self._a_pattern(pat)
+        if flags:
+            # Refuses a bit that names no flag, and `re` reads the letters as the caller wrote them.
+            _door_flags(flags, "extractall")
+        compiled = re.compile(pat, flags)
+        if compiled.groups == 0:
+            raise InvalidArgumentError("firepanda:value: pattern contains no capture groups")
+        names = {number: name for name, number in compiled.groupindex.items()}
+        labels = [names.get(i + 1, i) for i in range(compiled.groups)]
+        index = self._series.index
+        nested = isinstance(index, MultiIndex)
+        rows: list[Any] = []
+        counts: list[int] = []
+        cells: list[list[Any]] = [[] for _ in labels]
+        for row, value in zip(index.tolist(), _held_values(self._series._inner), strict=True):
+            if value is None:
+                continue
+            for count, found in enumerate(compiled.finditer(value)):
+                rows.append(row)
+                counts.append(count)
+                for column, group in zip(cells, found.groups(), strict=True):
+                    column.append(group)
+        if nested:
+            levels = [list(level) for level in zip(*rows, strict=True)] or [
+                [] for _ in index.names
+            ]
+            arrays = [*levels, counts]
+            level_names = [*index.names, "match"]
+        else:
+            arrays = [rows, counts]
+            level_names = [index.name, "match"]
+        return DataFrame(
+            {
+                label: Series(column, dtype="str")
+                for label, column in zip(labels, cells, strict=True)
+            },
+        ).set_axis(MultiIndex.from_arrays(arrays, names=level_names))
 
     def _dummies(self, sep: Any, dtype: Any) -> DataFrame:
         """One column per distinct token, flagging the rows that hold it.
