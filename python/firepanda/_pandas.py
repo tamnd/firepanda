@@ -27389,14 +27389,31 @@ def _exploded_items(value: Any) -> list[Any]:
     return items if items else [math.nan]
 
 
+def _unboxed(value: Any) -> Any:
+    """A value pyarrow's `to_pandas` gave, with numpy's arrays and numbers made Python's.
+
+    pandas holds a list cell as a numpy array, whose type pyarrow picks for the whole
+    column, so integers beside a null anywhere in it read as floats with NaN. The
+    array becomes a list of the same numbers, which an object column can write.
+    """
+    if isinstance(value, dict):
+        return {key: _unboxed(item) for key, item in value.items()}
+    if type(value).__module__ == "numpy" and hasattr(value, "tolist"):
+        return _unboxed(value.tolist()) if getattr(value, "ndim", 0) else value.item()
+    if isinstance(value, list):
+        return [_unboxed(item) for item in value]
+    return value
+
+
 def _nested_frame(data: Any) -> Any:
     """A frame read from an Arrow table with list or struct columns, or None without any.
 
     The extension reads no nested Arrow type, and pandas reads one into an object
-    column of lists and dicts. So the nested columns are read by pyarrow as Python
-    values and held as object columns, and the rest go through the extension as
-    they would have. None means the table has no nested column, or pyarrow is not
-    there to read one, and the extension's own refusal stands.
+    column of arrays and dicts. So the nested columns are read by pyarrow's
+    `to_pandas`, with the same numbers pandas gets, and held as object columns, and
+    the rest go through the extension as they would have. None means the table has
+    no nested column, or pyarrow is not there to read one, and the extension's own
+    refusal stands.
     """
     try:
         import pyarrow as pa
@@ -27416,7 +27433,8 @@ def _nested_frame(data: Any) -> Any:
     columns = {}
     for at, name in enumerate(names):
         if nested[at]:
-            columns[name] = Series(_objects.cells(table.column(at).to_pylist()), name=name)
+            values = [_unboxed(value) for value in table.column(at).to_pandas()]
+            columns[name] = Series(_objects.cells(values), name=name)
         else:
             columns[name] = read[name]
     return DataFrame(columns)
