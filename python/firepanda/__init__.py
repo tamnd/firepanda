@@ -108,6 +108,7 @@ from ._sql import read_sql, read_sql_query, read_sql_table
 from ._textread import read_fwf, read_table
 from ._timedelta import TimedeltaIndex, timedelta_range
 from ._versions import show_versions
+from ._xml import read_xml
 from .offsets import DateOffset
 
 __all__ = [
@@ -192,6 +193,7 @@ __all__ = [
     "read_sql_query",
     "read_sql_table",
     "read_table",
+    "read_xml",
     "reset_option",
     "set_eng_float_format",
     "set_option",
