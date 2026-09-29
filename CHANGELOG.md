@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: SQL ORDER BY ... DESC puts its nulls last
+
+A descending sort key in an `ORDER BY` now puts its nulls last, as DuckDB does for both directions, where it used to put them first. `NULLS FIRST` still puts them first. A window's order already did this.
+
 ### Added: SQL recursive CTEs
 
 `WITH RECURSIVE` now runs. The anchor is everything left of the last `UNION`, and it runs once. The recursive term then runs again and again over the rows the last round kept, until a round keeps nothing. `UNION ALL` keeps every row, and `UNION` keeps only rows no earlier round kept, so a walk over a graph with a cycle stops. The term's rows are cast to the anchor's types, rounding the way a SQL cast does, as in DuckDB. The term may read the CTE more than once, for example to join it to itself, and a later CTE or the query may read the recursive one as often as it likes. A filter written above a recursive CTE stays above it. A recursive CTE whose union lines up by name, or which holds a `WITH` of its own, is refused by name.

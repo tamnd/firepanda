@@ -600,7 +600,6 @@ from .ast import (
     EXCLUDE_NO_OTHERS,
     FRAME_RANGE,
     NULLS_FIRST,
-    NULLS_LAST,
     frame_end,
     frame_exclude,
     frame_mode,
@@ -10264,14 +10263,9 @@ def _modifiers(
         for i in range(len(orders)):
             var entry = ast.stmts[Int(orders[i])]
             var down = entry.b == SORT_DESCENDING
-            # DuckDB puts the missing values last when the sort goes up and
-            # first when it goes down, so the default follows the direction
-            # rather than being one answer for both.
-            var last = not down
-            if entry.payload == NULLS_LAST:
-                last = True
-            elif entry.payload != NO_NODE and entry.payload != 0:
-                last = False
+            # DuckDB puts the missing values last whichever way the sort goes,
+            # so a descending sort does not simply reverse an ascending one.
+            var last = entry.payload != NULLS_FIRST
             if entry.a == NO_NODE:
                 # ORDER BY ALL is every output column in the order the query
                 # produced them, each with the direction written once and

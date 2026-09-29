@@ -637,7 +637,7 @@ def test_an_order_by_of_a_position_counts_a_star_after_it_expands() raises:
 def test_an_order_by_of_a_position_takes_the_direction_written_on_it() raises:
     assert_equal(
         _plan("SELECT a, b FROM t ORDER BY 1 DESC"),
-        "SORT [a desc]\n  PROJECT [a, b]\n    SCAN t []\n",
+        "SORT [a desc nulls last]\n  PROJECT [a, b]\n    SCAN t []\n",
     )
 
 
@@ -749,7 +749,7 @@ def test_an_order_by_adds_a_column_once_however_often_it_is_read() raises:
         _plan("SELECT a FROM t ORDER BY b, b DESC"),
         (
             "PROJECT [a]\n"
-            "  SORT [b asc nulls last, b desc]\n"
+            "  SORT [b asc nulls last, b desc nulls last]\n"
             "    PROJECT [a, b]\n"
             "      SCAN t []\n"
         ),
@@ -764,7 +764,7 @@ def test_an_order_by_may_sort_on_a_fold_the_query_returns() raises:
         _plan("SELECT g, sum(a) FROM t GROUP BY g ORDER BY sum(a) DESC"),
         (
             "PROJECT [g, sum(a)]\n"
-            "  SORT [__agg_0 desc]\n"
+            "  SORT [__agg_0 desc nulls last]\n"
             "    PROJECT [g, __agg_0 as sum(a), __agg_0]\n"
             "      AGGREGATE [g] -> [sum(a)]\n"
             "        SCAN t []\n"
@@ -780,7 +780,7 @@ def test_an_order_by_may_sort_on_a_fold_the_query_does_not_return() raises:
         _plan("SELECT g FROM t GROUP BY g ORDER BY sum(a) DESC"),
         (
             "PROJECT [g]\n"
-            "  SORT [__agg_0 desc]\n"
+            "  SORT [__agg_0 desc nulls last]\n"
             "    PROJECT [g, __agg_0]\n"
             "      AGGREGATE [g] -> [sum(a)]\n"
             "        SCAN t []\n"
@@ -793,7 +793,7 @@ def test_an_order_by_may_sort_on_an_expression_over_a_fold() raises:
         _plan("SELECT g FROM t GROUP BY g ORDER BY sum(a) * 2 DESC"),
         (
             "PROJECT [g]\n"
-            "  SORT [__agg_0 * 2 desc]\n"
+            "  SORT [__agg_0 * 2 desc nulls last]\n"
             "    PROJECT [g, __agg_0]\n"
             "      AGGREGATE [g] -> [sum(a)]\n"
             "        SCAN t []\n"
@@ -808,7 +808,7 @@ def test_an_order_by_on_a_folds_alias_reads_the_output_column() raises:
     assert_equal(
         _plan("SELECT g, count(*) AS c FROM t GROUP BY g ORDER BY c DESC"),
         (
-            "SORT [c desc]\n"
+            "SORT [c desc nulls last]\n"
             "  PROJECT [g, __agg_0 as c]\n"
             "    AGGREGATE [g] -> [count(1)]\n"
             "      SCAN t []\n"
@@ -856,7 +856,7 @@ def test_a_distinct_on_runs_over_the_order_that_chose_the_row() raises:
         (
             "LIMIT 3\n"
             "  DISTINCT [a]\n"
-            "    SORT [b desc]\n"
+            "    SORT [b desc nulls last]\n"
             "      PROJECT [a, b]\n"
             "        SCAN t []\n"
         ),
@@ -1012,8 +1012,12 @@ def test_count_star_folds_over_a_constant() raises:
 
 
 def test_a_descending_sort_keeps_its_nulls_where_duckdb_puts_them() raises:
+    # Last, as they are when the sort goes up, and not first as reversing an
+    # ascending sort would put them.
     assert_true(
-        _plan("SELECT a FROM t ORDER BY a DESC").startswith("SORT [a desc]\n")
+        _plan("SELECT a FROM t ORDER BY a DESC").startswith(
+            "SORT [a desc nulls last]\n"
+        )
     )
 
 
@@ -1128,8 +1132,8 @@ def test_an_order_by_after_a_union_sorts_the_union() raises:
             "SELECT a FROM t UNION ALL SELECT b FROM t ORDER BY a DESC LIMIT 3"
         ),
         (
-            "LIMIT 3\n  SORT [a desc]\n    UNION all\n      PROJECT [a]\n     "
-            "   SCAN t []\n      PROJECT [b]\n        SCAN t []\n"
+            "LIMIT 3\n  SORT [a desc nulls last]\n    UNION all\n      PROJECT"
+            " [a]\n        SCAN t []\n      PROJECT [b]\n        SCAN t []\n"
         ),
     )
 
