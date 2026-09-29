@@ -10,6 +10,7 @@ from .._html_read import read_html
 from .._iceberg import read_iceberg
 from .._pandas import read_csv, read_json
 from .._pickle import read_pickle, to_pickle
+from .._sas import read_sas
 from .._spss import read_spss
 from .._sql import read_sql, read_sql_query, read_sql_table
 from .._stata import read_stata
@@ -30,6 +31,7 @@ __all__ = [
     "read_orc",
     "read_parquet",
     "read_pickle",
+    "read_sas",
     "read_spss",
     "read_sql",
     "read_sql_query",
