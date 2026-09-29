@@ -27,21 +27,27 @@ A frame with a column named with empty text, which `get_dummies` makes from an e
 ### Added: firepanda.testing, with assert_series_equal, assert_frame_equal and assert_index_equal
 
 A test suite written against pandas imports `pandas.testing` first, and firepanda had no such module, so every such suite failed on its import line. `firepanda.testing` has pandas' four assertions with pandas' keywords and defaults. Each check runs in pandas' order and raises pandas' message, so a failing test points at the same place under either library: the length, the index, the dtype, the values with the share that differ and the first position that does, the gaps of a text, masked or date column before its values, the name, and for a frame the shape, the columns and then each column by its position and label.
+A LATERAL subquery that folds runs
+### Added: A LATERAL subquery that folds runs
+
+`FROM t, LATERAL (SELECT sum(qty) FROM s WHERE s.k = t.k)` and `LEFT JOIN LATERAL (...) ON true` now run when the subquery aggregates, where they used to be refused. The subquery is grouped by the columns its equalities correlate on and left-joined back, so a row with no match still gets its one row: a null sum, and a count of 0 (as DuckDB gives). An uncorrelated fold is one group joined to every row. A correlation other than equalities, or a fold that reads the outer row, is refused by name.
 
 ### Added: Series.list and Series.struct read off the class answer the accessor class
 
 pandas answers the accessor class for `Series.list` and `Series.struct`, the way it does for `Series.str`, so a program can read the accessor's members without a column. firepanda answered a property object there, which is not callable, so both names now go through the same descriptor as `str` and `dt`, and the accessors take `data=None` as pandas' do.
 
-SQL PIVOT runs when every column lists its values
+### Added: SQL PIVOT runs when every column lists its values
 
 `PIVOT t ON a IN (1, 2) USING sum(x) GROUP BY g` and `FROM t PIVOT (sum(x) FOR a IN (1, 2) GROUP BY g)` now lower and run, where they used to be parsed and then refused. As in DuckDB, each cell is the `USING` aggregate over the rows holding that cell's values, one row per group, and a `PIVOT` with no `USING` counts the rows. Without a `GROUP BY` the groups are the columns that neither `ON` nor `USING` reads. Several `ON` columns make a cell for every combination of their values, and the cells are named the way DuckDB names them: the values joined with `_`, then the aggregate's alias, or the aggregate as printed when there is more than one. An `ON` column with no `IN` list, or with an `IN` over an enum or a subquery, is still refused, because its columns aren't known until the data is read.
 
 ### Added: the masked types Int64, Float64 and boolean
 
 pandas' capital letter types, `Int8` to `UInt64`, `Float32`, `Float64` and `boolean`, and their dtype classes, are taken by `astype`, the constructor and `convert_dtypes` where they were refused. A masked column keeps its type through a gap, prints a gap as `<NA>`, answers `boolean` with a gap from a comparison, follows Kleene's logic for `&`, `|` and `^`, and skips gaps in reductions, as pandas does. It is held as an object column whose cells carry the type's name, and arithmetic, comparisons and reductions run over the lower case column of the same width. Document 99 of the compat notes describes the design.
-### Added: ### Added: SQL UNPIVOT runs
+
+### Added: SQL UNPIVOT runs
 
 `UNPIVOT t ON a, b, c` and `FROM t UNPIVOT (v FOR n IN (a, b, c))` now lower and run, where they used to be parsed and then refused. Each row hands out one row per folded column, with the column's name in `name` and its value in `value` (or the names `INTO NAME ... VALUE ...` gives), and a null value drops its row, as in DuckDB. The columns not folded come along unchanged. A folded expression is named by its alias, or else by the one column it reads; an expression reading two columns is refused as DuckDB refuses it. More than one value column is refused by name.
+
 ### Added: ArrowDtype, and the list and struct accessors
 
 `ArrowDtype` names a column backed by Arrow, as pandas' does, and `astype(ArrowDtype(t))` or `Series(..., dtype=ArrowDtype(t))` makes one. The column is an object column whose cells carry the Arrow type, so it keeps the type through anything that moves rows, prints as pandas prints it with `<NA>` for a gap, and exports to Arrow with its own type. `Series.list` answers `len`, indexing, slicing and `flatten`, and `Series.struct` answers `dtypes`, `field` by name, position or path, and `explode`, each through the pyarrow compute function pandas uses.
@@ -57,6 +63,7 @@ pandas' capital letter types, `Int8` to `UInt64`, `Float32`, `Float64` and `bool
 ### Added: Group by answers with two levels of column labels
 
 `DataFrameGroupBy.agg` takes a list of reductions, and a mapping whose values are lists, and names each column by the pair of the column and the reduction, as pandas does, with lambdas numbered `<lambda_0>` and on and a repeated name raising `SpecificationError`. `DataFrameGroupBy.describe` and `DataFrameGroupBy.ohlc` are new and answer the same shape. Under `as_index=False` the keys come out as columns with an empty lower level. A header cut by `max_columns` now prints the whole label of the first column past the dots, as pandas does.
+
 ### Added: Columns with more than one level
 
 A frame whose column names are all tuples of one length of at least two now has `MultiIndex` columns, as in pandas. `df[("a", "x")]` selects one column, `df["a"]` selects every column under the first level `a` and drops that level, or answers a series when what is left of each name is empty text. The repr and `to_string` print one header line per level, sparsified the way pandas prints them, and `to_csv` writes one header row per level. Level names on the columns read as None for now.
@@ -64,6 +71,7 @@ A frame whose column names are all tuples of one length of at least two now has 
 ### Added: dt.to_pydatetime, str.encode, str.decode and DataFrame.to_records
 
 `dt.to_pydatetime` answers an object column of Python datetimes with NaT for a gap, as pandas 3 does. `str.encode` answers an object column of bytes and `str.decode` reads bytes back as text, with anything that is not bytes as a gap. `DataFrame.to_records` answers a numpy record array with the row labels first, named and typed as pandas names and types them, including `column_dtypes` and `index_dtypes`.
+
 ### Added: SQL ASOF RIGHT and FULL joins
 
 `ASOF RIGHT JOIN` and `ASOF FULL JOIN` now lower, where they used to be refused. As in DuckDB, each left row still takes the nearest right row, and a right row no left row took comes out once more at the end with the left side's columns null. A full one also keeps a left row with no match, as `ASOF LEFT JOIN` does. With `USING`, a right one hands out the right side's values of the named columns, as any right join does. A full one with `USING` is refused by name, as every full `USING` join is so far.
@@ -75,6 +83,7 @@ A frame whose column names are all tuples of one length of at least two now has 
 ### Added: explode, and nested Arrow columns read as object columns
 
 `Series.explode` and `DataFrame.explode` spread each list, tuple or set over rows of its own and repeat the row labels, with `ignore_index` and several columns at once, and refuse an empty, repeated or mismatched list of columns as pandas does. `DataFrame.from_arrow` reads a table with list, map or struct columns by holding each nested column as an object column of lists and dicts, where it used to refuse the whole table.
+
 ### Added: SQL LEFT JOIN LATERAL
 
 `LEFT JOIN LATERAL (...) ON true` now lowers, where it used to be refused. A left row the subquery finds nothing for is kept once, with nulls where the subquery's columns would be, as in DuckDB. The subquery has to be correlated by equalities alone, its select list may not read the left side, and the `ON` has to be `true`; anything else is refused by name. A right or full join to a `LATERAL` is refused as before.

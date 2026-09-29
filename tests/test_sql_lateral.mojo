@@ -163,5 +163,89 @@ def test_a_comparison_that_is_not_an_equality_is_turned_down() raises:
         )
 
 
+def test_a_fold_hands_every_left_row_one_row() raises:
+    var sql = (
+        "SELECT shop, total FROM shops, LATERAL (SELECT sum(qty) AS total FROM"
+        " sales WHERE sales.shop = shops.shop) ORDER BY shop"
+    )
+    assert_equal(shown(sql, "shop"), "1,2,3")
+    assert_equal(shown(sql, "total"), "30,5,null")
+
+
+def test_a_count_over_nothing_is_zero() raises:
+    assert_equal(
+        shown(
+            (
+                "SELECT shop, n FROM shops, LATERAL (SELECT count(*) AS n FROM"
+                " sales WHERE sales.shop = shops.shop) ORDER BY shop"
+            ),
+            "n",
+        ),
+        "2,1,0",
+    )
+
+
+def test_a_left_join_lateral_that_folds_is_the_same_rows() raises:
+    var sql = (
+        "SELECT shop, n, m FROM shops LEFT JOIN LATERAL (SELECT count(qty) AS"
+        " n, max(qty) AS m FROM sales WHERE sales.shop = shops.shop) ON true"
+        " ORDER BY shop"
+    )
+    assert_equal(shown(sql, "n"), "2,1,0")
+    assert_equal(shown(sql, "m"), "20,5,null")
+
+
+def test_a_fold_may_be_added_to_a_left_column() raises:
+    assert_equal(
+        shown(
+            (
+                "SELECT shop, x FROM shops, LATERAL (SELECT count(*) +"
+                " shops.shop AS x FROM sales WHERE sales.shop = shops.shop)"
+                " ORDER BY shop"
+            ),
+            "x",
+        ),
+        "3,3,3",
+    )
+
+
+def test_a_filter_on_the_subquery_folds_fewer_rows() raises:
+    assert_equal(
+        shown(
+            (
+                "SELECT shop, t FROM shops, LATERAL (SELECT sum(qty) AS t FROM"
+                " sales WHERE qty > 5 AND sales.shop = shops.shop) ORDER BY"
+                " shop"
+            ),
+            "t",
+        ),
+        "30,null,null",
+    )
+
+
+def test_an_uncorrelated_fold_is_one_row_for_all() raises:
+    assert_equal(
+        shown(
+            (
+                "SELECT shop, t FROM shops, LATERAL (SELECT sum(qty) AS t FROM"
+                " sales) ORDER BY shop"
+            ),
+            "t",
+        ),
+        "35,35,35",
+    )
+
+
+def test_a_fold_correlated_by_an_inequality_is_turned_down() raises:
+    with assert_raises(contains="equalities alone"):
+        _ = run(
+            (
+                "SELECT shop, t FROM shops, LATERAL (SELECT sum(qty) AS t FROM"
+                " sales WHERE sales.shop < shops.shop)"
+            ),
+            session(),
+        )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
