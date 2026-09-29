@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: dt.to_pydatetime, str.encode, str.decode and DataFrame.to_records
+
+`dt.to_pydatetime` answers an object column of Python datetimes with NaT for a gap, as pandas 3 does. `str.encode` answers an object column of bytes and `str.decode` reads bytes back as text, with anything that is not bytes as a gap. `DataFrame.to_records` answers a numpy record array with the row labels first, named and typed as pandas names and types them, including `column_dtypes` and `index_dtypes`.
+
 ### Added: nested Arrow columns read with pandas' numbers
 
 `DataFrame.from_arrow` reads a nested column through pyarrow's `to_pandas`, so a list of integers beside a null reads as floats with NaN and a struct field does the same, which is what pandas holds. The arrays pandas keeps in each cell are held as lists.
