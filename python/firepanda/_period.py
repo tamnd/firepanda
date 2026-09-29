@@ -214,15 +214,17 @@ def _of_span(nanos: int) -> _Freq:
     raise AssertionError(nanos)
 
 
-def _freq(freq: Any) -> _Freq:
+def _freq(freq: Any, signed: bool = False) -> _Freq:
     """A frequency as a period reads it, from text, an offset or a span.
 
     Raises:
         ValueError: With pandas' message for a frequency no period has, for one
-            that is not positive, and for text that names nothing.
+            that is not positive unless `signed` allows it, and for text that
+            names nothing.
     """
     from . import offsets
 
+    check: Any = (lambda found: found) if signed else _positive
     if isinstance(freq, _Freq):
         return freq
     if isinstance(freq, offsets.BaseOffset):
@@ -231,9 +233,9 @@ def _freq(freq: Any) -> _Freq:
         found = _of_offset(freq)
         if found is None:
             raise InvalidArgumentError(f"{freq!r} is not supported as period frequency")
-        return _positive(found)
+        return check(found)
     if isinstance(freq, (datetime.timedelta, Timedelta)):
-        return _positive(_of_span(Timedelta(freq).value))
+        return check(_of_span(Timedelta(freq).value))
     if not isinstance(freq, str):
         raise InvalidArgumentError(f"Invalid frequency: {freq}")
     text = freq.strip()
@@ -244,7 +246,7 @@ def _freq(freq: Any) -> _Freq:
         except ValueError:
             letters = re.match(r"-?\d*([A-Za-z]*)", text)
             raise _invalid(text, KeyError(letters.group(1) or text)) from None  # type: ignore[union-attr]
-        return _positive(_of_span(nanos))
+        return check(_of_span(nanos))
     count = int(found.group(1)) if found.group(1) else 1
     prefix, suffix = found.group(2), found.group(3)
     if prefix in _RENAMED:
@@ -275,7 +277,7 @@ def _freq(freq: Any) -> _Freq:
             anchor = _WEEKDAYS.index(suffix)
     elif suffix is not None:
         raise _invalid(text, InvalidArgumentError(f"Bad freq suffix {suffix}"))
-    return _positive(_Freq(prefix, anchor, count))
+    return check(_Freq(prefix, anchor, count))
 
 
 def _weekday(days: int) -> int:
@@ -925,3 +927,146 @@ def _from_fields(freq: _Freq, *fields: Any) -> int:
         year + extra, month + 1, 1 if day is None else day, hour or 0, minute or 0, second or 0
     )
     return _ordinal(freq, moment, 0)
+
+
+class PeriodDtype(str):
+    """pandas' type for a column of periods, equal to its name, like `period[M]`.
+
+    The frequency may count backwards or not at all here, as `period[-1D]` and
+    `period[0D]`, because pandas takes those for the type even though no single
+    period can have them.
+    """
+
+    type = Period
+    """The class of each value."""
+
+    def __new__(cls, freq: Any) -> PeriodDtype:
+        from . import offsets
+
+        if isinstance(freq, PeriodDtype):
+            return freq
+        if not isinstance(freq, (str, offsets.BaseOffset)):
+            raise TypeError(
+                f"PeriodDtype argument should be string or BaseOffset, got {type(freq).__name__}"
+            )
+        if isinstance(freq, str):
+            inside = re.fullmatch(r"[Pp]eriod\[(.*)\]", freq)
+            if inside is not None:
+                freq = inside.group(1)
+        found = _freq(freq, signed=True)
+        made = super().__new__(cls, f"period[{found.text}]")
+        made._freq = found
+        return made
+
+    def __getnewargs__(self) -> tuple[str]:
+        return (self.name,)
+
+    @classmethod
+    def construct_from_string(cls, string: str) -> PeriodDtype:
+        """The type named by text like `period[M]`.
+
+        Raises:
+            TypeError: For text that does not name one, in pandas' words.
+        """
+        if not isinstance(string, str):
+            raise TypeError(f"'construct_from_string' expects a string, got {type(string)}")
+        if re.fullmatch(r"[Pp]eriod\[.*\]", string):
+            try:
+                return cls(string)
+            except ValueError:
+                pass
+        raise TypeError(f"Cannot construct a 'PeriodDtype' from '{string}'")
+
+    @classmethod
+    def is_dtype(cls, dtype: Any) -> bool:
+        """Whether a value is this type or text that names it."""
+        if isinstance(dtype, str):
+            try:
+                cls.construct_from_string(dtype)
+            except TypeError:
+                return False
+            return True
+        return isinstance(dtype, cls)
+
+    @property
+    def freq(self) -> Any:
+        """The frequency, as the offset that steps by it."""
+        return self._freq.offset()
+
+    @property
+    def name(self) -> str:
+        """The text, like `period[M]`."""
+        return str.__str__(self)
+
+    @property
+    def kind(self) -> str:
+        """numpy's letter for the type, `O`, since pandas holds periods as objects."""
+        return "O"
+
+    @property
+    def na_value(self) -> Any:
+        """What a gap reads as, `NaT`."""
+        return NaT
+
+    @property
+    def base(self) -> Any:
+        """The numpy type pandas reports underneath, object."""
+        import numpy
+
+        return numpy.dtype("O")
+
+    @property
+    def str(self) -> str:
+        """numpy's short text for the type, `|O08`."""
+        return "|O08"
+
+    @property
+    def num(self) -> int:
+        """The number pandas gives the type, 102."""
+        return 102
+
+    @property
+    def itemsize(self) -> int:
+        """The bytes each value takes, 8."""
+        return 8
+
+    @property
+    def shape(self) -> tuple[()]:
+        """The shape of each value, which is none."""
+        return ()
+
+    @property
+    def names(self) -> None:
+        """The field names, which a period type has none of."""
+        return None
+
+    @property
+    def subdtype(self) -> None:
+        """The type inside, which a period type has none of."""
+        return None
+
+    @property
+    def isbuiltin(self) -> int:
+        """numpy's flag for a built in type, 0."""
+        return 0
+
+    @property
+    def isnative(self) -> int:
+        """numpy's flag for native byte order, which pandas gives as 0."""
+        return 0
+
+    def __repr__(self) -> str:
+        return self.name
+
+    def __hash__(self) -> int:
+        return hash(("period", self._freq))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, PeriodDtype):
+            return self._freq == other._freq
+        if isinstance(other, str):
+            return other[:1].lower() + other[1:] == self.name
+        return False
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
