@@ -155,6 +155,15 @@ CASES: list[Callable[[ModuleType], Any]] = [
     lambda lib: lib.Series(["abc", "de"]).str[0],
     lambda lib: lib.Series(["abc", None]).str[1:],
     lambda lib: lib.Series(["abc", "de"]).str[-1],
+    lambda lib: lib.Series([[1, 2], [], 3]).explode(),
+    lambda lib: lib.Series([[1, 2], [3]], index=["a", "b"], name="n").explode(),
+    lambda lib: lib.Series([[1, 2], [3]]).explode(ignore_index=True),
+    lambda lib: lib.Series([("x", "y"), "z"]).explode().tolist(),
+    lambda lib: lib.DataFrame({"k": [1, 2], "v": lists(lib)[:2]}).explode("v"),
+    lambda lib: lib.DataFrame({"k": [1, 2], "v": lists(lib)[:2]}).explode("v", ignore_index=True),
+    lambda lib: lib.DataFrame(
+        {"v": lib.Series([[1, 2], [3]]), "w": lib.Series([["a", "b"], ["c"]])}
+    ).explode(["v", "w"]),
 ]
 
 
@@ -210,3 +219,32 @@ def test_an_object_column_exports_its_values_to_arrow() -> None:
     assert pa.table(frame).to_pydict() == {"a": [1], "b": [[1]]}
     with pytest.raises(pa.ArrowInvalid):
         pa.array(fp.Series([1, "two"]))
+
+
+def test_a_nested_arrow_table_reads_as_object_columns() -> None:
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table(
+        {
+            "row": [0, 1, 2],
+            "items": pa.array([[1, 2], [], None], type=pa.large_list(pa.int64())),
+            "pair": pa.array([{"a": 1}, None, {"a": 3}], type=pa.struct([("a", pa.int64())])),
+        }
+    )
+    frame = fp.DataFrame.from_arrow(table)
+    assert frame.dtypes.astype(str).tolist() == ["int64", "object", "object"]
+    assert frame["items"].tolist() == [[1, 2], [], None]
+    assert frame["pair"].tolist() == [{"a": 1}, None, {"a": 3}]
+    assert frame.explode("items")["items"].tolist()[:2] == [1, 2]
+    assert frame.explode("items")["items"].isna().tolist() == [False, False, True, True]
+
+
+@pytest.mark.parametrize(
+    ("columns", "message"),
+    [([], "nonempty"), (["v", "v"], "unique"), (["v", "w"], "matching element counts")],
+)
+def test_explode_refuses_what_pandas_refuses(columns: list[str], message: str) -> None:
+    frame = fp.DataFrame({"v": fp.Series([[1, 2], [3]]), "w": fp.Series([[1], [2]])})
+    with pytest.raises(ValueError, match=message):
+        frame.explode(columns)
+    with pytest.raises(ValueError, match=message):
+        pd.DataFrame({"v": [[1, 2], [3]], "w": [[1], [2]]}).explode(columns)
