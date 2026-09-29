@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: ewm(...).online()
+
+`ExponentialMovingWindow.online()` returns an `OnlineExponentialMovingWindow` whose `mean()` remembers its state, so `mean(update=...)` carries on from the last row the way pandas does with numba, and `reset()` starts over. The kernel is plain Python, so no numba is needed. The other reductions, `update_times` and any engine but numba are refused with pandas' messages, and the window now prints the way pandas prints it.
+
 ### Added: pandas.compat, core, io and errors submodules
 
 `firepanda.compat` has pandas' platform checks and version flags, with the pyarrow flags worked out on first read. `firepanda.core.api` and `firepanda.io.api` name the core objects and the readers as the top level objects. `firepanda.errors` is now a package with `cow` holding pandas' chained assignment messages, and `abc` and `ctypes` showing through as they do in pandas.
