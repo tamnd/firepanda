@@ -34,7 +34,8 @@ whichever function they called first.
 
 from __future__ import annotations
 
-from . import _attrs, _firepanda, api, errors, offsets, testing
+from . import _attrs, _firepanda, api, arrays, errors, offsets, testing
+from ._array import array
 from ._arrowtyped import ArrowDtype
 from ._attrs import Flags
 from ._categorical import Categorical, CategoricalDtype, CategoricalIndex
@@ -156,6 +157,8 @@ __all__ = [
     "UInt64Dtype",
     "__version__",
     "api",
+    "array",
+    "arrays",
     "bdate_range",
     "col",
     "concat",

@@ -31019,11 +31019,21 @@ def _pprinted(value: Any) -> str:
 
 
 def _summary(
-    values: list[Any], formatter: Any, justify: bool, name: str, width: int, most: int
+    values: list[Any],
+    formatter: Any,
+    justify: bool,
+    name: str,
+    width: int,
+    most: int,
+    indent: bool = True,
 ) -> str:
-    """The bracketed labels of an index, wrapped and cut the way pandas does it."""
-    space1 = "\n" + " " * (len(name) + 1)
-    space2 = "\n" + " " * (len(name) + 2)
+    """The bracketed labels of an index, wrapped and cut the way pandas does it.
+
+    `indent=False` is pandas' `indent_for_name=False`, which an array's repr
+    asks for, so the wrapped lines start one space in rather than past a name.
+    """
+    space1 = "\n" + " " * (len(name) + 1) if indent else "\n"
+    space2 = "\n" + " " * (len(name) + 2) if indent else "\n "
     n = len(values)
     cut = n > most
     if n == 0:
