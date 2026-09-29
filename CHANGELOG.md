@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: The string accessor on lists, and `s.str[...]`
+
+`s.str[i]` and `s.str[a:b:c]` now work, as `get(i)` and `slice(a, b, c)` do in pandas. On an object column, `len`, `get`, `slice`, indexing and `join` read each value in Python the way pandas does, so a list, a tuple or a dict in a cell answers its length, its item or its joined text, and a value the method cannot take, such as a number, answers NaN. Other string methods read a list as a gap rather than refusing the column. Text read out of an object column comes back as an object column, and numbers with a gap come back as floats, as in pandas.
+
 ### Added: Operations that answer object columns
 
 Reading one row across columns of different types with `iloc`, `loc` or `iterrows`, `transpose` and `melt` over such columns, and `concat` of parts that share no type now answer an object column, as pandas does. `describe` answers `count`, `unique`, `top` and `freq` for text, flags and categories, and `describe(include="all")` puts those rows before the numbers' rows. `str.split` and `str.rsplit` without `expand` and the new `str.findall` answer a list per row, and `dt.time` answers the time of day. An object column's gap reads as None, NaN or NaT the way pandas' does, and a list in a cell prints as pandas prints it, as `[a, b]`. `Timestamp` of a number with a zone now counts from the epoch in UTC, as pandas does, where it used to read the number as a time on the zone's clock.
