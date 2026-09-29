@@ -860,6 +860,15 @@ def _datetime_members() -> tuple[Member, ...]:
     )
     out.append(
         Member(
+            name="time",
+            kind="property",
+            body="self._clock_times()",
+            doc="The time of day of each instant, as an object column of `datetime.time`.",
+            returns="Series",
+        )
+    )
+    out.append(
+        Member(
             name="unit",
             kind="property",
             body="self._resolution()",
@@ -1183,16 +1192,16 @@ def _string_members() -> tuple[Member, ...]:
             kind="method",
             signature="pat: Any = None, *, n: Any = -1, expand: Any = False, regex: Any = None",
             body="self._split(pat, n, expand, regex, False)",
-            doc="Every row cut at a separator or a pattern, one column per piece.",
-            returns="DataFrame",
+            doc="Every row cut at a separator or a pattern, as a list or one column per piece.",
+            returns="Any",
         ),
         Member(
             name="rsplit",
             kind="method",
             signature="pat: Any = None, *, n: Any = -1, expand: Any = False",
             body="self._split(pat, n, expand, None, True)",
-            doc="Every row cut at a separator counted from the right, one column per piece.",
-            returns="DataFrame",
+            doc="Every row cut at a separator counted from the right, as a list or columns.",
+            returns="Any",
         ),
         Member(
             name="join",
@@ -1232,6 +1241,14 @@ def _string_members() -> tuple[Member, ...]:
             body="self._extracted_all(pat, flags)",
             doc="What each group of every match held, one row per match.",
             returns="DataFrame",
+        ),
+        Member(
+            name="findall",
+            kind="method",
+            signature="pat: Any, flags: Any = 0",
+            body="self._found_all(pat, flags)",
+            doc="Every match of a pattern in each row, as a list.",
+            returns="Series",
         ),
         Member(
             name="cat",

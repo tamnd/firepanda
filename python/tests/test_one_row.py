@@ -86,15 +86,15 @@ def test_widths_meet_the_way_numpy_does(firepanda: ModuleType) -> None:
 @pytest.mark.parametrize(
     "table", [{"a": [1], "b": [True]}, {"a": [1], "b": ["x"]}, {"a": [1.5], "b": ["x"]}]
 )
-def test_a_mix_pandas_holds_as_object_is_refused(
+def test_a_mix_pandas_holds_as_object_is_an_object_column(
     firepanda: ModuleType, table: dict[str, Any]
 ) -> None:
-    """A number next to a flag or to text is an object column in pandas."""
+    """A number next to a flag or to text is an object column in pandas, and here."""
     import pandas as pd
 
-    assert pd.DataFrame(table).iloc[0].dtype == object
-    with pytest.raises(NotImplementedError, match="object column"):
-        firepanda.DataFrame(table).iloc[0]
+    mine, theirs = firepanda.DataFrame(table).iloc[0], pd.DataFrame(table).iloc[0]
+    assert str(mine.dtype) == "object"
+    assert repr(mine) == repr(theirs)
 
 
 @pytest.mark.parametrize("position", [3, -4, 9999])

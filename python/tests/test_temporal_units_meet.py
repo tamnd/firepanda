@@ -85,8 +85,13 @@ def test_a_zoned_column_is_not_made_naive_by_astype(firepanda: ModuleType) -> No
         fine(firepanda).dt.tz_localize("UTC").astype("datetime64[ms]")
 
 
-def test_a_mix_of_zones_is_refused(firepanda: ModuleType) -> None:
-    """pandas answers an object column, which firepanda has no type for."""
-    parts = [coarse(firepanda).dt.tz_localize("UTC"), fine(firepanda).dt.tz_localize("Asia/Tokyo")]
-    with pytest.raises(firepanda.errors.UnsupportedError):
-        firepanda.concat(parts, ignore_index=True)
+def test_a_mix_of_zones_is_an_object_column(firepanda: ModuleType) -> None:
+    """pandas answers an object column of instants, each on its own clock, and so does this."""
+    import pandas as pd
+
+    def build(m: ModuleType) -> Any:
+        parts = [coarse(m).dt.tz_localize("UTC"), fine(m).dt.tz_localize("Asia/Tokyo")]
+        return m.concat(parts, ignore_index=True)
+
+    assert str(build(firepanda).dtype) == "object"
+    assert repr(build(firepanda)) == repr(build(pd))
