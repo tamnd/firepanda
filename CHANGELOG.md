@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.style
+
+`DataFrame.style` now answers pandas' `Styler`, ported from pandas and run over firepanda frames, when jinja2 is installed. It writes a frame as HTML, LaTeX, text or Typst with the same formats, highlights, bars, gradients, tooltips, hidden rows and columns, sticky headers, table styles and concatenated footers as pandas, and the same text for each, down to the element ids. Without jinja2 the accessor raises pandas' own AttributeError. The gradients and colormapped bars need matplotlib, as they do in pandas. `firepanda.io.formats.style.Styler` is importable where pandas keeps it. `Styler.to_excel` is not ported yet. A column of a frame that was transposed twice now hands its labels back from `items` as the values they are, not as the text the extension holds them as.
+
 ### Added: sequence answers in apply, level keys in loc and numbers compared with text
 
 `DataFrame.apply` now frames a list, a tuple or an array answered for each column the way pandas does, labelled by the rows when the answers are as long as the frame. `loc` reads a row key with a slice or a list for some level, such as `IndexSlice["A", :]`, level by level through `MultiIndex.get_locs`, which now answers rows in the order its lists name them, and `loc[:, "a"]` on rows with levels keeps every level. A column of numbers or flags compared with text is False for `==` and True for `!=`, and an order between them raises pandas' TypeError.

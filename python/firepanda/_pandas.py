@@ -32,6 +32,7 @@ import collections
 import contextlib
 import datetime
 import functools
+import importlib.util
 import itertools
 import math
 import numbers
@@ -1157,7 +1158,7 @@ def _raw_labels(owner: Any) -> Any:
 
 def _label_values(owner: Any) -> list[Any]:
     """The row labels as Python values, a tuple each when there are several levels."""
-    if _has_levels(owner):
+    if _has_levels(owner) or _has_names(owner):
         return owner.index.tolist()
     return _values_of(owner._inner.labels())
 
@@ -10333,6 +10334,23 @@ class DataFrameMixin(_Carries):
         frame = self.select_dtypes("number") if numeric_only else self
         pieces = {name: frame[name].mode(dropna=dropna).tolist() for name in _shown_names(frame)}
         return type(self)(_padded(pieces))
+
+    @property
+    def style(self) -> Any:
+        """A Styler over this frame, which renders it as HTML, LaTeX, Typst or text.
+
+        The Styler is built on jinja2, as pandas' is, and without jinja2 this
+        raises pandas' AttributeError rather than the ImportError, so `hasattr`
+        answers False the way it does in pandas.
+
+        Raises:
+            AttributeError: When jinja2 is not installed.
+        """
+        if importlib.util.find_spec("jinja2") is None:
+            raise AttributeError("The '.style' accessor requires jinja2")
+        from ._style import Styler
+
+        return Styler(self)
 
     @property
     def T(self) -> DataFrame:
