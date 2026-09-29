@@ -2083,7 +2083,11 @@ def test_what_a_lateral_subquery_does_not_lower_is_refused_by_name() raises:
         _ = _plan("SELECT a FROM t, LATERAL (SELECT k FROM u LIMIT 1) v")
     with assert_raises(contains="DISTINCT inside a LATERAL"):
         _ = _plan("SELECT a FROM t, LATERAL (SELECT DISTINCT k FROM u) v")
-    with assert_raises(contains="inner or a cross join to a LATERAL"):
+    with assert_raises(contains="or a left join to a LATERAL"):
+        _ = _plan(
+            "SELECT a FROM t RIGHT JOIN LATERAL (SELECT k FROM u) v ON true"
+        )
+    with assert_raises(contains="correlated by an equality"):
         _ = _plan(
             "SELECT a FROM t LEFT JOIN LATERAL (SELECT k FROM u) v ON true"
         )

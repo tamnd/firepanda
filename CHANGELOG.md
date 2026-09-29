@@ -49,6 +49,9 @@ A descending sort key in an `ORDER BY` now puts its nulls last, as DuckDB does f
 ### Added: The operations that make number names
 
 `pivot`, `pivot_table`, `unstack` and `crosstab` spread number and instant values across the columns, `get_dummies` encodes numbers, bools and `dummy_na` under their own values, and `dot` with a matrix, `from_dict` and `from_records` with rows, `concat` of unnamed series along the columns and `Series.to_frame()` name their columns 0, 1, 2 as pandas does. `str.partition`, `str.rpartition`, `str.extract`, `str.split(expand=True)` and `str.rsplit(expand=True)` name their columns by number rather than by text, `read_csv(header=None)` numbers the columns and names the index 0 with `index_col=0`, and `read_json` reads names like `"0"` as numbers under `convert_axes`. An index name can be a number too, through `rename_axis`, `Index.rename` and `set_names`. Each is compared with pandas in `python/tests/test_made_names.py`.
+### Added: SQL LEFT JOIN LATERAL
+
+`LEFT JOIN LATERAL (...) ON true` now lowers, where it used to be refused. A left row the subquery finds nothing for is kept once, with nulls where the subquery's columns would be, as in DuckDB. The subquery has to be correlated by equalities alone, its select list may not read the left side, and the `ON` has to be `true`; anything else is refused by name. A right or full join to a `LATERAL` is refused as before.
 
 ### Added: SQL named windows
 
