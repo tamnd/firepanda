@@ -49,6 +49,7 @@ from . import (
     _config,
     _excel_write,
     _firepanda,
+    _iceberg,
     _interval,
     _masked,
     _names,
@@ -32579,3 +32580,7 @@ SeriesMixin.to_xarray = DataFrameMixin.to_xarray = _xarray.to_xarray  # type: ig
 # `to_excel` is pandas' method, which writes the object to a workbook sheet, and lives
 # with `ExcelWriter` and pandas' cell formatter in `_excel_write`.
 SeriesMixin.to_excel = DataFrameMixin.to_excel = _excel_write.to_excel  # type: ignore[attr-defined]
+
+# `to_iceberg` is pandas' method, which hands the frame to pyiceberg, and lives with
+# `read_iceberg` in `_iceberg`.
+DataFrameMixin.to_iceberg = _iceberg.to_iceberg  # type: ignore[attr-defined]
