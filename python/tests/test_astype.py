@@ -240,8 +240,6 @@ def test_a_name_nothing_answers_to_is_a_type_error(firepanda: ModuleType) -> Non
         ("UInt8", "nullable"),
         ("Float32", "nullable"),
         ("boolean", "nullable"),
-        ("object", "no type that holds anything"),
-        ("O", "no type that holds anything"),
         ("U", "no type that holds anything"),
         ("unicode", "no type that holds anything"),
         ("str_", "no type that holds anything"),

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Object columns
+
+A column can hold any Python value, as pandas' object dtype does. A list whose values do not share one type, such as text mixed with numbers, a list in each cell, a dict, a `Decimal` or an integer too large for int64, now builds an object column where it used to be refused, and `dtype=object` and `astype(object)` make one on request. The values are written into a text column, so every operation that moves rows carries them unchanged, and they are read back as they were by `tolist`, iteration, one cell, `to_dict` and `to_numpy`. Comparisons, arithmetic, `isin`, `fillna`, sorting, `min`, `max`, `sum` and `prod` compute one value at a time in Python, as pandas does, and `.str` works on an object column of text. Document 95 of the compat notes describes the design and the few places the answer still differs from pandas.
+
 ### Added: `str.extractall`
 
 `Series.str.extractall(pat, flags=0)` answers one row for each match of the pattern in each value, labelled by the row it came from and the number of the match on a level named `match`, with one column per group named as `extract` names them. It runs Python's `re` over the values, as pandas does, and a pattern with no groups is refused with pandas' message.

@@ -168,31 +168,26 @@ def test_columns_of_different_lengths_are_refused(firepanda: ModuleType) -> None
         firepanda.DataFrame({"a": [1, 2, 3], "b": [1]})
 
 
-def test_a_mixture_pandas_would_call_object_is_refused(firepanda: ModuleType) -> None:
-    """The third divergence, and the one that is a refusal rather than an answer.
-
-    `[True, 1]` is a list somebody made by accident far more often than one they
-    meant, and there is no column type here that holds both without deciding
-    which of the two they wanted.
-    """
-    with pytest.raises(TypeError, match="mixes"):
-        firepanda.DataFrame({"a": [True, 1]})
-    with pytest.raises(TypeError, match="mixes"):
-        firepanda.DataFrame({"a": [1, "two"]})
+def test_a_mixture_pandas_would_call_object_is_an_object_column(firepanda: ModuleType) -> None:
+    """pandas keeps each value as it was in an object column, and so does firepanda now."""
+    frame = firepanda.DataFrame({"a": [True, 1], "b": [1, "two"]})
+    assert [str(kind) for kind in frame.dtypes] == ["object", "object"]
+    assert frame["a"].tolist() == [True, 1]
+    assert frame["b"].tolist() == [1, "two"]
 
 
-def test_a_type_with_no_column_to_put_it_in_names_the_row(firepanda: ModuleType) -> None:
-    """The message has to say where, because a long list is not searchable by eye."""
-    with pytest.raises(TypeError) as caught:
-        firepanda.DataFrame({"a": [1, 2, {"nested": True}]})
-    assert "row 2" in str(caught.value)
-    assert "dict" in str(caught.value)
+def test_a_value_with_no_typed_column_is_held_as_it_was(firepanda: ModuleType) -> None:
+    """A dict has no typed column, so the column is object and the dict comes back."""
+    column = firepanda.DataFrame({"a": [1, 2, {"nested": True}]})["a"]
+    assert str(column.dtype) == "object"
+    assert column.tolist() == [1, 2, {"nested": True}]
 
 
-def test_an_integer_too_large_for_int64_is_refused(firepanda: ModuleType) -> None:
-    """pandas widens to object and keeps it, which is not available here."""
-    with pytest.raises(ValueError, match="int64"):
-        firepanda.DataFrame({"a": [1, 2**70]})
+def test_an_integer_too_large_for_int64_widens_to_object(firepanda: ModuleType) -> None:
+    """pandas widens to object and keeps the integer whole, and so does firepanda."""
+    column = firepanda.DataFrame({"a": [1, 2**70]})["a"]
+    assert str(column.dtype) == "object"
+    assert column.tolist() == [1, 2**70]
 
 
 def test_a_bare_string_is_a_scalar_and_needs_an_index(firepanda: ModuleType) -> None:
