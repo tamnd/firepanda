@@ -7931,7 +7931,7 @@ def _arrow_inner(frame: Any) -> Any:
     held = inner.names()
     if any(_names.is_held(name) for name in held):
         inner = inner.renamed_columns(held, [str(_names.shown(name)) for name in held])
-    if any(_objects.is_object(inner.column(name)) for name in inner.names()):
+    if "" in inner.names() or any(_objects.is_object(inner.column(n)) for n in inner.names()):
         return _object_batch(inner)
     return inner
 
@@ -7962,14 +7962,23 @@ def _object_array(column: Any) -> Any:
 def _object_batch(inner: Any) -> Any:
     """A frame with object columns as the Arrow batch pandas would export.
 
-    The written cells are firepanda's own spelling and mean nothing to another
+    The extension cannot export a column named with empty text, so that column goes
+    out under a spare name and takes its own name back in the batch. The written
+    cells are firepanda's own spelling and mean nothing to another
     library, so each object column is handed to pyarrow as its values, which is
     what pandas does with one. pyarrow picks the type, and refuses a mix of
     values it has no one type for, as it does for pandas.
     """
     import pyarrow as pa
 
-    table = pa.table(_Exporting(inner))
+    names = inner.names()
+    exported = inner
+    if "" in names:
+        spare = "_"
+        while spare in names:
+            spare += "_"
+        exported = inner.renamed_columns([""], [spare])
+    table = pa.table(_Exporting(exported))
     arrays = []
     for position, name in enumerate(inner.names()):
         column = inner.column(name)
@@ -7977,7 +7986,7 @@ def _object_batch(inner: Any) -> Any:
             arrays.append(_object_array(column))
         else:
             arrays.append(table.column(position).combine_chunks())
-    return _Exported(pa.RecordBatch.from_arrays(arrays, names=table.column_names))
+    return _Exported(pa.RecordBatch.from_arrays(arrays, names=names))
 
 
 class _Exporting:

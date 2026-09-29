@@ -519,3 +519,13 @@ def test_a_column_labelled_with_empty_text_exports(firepanda: ModuleType) -> Non
     assert table.column_names == ["", "a"]
     assert table.column(0).to_pylist() == [True, False]
     assert pa.record_batch(frame).schema.names == ["", "a"]
+
+
+def test_dummies_of_empty_text_export(firepanda: ModuleType) -> None:
+    """An empty text value becomes a column named with empty text, which exports."""
+    import pyarrow as pa
+
+    frame = firepanda.get_dummies(firepanda.Series(["a", "", None, "a"]))
+    table = pa.table(frame)
+    assert table.column_names == ["", "a"]
+    assert table.column(0).to_pylist() == [False, True, False, False]
