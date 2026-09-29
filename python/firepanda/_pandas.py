@@ -196,6 +196,9 @@ def _objectified(column: Any) -> Any:
     """A series as an object column holding its values, with its labels and its name."""
     from ._frame import Series
 
+    if _objects.period_name_of(column._inner):
+        cells = _objects.cells(_values_of(column._inner), "T")
+        return Series(cells, dtype="str", index=column.index, name=column.name)
     if _objects.is_object(column._inner):
         return column
     values = _values_of(column._inner)
@@ -215,6 +218,8 @@ def _from_objects(column: Any, dtype: Any, strictly: bool) -> Any:
 
     values = _values_of(column._inner)
     if _named_dtype(dtype) == "string":
+        if _objects.period_name_of(column._inner):
+            values = _held_values(column._inner)
         texts = [None if value is None else str(value) for value in values]
         return Series(texts, dtype="str", index=column.index, name=column.name)
     built = Series(values, index=column.index, name=column.name)
@@ -289,6 +294,7 @@ def _object_operator(column: Any, other: Any, op: str, flip: bool) -> Any:
     run = _OBJECT_OPERATORS.get(op)
     if run is None:
         raise NotImplementedError(f"the operator {op} is not supported on an object column yet")
+    _period_operator(column, other, op, flip)
     left = _values_of(column._inner)
     if isinstance(other, SeriesMixin):
         if not column.index.equals(other.index):
@@ -306,17 +312,37 @@ def _object_operator(column: Any, other: Any, op: str, flip: bool) -> Any:
     else:
         right = [other] * len(left)
     compared = op in ("eq", "ne", "lt", "le", "gt", "ge")
+    # Arithmetic on periods answers NaT for a gap, as pandas does.
+    gap = NaT if _objects.period_name_of(column._inner) else None
     out = []
     for a, b in zip(left, right, strict=True):
         if flip:
             a, b = b, a
         if _levels_gap(a) or _levels_gap(b):
-            out.append(op == "ne" if compared else None)
+            out.append(op == "ne" if compared else gap)
         else:
             out.append(bool(run(a, b)) if compared else run(a, b))
     if compared:
         return Series(out, index=column.index, name=column.name, dtype="bool")
-    return Series(_objects.cells(out), index=column.index, name=column.name)
+    return Series(_rewritten(column, out), index=column.index, name=column.name)
+
+
+def _period_operator(column: Any, other: Any, op: str, flip: bool) -> None:
+    """Refuses what pandas refuses on a period column: scaling it, and ordering it by another freq.
+
+    Raises:
+        TypeError: With pandas' message.
+    """
+    kind = _objects.period_name_of(column._inner)
+    if kind is None:
+        return
+    if op in ("mul", "truediv", "floordiv", "mod", "pow"):
+        raise TypeError(
+            f"cannot perform __{'r' if flip else ''}{op}__ with this index type: PeriodArray"
+        )
+    ordering = op in ("lt", "le", "gt", "ge")
+    if ordering and isinstance(other, _period.Period) and other.freqstr != kind[7:-1]:
+        raise TypeError(f"Invalid comparison between dtype={kind} and Period")
 
 
 def _levels_gap(value: Any) -> bool:
@@ -378,7 +404,34 @@ def _objects_filled(column: Any, value: Any) -> Any:
     from ._frame import Series
 
     values = [value if _levels_gap(held) else held for held in _values_of(column._inner)]
-    return Series(_objects.cells(values), index=column.index, name=column.name)
+    return Series(_rewritten(column, values), index=column.index, name=column.name)
+
+
+def _periods_replaced(column: Any, pairs: Any) -> Any:
+    """A period column with each value equal to an old one swapped for its new one."""
+    from ._frame import Series
+
+    def swapped(value: Any) -> Any:
+        for old, new in pairs:
+            gaps = _levels_gap(value), _levels_gap(old)
+            if all(gaps) or (not any(gaps) and value == old):
+                return new
+        return value
+
+    values = [swapped(value) for value in _values_of(column._inner)]
+    return Series(_rewritten(column, values), index=column.index, name=column.name)
+
+
+def _rewritten(column: Any, values: list[Any]) -> list[Any]:
+    """New values for an object column as its cells, a period column's kept a period column.
+
+    Values that are all still periods of the column's frequency, or gaps, stay a
+    period column as pandas keeps them, and anything else makes an object column.
+    """
+    kind = _objects.period_name_of(column._inner)
+    if kind is not None and _period.period_kind(values) == kind:
+        return _objects.period_cells(_period.period_ordinals(values, kind), kind)
+    return _objects.cells(values)
 
 
 def _object_texts(column: Any) -> Any:
@@ -7034,10 +7087,18 @@ def _interval_typed(inner: Any, kind: str) -> Any:
     return _firepanda.Series(_objects.interval_cells(pairs, kind), inner.label())
 
 
-def _period_typed(inner: Any, dtype: Any) -> Any:
-    """A column's values written again as a period column of the type `dtype` names."""
+def _period_typed(inner: Any, dtype: Any, moved: bool = False) -> Any:
+    """A column's values written again as a period column of the type `dtype` names.
+
+    A period of another frequency is refused, unless `moved`, as `astype` asks,
+    when each period is moved to the frequency.
+    """
     kind = _period.period_type(dtype).name
-    ordinals = _period.period_ordinals(_held_values(inner), kind)
+    values = _held_values(inner)
+    if moved and _objects.period_name_of(inner):
+        # A period column cast to another frequency moves each period, as `asfreq` does.
+        values = [None if value is None else value.asfreq(kind[7:-1]) for value in values]
+    ordinals = _period.period_ordinals(values, kind)
     return _firepanda.Series(_objects.period_cells(ordinals, kind), inner.label())
 
 
@@ -8633,7 +8694,7 @@ def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
         )
     if len(column) == 0:
         return column.copy()
-    gap = NaT if printed.startswith(("datetime64", "timedelta64")) else math.nan
+    gap = NaT if printed.startswith(("datetime64", "timedelta64", "period[")) else math.nan
     answers = []
     for value in column.tolist():
         if _missing(value):
@@ -8826,7 +8887,7 @@ def _column_to_numpy(column: Any, dtype: Any, na_value: Any) -> Any:
     """
     np = _numpy()
     printed = str(column.dtype)
-    if printed == "object" and dtype is None:
+    if (printed == "object" or printed.startswith("period[")) and dtype is None:
         values = column.tolist()
         if na_value is not NO_DEFAULT:
             values = [na_value if _missing(value) else value for value in values]
@@ -8894,6 +8955,7 @@ def _values_array(column: Any) -> Any:
 
     Text, categories and instants with a zone are an extension array in pandas,
     and are a `FirepandaArray` here, which holds the values with their type.
+    Periods are the exception, which pandas hands back as numpy objects.
     """
     from ._array import FirepandaArray
 
@@ -8902,7 +8964,7 @@ def _values_array(column: Any) -> Any:
         from ._categorical import Categorical
 
         return Categorical._held_by(column)
-    if _numpy_type(printed, False) == "object":
+    if _numpy_type(printed, False) == "object" and not printed.startswith("period["):
         return FirepandaArray(column)
     return _column_to_numpy(column, None, NO_DEFAULT)
 
@@ -14089,6 +14151,7 @@ class DataFrameMixin(_Carries):
             or _masked.masked_name(wanted) is not None
             or _masked.masked_of(self[name]) is not None
             or type(wanted).__name__ == "ArrowDtype"
+            or _is_period_type(wanted)
         }
         if decided:
             rest = {name: wanted for name, wanted in asked.items() if name not in decided}
@@ -15802,6 +15865,8 @@ class SeriesMixin(_Carries):
         inplace = _flag("inplace", inplace)
         _held_at("regex", regex, False, _NO_REGEX)
         pairs = _replacements(to_replace, value, "Series")
+        if _objects.period_name_of(self._inner):
+            return _kept(self, _periods_replaced(self, pairs), inplace)
         labels = self._inner.labels().to_list()
         printed = self._inner.dtype()
         answer = self._inner
@@ -16742,6 +16807,8 @@ class SeriesMixin(_Carries):
         printed = self.dtype
         if str(printed) in ("str", "string", "bool", "category", "object"):
             return self._described_values()
+        if str(printed).startswith("period["):
+            return self._described_values()
         if printed not in _SIGNED | _UNSIGNED | _FLOATING:
             raise NotImplementedError(
                 f"describe is not supported yet for a {printed} column, because pandas"
@@ -17080,6 +17147,8 @@ class SeriesMixin(_Carries):
             return _unmasked_cast(self, dtype, copy, errors)
         if _is_object_dtype(dtype):
             return _objectified(self)
+        if _is_period_type(dtype):
+            return Series._wrap(_period_typed(self._inner, dtype, moved=True))
         if _objects.interval_name_of(self._inner) and str(dtype) == "category":
             return _number_categories(self)
         if _objects.is_object(self._inner):
@@ -30166,6 +30235,8 @@ def _text_values(
     if dtype == "object" and na_rep == "NaN":
         # pandas prints an object column's gap as the value it is, None, NaN or NaT.
         gap = {None: "None", "N": "NaN", "T": "NaT"}[_objects.spelling_of(column._inner)]
+    if dtype.startswith("period[") and na_rep == "NaN":
+        gap = "NaT"
     space = " " if leading else ""
     texts = []
     for value in values:

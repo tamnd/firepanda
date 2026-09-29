@@ -242,7 +242,6 @@ def test_a_name_nothing_answers_to_is_a_type_error(firepanda: ModuleType) -> Non
         ("date32[day]", "day numbers"),
         ("binary", "column of text"),
         ("complex128", "no complex column"),
-        ("period[D]", "no period column"),
         ("interval", "no interval column"),
         ("S21", "fixed width byte string"),
         ("bytes", "fixed width byte string"),

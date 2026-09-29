@@ -103,6 +103,9 @@ class FirepandaArray:
 
     def __repr__(self) -> str:
         values = self._column.tolist()
+        if str(self.dtype).startswith("period["):
+            shown = ", ".join(f"'{value}'" for value in values)
+            return f"<PeriodArray>\n[{shown}]\nLength: {len(values)}, dtype: {self.dtype}"
         shown = ", ".join(repr(value) for value in values[:10])
         if len(values) > 10:
             shown += ", ..."

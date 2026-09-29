@@ -1128,7 +1128,7 @@ def period_ordinals(values: Any, name: str) -> list[int | None]:
         if isinstance(value, Period):
             if value._freq != freq:
                 raise IncompatibleFrequency(
-                    f"Input has different freq={value.freqstr} from PeriodArray(freq={freq.text})"
+                    f"Input has different freq={value.freqstr} from PeriodIndex(freq={freq.text})"
                 )
             ordinals.append(value._ordinal)
             continue
