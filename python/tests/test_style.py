@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import zipfile
 from collections.abc import Callable
 from types import ModuleType
 from typing import Any
@@ -199,6 +200,105 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
         build(firepanda)
     assert isinstance(mine.value, type(theirs.value))
     assert unplaced(str(mine.value)) == unplaced(str(theirs.value))
+
+
+CSS = (
+    "color: red; background-color: #ffff00; font-weight: bold; font-style: italic;"
+    " border: 1px solid blue; text-align: center; vertical-align: top; number-format: 0.00;"
+    " font-size: 14px; font-family: Arial, sans-serif; text-decoration: underline;"
+    " white-space: normal"
+)
+
+WORKBOOKS: list[tuple[Callable[[Any], Any], dict[str, Any]]] = [
+    (lambda m: mixed(m).style, {}),
+    (lambda m: mixed(m).style.highlight_max(subset=["a", "b"]), {}),
+    (lambda m: mixed(m).style.map(lambda v: CSS if isinstance(v, str) else "", subset=["s"]), {}),
+    (
+        lambda m: mixed(m).style.map(
+            lambda v: "background: lightblue; border-bottom: 3px dashed #f00", subset=["b"]
+        ),
+        {},
+    ),
+    (
+        lambda m: (
+            levels(m)
+            .style.map_index(lambda v: "font-weight: bold; color: green", level=0)
+            .map_index(lambda v: "background-color: red", axis=1)
+        ),
+        {},
+    ),
+    (lambda m: levels(m).style.highlight_min(), {"merge_cells": False}),
+    (
+        lambda m: mixed(m).style.map(
+            lambda v: "color: #f0a; border-top: thick double; font: bold 12pt serif"
+        ),
+        {"index": False},
+    ),
+]
+
+
+def cells(path: Any) -> list[str]:
+    """Each cell of a workbook with its value and the parts of its style a writer sets."""
+    import openpyxl
+
+    def side(edge: Any) -> Any:
+        return getattr(edge, "style", None), getattr(getattr(edge, "color", None), "rgb", None)
+
+    book = openpyxl.load_workbook(path)
+    out = []
+    for sheet in book.worksheets:
+        out.append(str(sorted(str(span) for span in sheet.merged_cells.ranges)))
+        for row in sheet.iter_rows():
+            for cell in row:
+                font, fill, edges, align = cell.font, cell.fill, cell.border, cell.alignment
+                color = font.color.rgb if font.color else None
+                out.append(
+                    f"{cell.coordinate} {cell.value!r} {cell.number_format}"
+                    f" {font.b} {font.i} {font.u} {font.sz} {font.name} {color}"
+                    f" {fill.fill_type} {fill.fgColor.rgb if fill.fgColor else None}"
+                    f" {[side(e) for e in (edges.top, edges.bottom, edges.left, edges.right)]}"
+                    f" {align.horizontal} {align.vertical} {align.wrap_text}"
+                )
+    return out
+
+
+@both
+@pytest.mark.parametrize("engine", ["openpyxl", "xlsxwriter"])
+@pytest.mark.parametrize("workbook", WORKBOOKS)
+def test_a_styled_workbook_is_pandas_workbook(
+    firepanda: ModuleType, tmp_path: Any, engine: str, workbook: Any
+) -> None:
+    """Every cell carries the value, font, fill, border and alignment pandas writes."""
+    pytest.importorskip("openpyxl")
+    pytest.importorskip(engine)
+    import pandas as pd
+
+    build, options = workbook
+    build(pd).to_excel(tmp_path / "pd.xlsx", engine=engine, **options)
+    build(firepanda).to_excel(tmp_path / "fp.xlsx", engine=engine, **options)
+    assert cells(tmp_path / "fp.xlsx") == cells(tmp_path / "pd.xlsx")
+
+
+@both
+@pytest.mark.parametrize("workbook", WORKBOOKS)
+def test_a_styled_spreadsheet_is_pandas_spreadsheet(
+    firepanda: ModuleType, tmp_path: Any, workbook: Any
+) -> None:
+    """The OpenDocument styles and cells are the ones pandas writes."""
+    pytest.importorskip("odf")
+    import pandas as pd
+
+    build, options = workbook
+    written = []
+    for module in (pd, firepanda):
+        path = tmp_path / f"{module.__name__}.ods"
+        build(module).to_excel(path, engine="odf", **options)
+        with zipfile.ZipFile(path) as book:
+            text = book.read("content.xml") + book.read("styles.xml")
+        # odfpy declares a namespace for each of its modules loaded so far in the
+        # process, which depends on what ran before, so the declarations are dropped.
+        written.append(re.sub(rb' xmlns:\w+="[^"]*"', b"", text))
+    assert written[0] == written[1]
 
 
 def test_items_after_a_round_trip_are_the_labels(firepanda: ModuleType) -> None:

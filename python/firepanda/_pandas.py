@@ -5959,6 +5959,10 @@ def _prefix_dropped(owner: Any, rows: Any, answer: Any) -> Any:
     if not isinstance(answer, (DataFrameMixin, SeriesMixin)) or not _has_levels(owner):
         return answer
     if type(rows) is tuple:
+        if any(_level_pick(part) for part in rows):
+            # A slice or a list for some level picks rows level by level, and
+            # pandas keeps every level of what it picked.
+            return answer
         count = len(rows)
     elif _is_scalar(rows) and rows is not EVERY and not isinstance(rows, slice):
         count = 1
