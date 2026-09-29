@@ -3927,7 +3927,7 @@ SERIES = Exposed(
         Member(
             name="__arrow_c_schema__",
             kind="dunder",
-            body="self._inner.arrow_c_schema()",
+            body="_arrow_column(self).arrow_c_schema()",
             doc="The column's Arrow schema, as an arrow_schema PyCapsule.",
             returns="object",
         ),
@@ -3935,7 +3935,7 @@ SERIES = Exposed(
             name="__arrow_c_array__",
             kind="dunder",
             signature="requested_schema: object | None = None",
-            body="tuple(self._inner.arrow_c_array(requested_schema))",
+            body="tuple(_arrow_column(self).arrow_c_array(requested_schema))",
             doc="The column's Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
             returns="tuple[object, ...]",
         ),
@@ -5184,6 +5184,8 @@ def wrapper() -> str:
         mixins.add("_column_labels")
     if any("_arrow_inner(" in m.body for m in every):
         mixins.add("_arrow_inner")
+    if any("_arrow_column(" in m.body for m in every):
+        mixins.add("_arrow_column")
     if any("_shown_label(" in m.body for m in every):
         mixins.add("_shown_label")
     # An index prints its labels through the same port of pandas' summary.
