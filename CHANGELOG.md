@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: sparse columns
+
+`SparseDtype`, `Series.sparse` and `DataFrame.sparse` are implemented. A sparse column answers with pandas' dtype names and the fill value pandas picks for arithmetic, comparisons, `where`, `fillna`, `map`, `astype` and the rest, refuses the reductions pandas refuses with pandas' errors, and the accessors give the fill value, the stored points, the density and the dense column. `DataFrame.__getattr__` now lets an accessor's own error through, as pandas does.
+
 ### Added: pandas.test
 
 `firepanda.test(extra_args=None, run_doctests=False)` runs the test suite with pytest the way `pandas.test` runs pandas', with the same default marks, the same printed command and the same exit with pytest's status. It points at the tests next to the package in a source checkout, and at the package itself otherwise.
