@@ -21,13 +21,12 @@ pandas and missing here, and pandas is that way because its answer is a numpy
 bool array, which has nowhere to put a missing value. Arrow has somewhere, so
 this says missing.
 
-The second is the four names that are not here at all: `time`, `timetz`,
-`to_period` and `to_pydatetime`. Every one of them needs a type firepanda
-does not have, and none of them is declared and refused, which is the opposite of
-what the arguments do. An absent name is honest about being unimplemented and a
-declared one that always raises is not, and the line between the two is that a
-caller can see a name before they call it and cannot see an argument's fate until
-they pass it.
+The second is the two names that are not here at all: `timetz` and `to_period`.
+Each of them needs a type firepanda does not have, and neither is declared and
+refused, which is the opposite of what the arguments do. An absent name is
+honest about being unimplemented and a declared one that always raises is not,
+and the line between the two is that a caller can see a name before they call it
+and cannot see an argument's fate until they pass it.
 """
 
 from __future__ import annotations
@@ -113,8 +112,8 @@ FLAGS = [
 ]
 """The parts that answer a yes or a no."""
 
-ABSENT = ["timetz", "to_period", "to_pydatetime"]
-"""The three pandas has and this does not, for the reason the module docstring gives."""
+ABSENT = ["timetz", "to_period"]
+"""The two pandas has and this does not, for the reason the module docstring gives."""
 
 
 def stamps(firepanda: ModuleType, values: list[Any] = STAMPS, unit: str = "us") -> Any:
@@ -387,8 +386,8 @@ def test_the_unwritten_names_are_absent_rather_than_refusing(
     """pandas has them and this does not, and the difference is deliberate.
 
     Every one needs something that does not exist yet: a time of day with its
-    zone for `timetz`, a period for `to_period`, an array of Python objects for
-    `to_pydatetime`, and frequency inference over an index for `freq`. A
+    zone for `timetz`, a period for `to_period`, and frequency inference over
+    an index for `freq`. A
     name that is declared and always raises reads as a failure on a conformance
     board and a name that is not there reads as unimplemented, and unimplemented
     is what these are.
