@@ -28408,6 +28408,50 @@ def lreshape(data: Any, groups: dict[Any, Any], dropna: bool = True) -> Any:
     return frame
 
 
+def wide_to_long(
+    df: Any, stubnames: Any, i: Any, j: Any, sep: str = "", suffix: str = r"\d+"
+) -> Any:
+    """A wide frame made long, each stub's columns stacked under a new index level `j`.
+
+    A column whose name is a stub, then `sep`, then text matching `suffix`
+    belongs to that stub, and the suffix becomes the value of `j`, a number
+    when every suffix reads as one. This is pandas' own recipe, a `melt` per
+    stub put side by side, with the columns in no stub joined back on `i`.
+
+    Raises:
+        ValueError: For a stub that is also a column's name, or for id variables that
+            do not tell the rows apart, with pandas' words.
+    """
+    stubs = list(stubnames) if _list_like(stubnames) else [stubnames]
+    ids = list(i) if _list_like(i) else [i]
+    names = _shown_names(df)
+    if any(name in stubs for name in names):
+        raise ValueError("stubname can't be identical to a column name")
+    if df[ids].duplicated().any():
+        raise ValueError("the id variables need to uniquely identify each row")
+    melted = []
+    taken: list[Any] = []
+    for stub in stubs:
+        pattern = re.compile(rf"^{re.escape(stub)}{re.escape(sep)}{suffix}$")
+        wide = [name for name in names if isinstance(name, str) and pattern.match(name)]
+        taken.extend(wide)
+        long = melt(df, id_vars=ids, value_vars=wide, value_name=stub.rstrip(sep), var_name=j)
+        long[j] = long[j].str.replace(re.escape(stub + sep), "", regex=True)
+        with contextlib.suppress(TypeError, ValueError, OverflowError):
+            long[j] = to_numeric(long[j])
+        melted.append(long.set_index([*ids, j]))
+    stacked = concat(melted, axis=1)
+    kept = df[sorted(name for name in names if name not in taken)]
+    if len(ids) == 1:
+        # pandas joins the kept columns onto the melted rows, so the rows keep the melted
+        # order and the kept columns come first.
+        joined = stacked.reset_index().merge(kept, on=ids, how="left")
+        others = [name for name in _shown_names(kept) if name not in ids]
+        order = [*ids, j, *others, *_shown_names(stacked)]
+        return joined[order].set_index([*ids, j])
+    return kept.merge(stacked.reset_index(), on=ids).set_index([*ids, j])
+
+
 def _cut_values(x: Any, caller: str) -> tuple[Any, Any]:
     """The values `cut` and `qcut` bin, as float64 numpy, and the column they came from.
 

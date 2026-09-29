@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas.wide_to_long
+
+`wide_to_long` turns columns named by a stub and a suffix, such as `A1970` and `A1980`, into one column per stub under a new index level holding the suffix, read as numbers when every suffix is one. It follows pandas' recipe over firepanda's `melt`, keeps pandas' row and column order for one id column and for several, and refuses a stub that names a column and ids that do not tell the rows apart in pandas' words.
+
 ### Added: firepanda.testing, with assert_series_equal, assert_frame_equal and assert_index_equal
 
 A test suite written against pandas imports `pandas.testing` first, and firepanda had no such module, so every such suite failed on its import line. `firepanda.testing` has pandas' four assertions with pandas' keywords and defaults. Each check runs in pandas' order and raises pandas' message, so a failing test points at the same place under either library: the length, the index, the dtype, the values with the share that differ and the first position that does, the gaps of a text, masked or date column before its values, the name, and for a frame the shape, the columns and then each column by its position and label.

@@ -97,6 +97,7 @@ from ._pandas import (
     to_numeric,
     to_timedelta,
     unique,
+    wide_to_long,
 )
 from ._pickle import read_pickle, to_pickle
 from ._query import eval
@@ -192,6 +193,7 @@ __all__ = [
     "to_pickle",
     "to_timedelta",
     "unique",
+    "wide_to_long",
 ]
 
 __version__: str = _firepanda.version()
