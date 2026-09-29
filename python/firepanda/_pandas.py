@@ -4113,6 +4113,10 @@ def _condition(cond: Any, labels: list[Any], height: int) -> Any:
         raise InvalidArgumentError(_NEEDS_AXIS)
     if _is_object(cond):
         held = cond if hasattr(cond, "_inner") else _labelled(list(cond.index), cond.tolist())
+        if held._inner.labels().to_list() == labels:
+            # Already lined up. Instants and spans come out of the labels as
+            # counts, which a reindex would not find among them.
+            return _flags(held._inner)
         return _flags(held._inner).reindex(labels, False, False)
     asked = [_plain(value) for value in cond]
     if len(asked) != height:
@@ -6174,20 +6178,14 @@ def _interpolation_limits(
 
     Raises:
         ValueError: With pandas' message for each of its checks.
-        NotImplementedError: For a method pandas hands to scipy, and for one that
-            reads an index of dates.
+        NotImplementedError: For a method pandas hands to scipy.
     """
     if method in ("spline", "polynomial") and kwargs.get("order") is None:
         raise InvalidArgumentError("You must specify the order of the spline or polynomial.")
-    if method == "time":
-        if not str(index.dtype).startswith("datetime64"):
-            raise InvalidArgumentError(
-                "time-weighted interpolation only works on Series or DataFrames with a"
-                " DatetimeIndex"
-            )
-        raise NotImplementedError(
-            "method='time' is not supported yet, because it reads the index as"
-            " nanoseconds and the index here does not hand its dates out as numbers"
+    if method == "time" and not str(index.dtype).startswith(("datetime64", "timedelta64")):
+        raise InvalidArgumentError(
+            "time-weighted interpolation only works on Series or DataFrames with a"
+            " DatetimeIndex"
         )
     directions = ["forward", "backward", "both"]
     direction = direction.lower()
@@ -6233,15 +6231,16 @@ def _interpolation_points(column: Series, method: str, index: Any) -> Series:
         every = column.isna() | column.notna()
         return every.astype("float64").cumsum() - 1.0
     kind = str(index.dtype)
+    counted = kind.startswith(("datetime64", "timedelta64"))
     if kind in ("string", "str", "object"):
         raise TypeError(
             "Cannot cast array data from dtype('O') to dtype('float64') according to the"
             " rule 'safe'"
         )
-    if not _counts_as_numeric(kind) or kind == "bool":
+    if not counted and (not _counts_as_numeric(kind) or kind == "bool"):
         raise NotImplementedError(
             f"method={method!r} over an index of {kind} is not supported yet, because only"
-            " an index of numbers is read as positions along the line here"
+            " an index of numbers, instants or spans is read as positions along the line"
         )
     if not (index.is_monotonic_increasing and index.is_unique):
         raise NotImplementedError(
@@ -6249,7 +6248,9 @@ def _interpolation_points(column: Series, method: str, index: Any) -> Series:
             " each gap is filled from the rows either side of it rather than by sorting"
             " the labels first"
         )
-    return Series(index.tolist(), index=column.index, dtype="float64")
+    # Instants and spans sit at their counts in the index's unit, as pandas reads them.
+    points = index.asi8 if counted else index.tolist()
+    return Series(points, index=column.index, dtype="float64")
 
 
 def _interpolated_line(
@@ -6304,6 +6305,18 @@ def _interpolated_line(
     if keep is None:
         return filled
     return filled.where(~(keep & gap), math.nan)
+
+
+def _lined_up_by_label(index: Any) -> bool:
+    """Whether the steps of `interpolate` can line columns up by these labels.
+
+    They cannot when a label repeats, nor when the labels are instants or spans,
+    which the extension hands out as counts it then cannot find among them, and
+    then the columns are worked on by position and given their labels back.
+    """
+    return bool(index.is_unique) and not str(index.dtype).startswith(
+        ("datetime64", "timedelta64")
+    )
 
 
 def _interpolated(
@@ -13046,7 +13059,7 @@ class DataFrameMixin(_Carries):
             return _kept(frame, frame.copy(), keep)
         direction = _interpolation_direction(method, limit_direction)
         index = frame.index
-        work = frame if index.is_unique else frame.reset_index(drop=True)
+        work = frame if _lined_up_by_label(index) else frame.reset_index(drop=True)
         changed = {}
         for name in _shown_names(work):
             column = work[name]
@@ -13057,7 +13070,7 @@ class DataFrameMixin(_Carries):
                 changed[name] = answer
         out = work.assign(**changed) if changed else work.copy()
         if work is not frame:
-            out = _with_row_labels(out, index.tolist()).rename_axis(index.name)
+            out = out.set_axis(index)
         return _kept(frame, out, keep)
 
     def _nunique(self, axis: Any, dropna: bool) -> Series:
@@ -16857,12 +16870,12 @@ class SeriesMixin(_Carries):
             return _kept(column, column.copy(), keep)
         direction = _interpolation_direction(method, limit_direction)
         index = column.index
-        work = column if index.is_unique else column.reset_index(drop=True)
+        work = column if _lined_up_by_label(index) else column.reset_index(drop=True)
         answer = _interpolated(work, "Series", method, index, limit, direction, limit_area, kwargs)
         if answer is work:
             return _kept(column, column.copy(), keep)
         if work is not column:
-            answer = _with_row_labels(answer, index.tolist()).rename_axis(index.name)
+            answer = answer.set_axis(index)
         return _kept(column, answer.rename(column.name), keep)
 
     def _quantile(self, q: Any, interpolation: str) -> Any:
@@ -21956,6 +21969,14 @@ class _GroupedResampler:
             )
 
         def call(*args: Any, **kwargs: Any) -> Any:
+            if name == "interpolate":
+                raise NotImplementedError(
+                    "Direct interpolation of MultiIndex data frames is not supported. If you"
+                    " tried to resample and interpolate on a grouped data frame, please use:\n"
+                    "`df.groupby(...).apply(lambda x: x.resample(...).interpolate(...))`\ninstead,"
+                    " as resampling and interpolation has to be performed for each group"
+                    " independently."
+                )
             if name == "transform":
                 raise NotImplementedError(
                     "transform on a resample of a group by is not supported yet, because pandas"

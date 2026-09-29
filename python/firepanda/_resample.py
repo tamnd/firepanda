@@ -62,8 +62,8 @@ _EMPTY = {"sum": 0, "prod": 1, "count": 0, "size": 0, "nunique": 0}
 """What pandas answers for an empty bin, where it is not NaN."""
 
 _BIN = "__firepanda_bin__"
-_LABEL = "__firepanda_label__"
 _VALUE = "__firepanda_value__"
+_LABEL = "__firepanda_label__"
 
 
 def _step(rule: Any) -> tuple[int, bool]:
@@ -140,9 +140,11 @@ class Resampler:
         _bins: tuple[Any, ...] | None = None,
     ) -> None:
         self._obj = obj
+        self._picked = False
         if _bins is not None:
             (self._times, self._codes, self._first, self._count, self._origin, self._step,
-             self._time_unit, self._right_label, self._name, self._dropped) = _bins  # fmt: skip
+             self._time_unit, self._right_label, self._name, self._dropped,
+             self._right_closed, self._chosen, self._rule) = _bins  # fmt: skip
             return
         from ._frame import DataFrame
 
@@ -230,11 +232,15 @@ class Resampler:
         self._step = step
         self._time_unit = unit
         self._right_label = label == "right"
+        self._right_closed = right
+        self._chosen = on is not None
+        self._rule = rule
 
     def _state(self) -> tuple[Any, ...]:
         """The bins, handed to a resampler over a part of the same rows."""
         return (self._times, self._codes, self._first, self._count, self._origin, self._step,
-                self._time_unit, self._right_label, self._name, self._dropped)  # fmt: skip
+                self._time_unit, self._right_label, self._name, self._dropped,
+                self._right_closed, self._chosen, self._rule)  # fmt: skip
 
     # ------------------------------------------------------------------
     # Selection
@@ -246,7 +252,9 @@ class Resampler:
 
         if isinstance(self._obj, Series):
             raise KeyError(key)
-        return Resampler(self._obj[key], None, _bins=self._state())
+        picked = Resampler(self._obj[key], None, _bins=self._state())
+        picked._picked = True
+        return picked
 
     def __getattr__(self, name: str) -> Resampler:
         """A column by name, as `resampler.column` reads it in pandas."""
@@ -340,6 +348,15 @@ class Resampler:
         counts = [self._origin + (code + extra) * self._step for code in codes]
         return to_datetime(Series(counts, dtype="int64"), unit=self._time_unit)
 
+    def _edges(self, shift: int | None = None) -> Index:
+        """The labels of every bin, holding the rule as their frequency, as pandas' do."""
+        from ._frame import Index
+
+        codes = range(self._first, self._first + self._count)
+        edges = Index(self._stamps(codes, shift)).rename(self._name)
+        edges.freq = self._rule
+        return edges
+
     def _frame(self) -> DataFrame:
         """The values on plain positions with their bin numbers as the last column."""
         from ._frame import DataFrame, Series
@@ -361,9 +378,9 @@ class Resampler:
                     out = out.assign(**{name: out[name].fillna(fill[name])})
                     if types[name] != str(out[name].dtype) and not bool(out[name].isna().any()):
                         out = out.assign(**{name: out[name].astype(types[name])})
-        out = out.reset_index(drop=True).assign(
-            **{_LABEL: self._stamps(range(self._first, self._first + self._count))}
-        )
+        # Setting a column as the index keeps the dates' type on an empty answer too.
+        labels = self._stamps(range(self._first, self._first + self._count))
+        out = out.reset_index(drop=True).assign(**{_LABEL: labels})
         out = out.set_index(_LABEL).rename_axis(self._name)
         if isinstance(self._obj, Series):
             answer = out[_VALUE]
@@ -507,9 +524,8 @@ class Resampler:
                 " pandas' MultiIndex and firepanda does not have one"
             )
         parts = {"open": self.first(), "high": self.max(), "low": self.min(), "close": self.last()}
-        stamps = parts["open"].index.to_series().reset_index(drop=True)
         out = DataFrame({name: part.reset_index(drop=True) for name, part in parts.items()})
-        return out.assign(**{_LABEL: stamps}).set_index(_LABEL).rename_axis(self._name)
+        return out.set_axis(parts["open"].index)
 
     # ------------------------------------------------------------------
     # Several at once, and the rest
@@ -535,11 +551,7 @@ class Resampler:
                 )
             first = next(iter(parts.values()))
             out = DataFrame({name: part.reset_index(drop=True) for name, part in parts.items()})
-            return (
-                out.assign(**{_LABEL: first.index.to_series().reset_index(drop=True)})
-                .set_index(_LABEL)
-                .rename_axis(self._name)
-            )
+            return out.set_axis(first.index)
         raise NotImplementedError(
             "aggregate takes a reduction by name, or a mapping of columns to names, for"
             " now, because a function is Python run once a bin and a list answers with"
@@ -571,7 +583,7 @@ class Resampler:
         Raises:
             NotImplementedError: For a function.
         """
-        from ._frame import DataFrameGroupBy, Series
+        from ._frame import DataFrameGroupBy
 
         if not isinstance(arg, str):
             raise NotImplementedError(
@@ -584,9 +596,13 @@ class Resampler:
                 " which is not written yet"
             )
         grouped = DataFrameGroupBy(self._frame(), [_BIN], True, True, True)
-        out = grouped.transform(arg, *args, **kwargs)
-        labels = self._obj.index.to_series().reset_index(drop=True).rename(None)
-        out = out.assign(**{_LABEL: labels}).set_index(_LABEL).rename_axis(self._obj.index.name)
+        return self._on_rows(grouped.transform(arg, *args, **kwargs))
+
+    def _on_rows(self, out: DataFrame) -> DataFrame | Series:
+        """An answer a row put back on the rows' own labels."""
+        from ._frame import Series
+
+        out = out.set_axis(self._obj.index)
         if isinstance(self._obj, Series):
             return out[_VALUE].rename(self._obj.name)
         return out
@@ -599,47 +615,78 @@ class Resampler:
             return func(*args, **kwargs)
         return func(self, *args, **kwargs)
 
-    def asfreq(self, fill_value: Any = None) -> DataFrame | Series:
-        """The value at exactly every bin's label, missing where no row is there.
+    def _upsampled(
+        self, name: str, method: str | None, limit: int | None = None, fill_value: Any = None
+    ) -> DataFrame | Series:
+        """The rows reindexed onto the edges of the bins, as pandas upsamples.
+
+        The edges are the left ones for bins closed on the left and the right
+        ones for bins closed on the right, whichever side labels the bins.
 
         Raises:
-            NotImplementedError: When two rows share a timestamp, which pandas
-                refuses too, and for a label on the right.
+            AttributeError: After a column is picked, where pandas has a group
+                by over the bins, which has no `name`.
+            ValueError: For bins read from a column with `on=`, in pandas' words.
+            NotImplementedError: When a row had a missing timestamp.
         """
-        from ._frame import DataFrame, DataFrameGroupBy
+        if self._picked:
+            kind = "SeriesGroupBy" if self._obj.ndim == 1 else "DataFrameGroupBy"
+            raise AttributeError(f"'{kind}' object has no attribute {name!r}")
+        if self._chosen:
+            raise InvalidArgumentError(
+                "Upsampling from level= or on= selection is not supported, use"
+                " .set_index(...) to explicitly set index to datetime-like"
+            )
+        if self._dropped:
+            raise NotImplementedError(
+                "upsampling rows with a missing timestamp is not supported yet, because"
+                " pandas reindexes them with the missing label still among the rows"
+            )
+        edges = self._edges(1 if self._right_closed else 0)
+        return self._obj.reindex(edges, method=method, limit=limit, fill_value=fill_value)
 
-        if self._right_label:
-            raise NotImplementedError("asfreq with label='right' is not written yet")
-        frame = self._frame()
-        counts = self._times.reset_index(drop=True).astype("int64")
-        exact = counts == (frame[_BIN] * self._step + self._origin)
-        frame = frame.loc[exact.fillna(False)]
-        if bool(frame[_BIN].duplicated().any()):
-            raise InvalidArgumentError("cannot reindex on an axis with duplicate labels")
-        grouped = DataFrameGroupBy(frame, [_BIN], True, True, True)
-        out = grouped.first()
-        if not isinstance(out, DataFrame):
-            out = DataFrame({_VALUE: out})
-        fill = None if fill_value is None else dict.fromkeys(out.columns, fill_value)
-        return self._labelled(out, fill)
+    def _filled(self, method: str, limit: int | None) -> DataFrame | Series:
+        """`ffill` or `bfill`, upsampled, or within each bin after a column is picked.
 
-    def _upsampling(self, name: str) -> Any:
-        raise NotImplementedError(
-            f"{name} fills the bins from the rows before or after them, which is"
-            " upsampling and not written yet"
-        )
+        Raises:
+            NotImplementedError: Within the bins when a row had a missing timestamp.
+        """
+        from ._frame import DataFrameGroupBy
 
-    def ffill(self, limit: int | None = None) -> Any:
-        """Refused: upsampling is not written yet."""
-        return self._upsampling("ffill")
+        if not self._picked:
+            return self._upsampled(method, method, limit)
+        if self._dropped:
+            raise NotImplementedError(
+                f"{method} over rows with a missing timestamp answers NaN for those rows,"
+                " which is not written yet"
+            )
+        grouped = DataFrameGroupBy(self._frame(), [_BIN], True, True, True)
+        return self._on_rows(getattr(grouped, method)(limit=limit))
 
-    def bfill(self, limit: int | None = None) -> Any:
-        """Refused: upsampling is not written yet."""
-        return self._upsampling("bfill")
+    def asfreq(self, fill_value: Any = None) -> DataFrame | Series:
+        """The value at exactly every bin's edge, missing where no row is there.
 
-    def nearest(self, limit: int | None = None) -> Any:
-        """Refused: upsampling is not written yet."""
-        return self._upsampling("nearest")
+        Raises:
+            ValueError: When two rows share a timestamp, which pandas refuses too.
+        """
+        return self._upsampled("asfreq", None, fill_value=fill_value)
+
+    def ffill(self, limit: int | None = None) -> DataFrame | Series:
+        """Every bin's edge with the last value at or before it.
+
+        After a column is picked pandas fills each bin's rows from the rows
+        before them in the bin instead, on the rows' own labels, and so does this.
+        """
+        return self._filled("ffill", limit)
+
+    def bfill(self, limit: int | None = None) -> DataFrame | Series:
+        """Every bin's edge with the first value at or after it, or, after a column
+        is picked, each bin's rows filled from the rows after them in the bin."""
+        return self._filled("bfill", limit)
+
+    def nearest(self, limit: int | None = None) -> DataFrame | Series:
+        """Every bin's edge with the value nearest to it."""
+        return self._upsampled("nearest", "nearest", limit)
 
     def interpolate(
         self,
@@ -650,6 +697,31 @@ class Resampler:
         limit_direction: str = "forward",
         limit_area: Any = None,
         **kwargs: Any,
-    ) -> Any:
-        """Refused: upsampling is not written yet."""
-        return self._upsampling("interpolate")
+    ) -> DataFrame | Series:
+        """The values at every bin's edge, interpolated between the rows around it.
+
+        The rows that fall between the edges are put in among them before the
+        interpolation and taken out after it, as pandas does.
+
+        Raises:
+            ValueError: For `inplace=True`, in pandas' words.
+        """
+        from ._pandas import concat
+
+        if kwargs.pop("inplace", False):
+            raise InvalidArgumentError("Cannot interpolate inplace on a resampled object.")
+        answer = self._upsampled("interpolate", None)
+        edges = answer.index
+        on_edge = self._obj.index.isin(edges)
+        between = [at for at, there in enumerate(on_edge) if not there]
+        if between:
+            answer = concat([answer, self._obj.iloc[between]]).sort_index()
+        filled = answer.interpolate(
+            method=method,
+            axis=axis,
+            limit=limit,
+            limit_direction=limit_direction,
+            limit_area=limit_area,
+            **kwargs,
+        )
+        return filled.reindex(edges)
