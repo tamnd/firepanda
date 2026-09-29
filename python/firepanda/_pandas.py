@@ -9136,8 +9136,9 @@ class DataFrameMixin(_Carries):
         and a float column's missing row is a NaN too. A column with nothing
         missing keeps its type. This does the same, because a caller who wrote
         `DataFrame.from_arrow` wrote the pandas name and should be handed the
-        frame pandas would have handed them. `firepanda.from_arrow` is the other
-        door, and it keeps Arrow's types.
+        frame pandas would have handed them, and a date column comes back as
+        objects holding Python dates for the same reason. `firepanda.from_arrow`
+        is the other door, and it keeps Arrow's types.
 
         Args:
             data: A pyarrow table, a Polars frame, or anything else with
@@ -9147,15 +9148,21 @@ class DataFrameMixin(_Carries):
         Returns:
             The frame.
         """
-        from ._frame import DataFrame, from_arrow
+        from ._frame import DataFrame, Series, from_arrow
 
         try:
-            return DataFrame._wrap(from_arrow(data)._inner._widened_for_missing())
+            out = DataFrame._wrap(from_arrow(data)._inner._widened_for_missing())
         except Exception as error:
             nested = _nested_frame(data)
             if nested is not None:
                 return nested
             raise translate(error) from None
+        # pandas reads an Arrow date as an object column holding Python dates.
+        for name in out._inner.names():
+            if out._inner.column(name).dtype().startswith("date32"):
+                dates = Series(out[_names.shown(name)].tolist(), dtype=object)
+                out = out._assigned(_names.shown(name), dates)
+        return out
 
     def __getitem__(self, key: Any) -> DataFrame | Series:
         """One column as a series, or several as a frame.
