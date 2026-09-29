@@ -301,6 +301,14 @@ class DatetimeProperties(DatetimeMixin):
             raise translate(error) from None
 
     @property
+    def timetz(self) -> Series:
+        """The time of day of each instant with the column's clock, as `datetime.time`."""
+        try:
+            return self._clock_times(True)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
     def unit(self) -> str:
         """The resolution the column is stored in, one of s, ms, us and ns."""
         try:

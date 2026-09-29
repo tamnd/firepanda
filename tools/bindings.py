@@ -869,6 +869,15 @@ def _datetime_members() -> tuple[Member, ...]:
     )
     out.append(
         Member(
+            name="timetz",
+            kind="property",
+            body="self._clock_times(True)",
+            doc="The time of day of each instant with the column's clock, as `datetime.time`.",
+            returns="Series",
+        )
+    )
+    out.append(
+        Member(
             name="unit",
             kind="property",
             body="self._resolution()",
