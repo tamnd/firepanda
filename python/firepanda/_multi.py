@@ -1008,7 +1008,46 @@ class MultiIndex:
         keep = [True] * len(self)
         for number, pick in enumerate(seq):
             keep = [a and b for a, b in zip(keep, self._level_mask(number, pick), strict=True)]
-        return _array([at for at, chosen in enumerate(keep) if chosen], "int64")
+        found = [at for at, chosen in enumerate(keep) if chosen]
+        return _array(self._reordered(seq, found), "int64")
+
+    def _reordered(self, seq: Any, found: list[int]) -> list[int]:
+        """The rows `get_locs` picked, in the order its lists name their values.
+
+        pandas answers the rows of a list in the order the list gives, so
+        `(["b", "a"], slice(None))` puts every "b" row before the "a" rows, and
+        a slice running backwards reverses the rows. A slice with bounds keeps
+        the rows where they are, which also settles the order before any later
+        list is read, and a single value or a whole slice has no say.
+        """
+        if not any(
+            (_list_like(pick) and len(pick) > 1)
+            or (isinstance(pick, slice) and pick.step is not None and pick.step < 0)
+            for pick in seq
+        ):
+            return found
+        orders = []
+        for number, pick in enumerate(seq):
+            if isinstance(pick, slice):
+                if pick.step is not None and pick.step < 0:
+                    orders.append({at: -at for at in found})
+                elif pick.start is None and pick.stop is None:
+                    orders.append(None)
+                else:
+                    orders.append({at: at for at in found})
+            elif _list_like(pick):
+                place: dict[int, int] = {}
+                for value in pick:
+                    code = self._code_of(number, value)
+                    if code is not None:
+                        place.setdefault(code, len(place))
+                code = self._codes[number]
+                orders.append({at: place.get(code[at], len(place)) for at in found})
+            else:
+                orders.append(None)
+        return sorted(
+            found, key=lambda at: tuple(order[at] for order in orders if order is not None)
+        )
 
     def get_loc_level(self, key: Any, level: Any = 0, drop_level: bool = True) -> Any:
         """Where a value of one level is, and the index of the rows it picks.
