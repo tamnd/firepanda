@@ -1,0 +1,16 @@
+# Files passing per target directory of DuckDB's corpus. Written by
+# `python tools/conformance.py --update` and checked by `pixi run
+# conformance`, which fails when any count here goes down.
+aggregate 2
+cte 8
+filter 0
+join 7
+limit 0
+order 3
+pivot 0
+projection 1
+select 3
+setops 5
+subquery 2
+topn 1
+window 3

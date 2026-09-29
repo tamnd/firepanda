@@ -8,10 +8,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DuckDB's .test files run against firepanda, with a floor
+
+`pixi run conformance` runs DuckDB's own `.test` files from the vendored corpus through firepanda and checks each against what the file says DuckDB answers: every statement's success or error and every query's rows, whether sorted, hashed or labelled. The files are run unmodified. A file that needs an extension, a database file or the corpus's data directory is counted as not run, and every failing file is put in the bucket of its first failure: a refusal by name, a missing function, a divergence, a wrong answer or a crash. The per directory table over the target directories is in the README with its denominators, and `tests/conformance_floor.txt` holds the count that passes in each, which CI checks so a change that lowers it fails. `--all` runs every directory and writes the failures to `build/conformance/failures.txt`.
+
 ### Added: HDFStore, read_hdf and to_hdf
 
 `HDFStore`, `read_hdf`, `DataFrame.to_hdf` and `Series.to_hdf` read and write HDF5 files in pandas' fixed and table formats, and `firepanda.io.pytables` holds the storers where pandas keeps them. The module is pandas' own `pandas.io.pytables` ported class for class on top of PyTables, which is imported only when a store opens. Columns are grouped into blocks and consolidated by pandas' rules, so a file firepanda writes has the same nodes, attributes and types as the one pandas writes and each library reads the other's files. Where clauses, data columns, appends, removal, chunks, coordinates, several tables at once, copies, table indexes, the printed store and the errors all match pandas.
-
 ### Added: read_sas and the SAS readers
 
 `read_sas` reads SAS transport files and SAS7BDAT data sets the way pandas does, and `firepanda.io.sas` holds `SASReader`, `XportReader` and `SAS7BDATReader` where pandas keeps them. Both readers are ported to plain Python with `struct`, including the IBM float conversion of transport files and the run length and Ross decompressors of data sets, so they need no other package. Names, types, values, dates, chunks, reader attributes and errors match pandas on pandas' own SAS test files, with and without an encoding.
@@ -87,7 +90,6 @@ A reader or method that needs a package which is not installed now says so the w
 ### Added: read_html
 
 `read_html` reads the tables of an HTML document into frames the way pandas does, with `match`, `attrs`, `displayed_only`, header inference from `thead` and `th` rows, `colspan` and `rowspan` expansion, `extract_links`, and the `read_csv` options for typing the cells. It parses with the standard library, so it needs neither lxml nor BeautifulSoup.
-
 ### Added: CREATE TABLE, CREATE VIEW, INSERT and DROP in SQL
 
 `firepanda.sql.execute` runs one statement against a catalog it may change. `CREATE TABLE` with columns and types, with `NOT NULL`, and `CREATE TABLE ... AS` a query make a frame under the name; `INSERT INTO` adds rows from `VALUES`, a query or `DEFAULT VALUES`, by position, by a column list or `BY NAME`, casts each to the column's type, and answers DuckDB's one-row `Count`; `CREATE VIEW` keeps the query's text, which is parsed again wherever the view is named, so a view sees rows inserted after it; and `DROP TABLE` and `DROP VIEW` take the name away. `OR REPLACE`, `IF NOT EXISTS` and `IF EXISTS` behave as in DuckDB, and every refusal a mismatch earns is DuckDB's message: a name made twice, a count of values that does not fit, a column the table lacks, a null in a `NOT NULL` column, a drop of the wrong kind, and a view that reaches itself. What a frame cannot hold (a key, a default, a check, a generated column, `ON CONFLICT`, `RETURNING`, `CASCADE`) is refused by name rather than read and dropped.
