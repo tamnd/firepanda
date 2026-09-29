@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas 3's sentence for a missing optional dependency
+
+A reader or method that needs a package which is not installed now says so the way pandas 3 does, "`Import xarray` failed.  Use pip or conda to install the xarray package.", naming the package to install, so `odf` is named `odfpy`. `to_xarray`, the sparse conversions to scipy, the Parquet, ORC and Feather readers and `firepanda.test` all word it through one helper, `_optional`, which the Excel readers will use too.
+
 ### Added: to_xarray
 
 `DataFrame.to_xarray` and `Series.to_xarray` answer an xarray `Dataset` or `DataArray` the way pandas does. Like pandas, they hand the object to `xarray.Dataset.from_dataframe` or `xarray.DataArray.from_series`. Those read pandas' internals, and xarray depends on pandas, so the object is first rebuilt as a pandas one with every column's type kept: categories and their order, the nullable types, text, and moments with a zone. A multi index is filled out to its full grid and a repeated label is refused, both by xarray itself. Without xarray the error is pandas' ImportError.

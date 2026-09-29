@@ -13,8 +13,9 @@ import os
 import sys
 from typing import Any
 
+from . import _optional
+
 PKG = os.path.dirname(__file__)
-_MISSING = "Missing optional dependency '{}'.  Use pip or conda to install {}."
 
 
 def _suite() -> str:
@@ -36,7 +37,7 @@ def test(extra_args: list[str] | None = None, run_doctests: bool = False) -> Non
     try:
         pytest: Any = importlib.import_module("pytest")
     except ImportError:
-        raise ImportError(_MISSING.format("pytest", "pytest")) from None
+        raise _optional.missing("pytest") from None
     cmd = ["-m not slow and not network and not db"]
     if extra_args:
         if not isinstance(extra_args, list):

@@ -18,7 +18,7 @@ import operator
 import re
 from typing import TYPE_CHECKING, Any
 
-from . import _objects
+from . import _objects, _optional
 from .errors import InvalidArgumentError
 
 if TYPE_CHECKING:
@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 _KINDS = {"int": "i", "uint": "u", "float": "f", "bool": "b", "object": "O"}
 _TYPES: dict[str, type] = {"i": int, "u": int, "f": float, "b": bool, "O": object}
 _SUBTYPE = re.compile(r"Sparse\[(?P<subtype>[^,]*)(, )?(?P<fill_value>.*?)?\]$")
-_MISSING = "Missing optional dependency '{}'.  Use pip or conda to install {}."
 
 
 def _is_na(value: Any) -> bool:
@@ -521,7 +520,7 @@ def _numpy() -> Any:
     try:
         import numpy
     except ImportError:
-        raise ImportError(_MISSING.format("numpy", "numpy")) from None
+        raise _optional.missing("numpy") from None
     return numpy
 
 
@@ -646,7 +645,7 @@ def _scipy() -> Any:
     try:
         import scipy.sparse
     except ImportError:
-        raise ImportError(_MISSING.format("scipy", "scipy")) from None
+        raise _optional.missing("scipy") from None
     return scipy
 
 

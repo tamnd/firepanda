@@ -14,24 +14,15 @@ changes.
 
 from __future__ import annotations
 
-import importlib
 from typing import Any
 
-_MISSING = "Missing optional dependency '{}'.  Use pip or conda to install {}."
+from . import _optional
 
 _MASKED = frozenset(
     ["boolean"]
     + [f"{kind}{bits}" for kind in ("Int", "UInt") for bits in (8, 16, 32, 64)]
     + [f"Float{bits}" for bits in (32, 64)]
 )
-
-
-def _module(name: str) -> Any:
-    """Imports an optional dependency, with pandas' sentence when it is not installed."""
-    try:
-        return importlib.import_module(name)
-    except ImportError:
-        raise ImportError(_MISSING.format(name, name)) from None
 
 
 def _pandas_values(pandas: Any, column: Any) -> Any:
@@ -84,8 +75,8 @@ def _pandas_frame(pandas: Any, frame: Any) -> Any:
 
 def to_xarray(self: Any) -> Any:
     """An xarray `Dataset` of a frame or `DataArray` of a series, as pandas answers it."""
-    xarray = _module("xarray")
-    pandas = _module("pandas")
+    xarray = _optional.imported("xarray")
+    pandas = _optional.imported("pandas")
     if self.ndim == 1:
         series = pandas.Series(
             _pandas_values(pandas, self), index=_pandas_index(pandas, self.index), name=self.name
