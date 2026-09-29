@@ -53,7 +53,7 @@ from ._datetime import DatetimeIndex
 from ._expression import col
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._frequency import infer_freq
-from ._interval import Interval
+from ._interval import Interval, IntervalDtype, IntervalIndex
 from ._masked import (
     BooleanDtype,
     Float32Dtype,
@@ -129,6 +129,8 @@ __all__ = [
     "Int32Dtype",
     "Int64Dtype",
     "Interval",
+    "IntervalDtype",
+    "IntervalIndex",
     "MultiIndex",
     "NaT",
     "NamedAgg",

@@ -4730,14 +4730,14 @@ class Index(IndexMixin):
     def __arrow_c_schema__(self) -> object:
         """The labels' Arrow schema, as an arrow_schema PyCapsule."""
         try:
-            return self._inner.arrow_c_schema()
+            return _arrow_column(self).arrow_c_schema()
         except Exception as error:
             raise translate(error) from None
 
     def __arrow_c_array__(self, requested_schema: object | None = None) -> tuple[object, ...]:
         """The labels' Arrow data, as an arrow_schema and an arrow_array PyCapsule."""
         try:
-            return tuple(self._inner.arrow_c_array(requested_schema))
+            return tuple(_arrow_column(self).arrow_c_array(requested_schema))
         except Exception as error:
             raise translate(error) from None
 

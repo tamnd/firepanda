@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: interval columns, and cut and qcut label bins with intervals
+
+A list of `Interval` values that share a side is now an interval column with pandas' `interval[int64, right]` or `interval[float64, right]` type, and it prints, casts to `category`, counts and groups the way pandas' does. `IntervalDtype` and `IntervalIndex` are new, with `from_breaks`, `from_tuples`, `from_arrays`, `left`, `right`, `mid`, `length` and pandas' repr, and `cat.categories` of a category of intervals is an `IntervalIndex`. `cut` and `qcut` without `labels=` now label each bin with an interval, rounded by pandas' precision rule, where they used to refuse. An interval column and a category of intervals or of numbers go to Arrow as pandas sends them, intervals as the `pandas.interval` type. Spec 102 has the details.
+
 ### Added: DataFrame.from_arrow reads a date as pandas does
 
 `DataFrame.from_arrow`, the pandas door, now reads a date32 column as an object column holding Python dates, which is what `pandas.DataFrame.from_arrow` hands back. `firepanda.from_arrow` still keeps Arrow's date type.

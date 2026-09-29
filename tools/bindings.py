@@ -4543,7 +4543,7 @@ INDEX = Exposed(
         Member(
             name="__arrow_c_schema__",
             kind="dunder",
-            body="self._inner.arrow_c_schema()",
+            body="_arrow_column(self).arrow_c_schema()",
             doc="The labels' Arrow schema, as an arrow_schema PyCapsule.",
             returns="object",
         ),
@@ -4551,7 +4551,7 @@ INDEX = Exposed(
             name="__arrow_c_array__",
             kind="dunder",
             signature="requested_schema: object | None = None",
-            body="tuple(self._inner.arrow_c_array(requested_schema))",
+            body="tuple(_arrow_column(self).arrow_c_array(requested_schema))",
             doc="The labels' Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
             returns="tuple[object, ...]",
         ),
