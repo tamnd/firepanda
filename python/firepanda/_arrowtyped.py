@@ -127,7 +127,7 @@ def arrow_text(value: Any) -> str:
 class ListAccessor:
     """pandas' `Series.list`, over a column of an Arrow list type."""
 
-    def __init__(self, data: Series) -> None:
+    def __init__(self, data: Series = None) -> None:  # type: ignore[assignment]
         import pyarrow as pa
 
         kind = arrow_type_of(data)
@@ -183,7 +183,7 @@ class ListAccessor:
 class StructAccessor:
     """pandas' `Series.struct`, over a column of an Arrow struct type."""
 
-    def __init__(self, data: Series) -> None:
+    def __init__(self, data: Series = None) -> None:  # type: ignore[assignment]
         import pyarrow as pa
 
         kind = arrow_type_of(data)

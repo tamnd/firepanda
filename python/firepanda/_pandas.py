@@ -44,7 +44,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from . import _config, _firepanda, _masked, _names, _objects, _row_dates, _row_formats
+from . import _arrowtyped, _config, _firepanda, _masked, _names, _objects, _row_dates, _row_formats
 from ._attrs import Flags, carried, flags_of, hold
 from ._expression import applied
 from ._na import NA
@@ -31249,23 +31249,10 @@ def _usecols(columns: Any, usecols: Any) -> list[str]:
     )
 
 
-def _list_accessor(self: Any) -> Any:
-    """pandas' `Series.list`, the methods of a column of Arrow lists."""
-    from ._arrowtyped import ListAccessor
-
-    return ListAccessor(self)
-
-
-def _struct_accessor(self: Any) -> Any:
-    """pandas' `Series.struct`, the methods of a column of Arrow structs."""
-    from ._arrowtyped import StructAccessor
-
-    return StructAccessor(self)
-
-
 # Set after the class, since a name `list` in its body would hide the builtin there.
-SeriesMixin.list = property(_list_accessor)  # type: ignore[attr-defined]
-SeriesMixin.struct = property(_struct_accessor)  # type: ignore[attr-defined]
+# A `Namespace` rather than a property, so `Series.list` is the accessor class as in pandas.
+SeriesMixin.list = Namespace(_arrowtyped.ListAccessor)  # type: ignore[attr-defined]
+SeriesMixin.struct = Namespace(_arrowtyped.StructAccessor)  # type: ignore[attr-defined]
 
 
 def _masked_through(method: Any, how: str) -> Any:
