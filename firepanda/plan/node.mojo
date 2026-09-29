@@ -991,6 +991,7 @@ struct Plan(Movable, Sized):
         keep: Bool,
         backward: Bool,
         strict: Bool,
+        keep_right: Bool = False,
     ) raises -> Int:
         """Builds an ASOF join.
 
@@ -1007,6 +1008,8 @@ struct Plan(Movable, Sized):
             keep: Whether a left row with no match is kept, ASOF LEFT JOIN.
             backward: Whether the left value is the larger one.
             strict: Whether an equal value does not match.
+            keep_right: Whether a right row no left row took is handed out
+                too, ASOF RIGHT JOIN, or ASOF FULL JOIN with `keep`.
 
         Returns:
             The index of the new node.
@@ -1014,13 +1017,10 @@ struct Plan(Movable, Sized):
         Raises:
             Whatever `join` refuses, which includes no keys at all.
         """
-        var at = self.join(
-            left,
-            right,
-            left_keys^,
-            right_keys^,
-            JoinKind.ASOF_LEFT if keep else JoinKind.ASOF,
-        )
+        var kind = JoinKind.ASOF_LEFT if keep else JoinKind.ASOF
+        if keep_right:
+            kind = JoinKind.ASOF_OUTER if keep else JoinKind.ASOF_RIGHT
+        var at = self.join(left, right, left_keys^, right_keys^, kind)
         self.nodes[at].flags = [backward, strict]
         return at
 
