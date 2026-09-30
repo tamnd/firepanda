@@ -261,13 +261,10 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: numbers(m).resample("W").sum(),
-    lambda m: numbers(m).resample("ME").sum(),
     lambda m: numbers(m).resample("h", convention="end").sum(),
     lambda m: numbers(m).resample("h", group_keys=True).sum(),
     lambda m: numbers(m).resample("ns").sum(),
     lambda m: numbers(m).resample("h").ohlc(),
-    lambda m: numbers(m).resample("h").agg(["sum", "max"]),
     lambda m: numbers(m).resample("h").agg(lambda x: x.sum()),
     lambda m: numbers(m).resample("h").apply(lambda x: x.sum()),
     lambda m: numbers(m).resample("h").transform(lambda x: x),
@@ -276,7 +273,7 @@ REFUSED: list[Callable[[Any], Any]] = [
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """Calendar rules, shifted bins, finer units and two levels of labels."""
+    """Shifted bins, finer units and functions run once a bin."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 
