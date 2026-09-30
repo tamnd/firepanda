@@ -15826,26 +15826,24 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        _transforming_axis(axis, "DataFrame")
+        across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         if how is not NO_DEFAULT and thresh is not NO_DEFAULT:
             raise TypeError("You cannot set both the how and thresh arguments at the same time.")
         if how is not NO_DEFAULT:
             _spelled(how, ("any", "all"), f"invalid how option: {how}")
-        _held_at(
-            "thresh",
-            thresh,
-            NO_DEFAULT,
-            "keeping a row that has at least so many values counts per row, and"
-            " the mask says present or absent rather than how many",
-        )
         inplace = _flag("inplace", inplace)
-        _held_at(
-            "ignore_index",
-            ignore_index,
-            False,
-            "numbering the surviving rows again is a change to the index rather"
-            " than to which rows survive",
-        )
+        listed = [subset] if subset is not None and not _list_like(subset) else subset or []
+        # The core drops by the mask of whole columns; counting, the other axis, a
+        # frame of no columns and pandas' KeyError for a missing column are here.
+        if (
+            across
+            or thresh is not NO_DEFAULT
+            or _flag("ignore_index", ignore_index)
+            or not len(self.columns)
+            or any(name not in self.columns for name in listed)
+        ):
+            kept = self._dropna_counted(across, how, thresh, subset)
+            return _settled(self, kept.reset_index(drop=True) if ignore_index else kept, inplace)
         names: list[str] = []
         if subset is not None:
             names = _names.held_all([subset] if isinstance(subset, str) else subset)
@@ -15855,6 +15853,38 @@ class DataFrameMixin(_Carries):
             return _settled(self, DataFrame._wrap(self._inner.dropna(names)), inplace)
         except Exception as error:
             raise translate(error) from None
+
+    def _dropna_counted(self, across: bool, how: Any, thresh: Any, subset: Any) -> DataFrame:
+        """The rows, or the columns `across`, that hold enough values, as pandas counts them.
+
+        A row is kept with at least `thresh` values among the columns looked
+        at, with every one of them under `how="any"` and with one under
+        `how="all"`, and a column the same way among the rows looked at.
+
+        Raises:
+            KeyError: For a label in `subset` the other axis lacks, as pandas raises.
+        """
+        from functools import reduce
+
+        if subset is not None and not _list_like(subset):
+            subset = [subset]
+        other = list(self.index if across else self.columns)
+        if subset is not None:
+            missing = [label for label in subset if label not in other]
+            if missing:
+                raise KeyError(missing)
+        if across:
+            rows = self if subset is None else self.loc[list(subset)]
+            present = rows.notna().sum().tolist()
+            width = len(rows)
+        else:
+            looked = self if subset is None else self[list(subset)]
+            marks = [looked.iloc[:, at].notna().astype("int64") for at in range(looked.shape[1])]
+            present = reduce(lambda a, b: a + b, marks).tolist() if marks else [0] * len(self)
+            width = looked.shape[1]
+        need = (1 if how == "all" else width) if thresh is NO_DEFAULT else thresh
+        positions = [at for at, count in enumerate(present) if count >= need]
+        return self.iloc[:, positions] if across else self.iloc[positions]
 
     def _dropped_when_all_missing(self, names: list[str]) -> DataFrame:
         """The frame without the rows where every column looked at is missing.
@@ -19037,17 +19067,13 @@ class SeriesMixin(_Carries):
 
         All twelve come through here, including `dropna`, because a column
         `dropna` removes values and is a transformation like the rest. The frame
-        one removes rows and is not.
+        one removes rows and is not. `ignore_index` numbers what is left again.
         """
         inplace = _flag("inplace", inplace)
-        _held_at(
-            "ignore_index",
-            ignore_index,
-            False,
-            "throwing the labels away and numbering the rows again is a change to"
-            " the index rather than to the values",
-        )
-        return _settled(self, self._transformed(kind, periods, axis), inplace)
+        answer = self._transformed(kind, periods, axis)
+        if _flag("ignore_index", ignore_index):
+            answer = answer.reset_index(drop=True)
+        return _settled(self, answer, inplace)
 
     def _transformed(self, kind: str, periods: int, axis: Any = 0) -> Series:
         """The same transformation with nothing left to read first.

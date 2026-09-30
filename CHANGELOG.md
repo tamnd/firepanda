@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: dropna with thresh, across the columns, and numbering again
+
+`DataFrame.dropna` takes `thresh`, keeping a row with at least so many values among the columns looked at, and `axis=1`, dropping columns the same way with `subset` naming rows. `ignore_index` numbers what is left from zero, on a frame and on a column. A frame with no columns drops every row under `how="all"`, and a `subset` label the frame lacks raises pandas' `KeyError` with the missing labels.
+
 ### Added: resample on weeks, months, quarters and years
 
 `resample` takes a calendar offset such as `ME`, `MS`, `W-MON`, `QE` or `YS`, as text or as an offset, and lays its bins the way pandas does: from the first day rolled back onto the offset, or a step before it when the bins close on the right, to a step past the last day. An offset that lands on the end of a period closes and names its bins on the right, and a bin closed on the right holds every moment of its end day. `agg` on a resampler takes a list of reductions, and a mapping of columns to lists, answering with pandas' columns, and an upsampled answer keeps the rule as the freq of its index.
