@@ -5844,6 +5844,16 @@ def _numbers_asked(column: Any, kind: str, numeric_only: Any) -> None:
         )
 
 
+def _fill_fits(printed: str, value: Any) -> bool:
+    """Whether a column of numbers of type `printed` holds `value` as it is."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if printed in _WHOLE_RANGES:
+        low, high = _WHOLE_RANGES[printed]
+        return isinstance(value, int) and low <= value <= high
+    return printed in ("float32", "float64")
+
+
 def _moved_labels(labels: Any, periods: int, freq: Any) -> Any:
     """The labels a shift by a frequency moves the rows or columns to.
 
@@ -19820,12 +19830,15 @@ class SeriesMixin(_Carries):
 
         kept = self.iloc[: rows - moved] if periods > 0 else self.iloc[moved:]
         opened = Series([fill_value] * moved, name=self.name)
-        if not len(kept):
-            joined = opened
-        else:
-            pieces = [opened, kept] if periods > 0 else [kept, opened]
-            joined = concat(pieces, ignore_index=True)
-        return joined.set_axis(self.index)
+        # The rows that stayed are joined on even when there are none, so the
+        # column's own type still has its say in the answer's.
+        pieces = [opened, kept] if periods > 0 else [kept, opened]
+        joined = concat(pieces, ignore_index=True).set_axis(self.index)
+        printed = self._inner.dtype()
+        if joined._inner.dtype() != printed and _fill_fits(printed, fill_value):
+            # A fill the column's own type holds leaves the type alone, as in pandas.
+            return joined.astype(printed)
+        return joined
 
     def _pct_change(
         self, periods: int, fill_method: Any, freq: Any, axis: Any = 0, **kwargs: Any
@@ -25809,23 +25822,26 @@ class GroupByMixin[Answer]:
         Its own entry point because its `dropna` is not the group by's `dropna`
         and the two are easy to read as one. The group by's says whether a
         missing key is a group. This one says whether a missing value counts as
-        one of the distinct values inside a group, and it is held at True, which
-        is pandas' default and the kernel's behaviour.
+        one of the distinct values inside a group, which the kernel does not, so
+        under False a group with a gap in a column counts one more there.
 
         Args:
-            dropna: Declared and held at True.
+            dropna: Whether a missing value is left out of the count.
 
         Returns:
             The frame or the series pandas answers.
         """
-        _held_at(
-            "dropna",
-            dropna,
-            True,
-            "counting a missing value as one of the distinct values in a group"
-            " is a second thing for the kernel to carry and nothing asks for it",
-        )
-        return self._shape("nunique", 0.0)
+        counted = self._shape("nunique", 0.0)
+        if _flag("dropna", dropna):
+            return counted
+        whole = self._over_flags()._shape("min", 0.0)
+        if not hasattr(counted, "columns"):
+            return counted + (1 - whole.astype("int64"))
+        keys = {_names.shown(name) for name in self._by}
+        for name in _shown_names(counted):
+            if name not in keys:
+                counted[name] = counted[name] + (1 - whole[name].astype("int64"))
+        return counted
 
     def _quantile(self, q: Any, interpolation: str, numeric_only: bool) -> Answer:
         """The value at a quantile, or at each of a list of them, within each group.
@@ -25992,19 +26008,21 @@ class GroupByMixin[Answer]:
 
         Args:
             kind: `cumcount` or `ngroup`.
-            ascending: Declared and held at True.
+            ascending: Whether to count from the first row or group rather than the last.
 
         Returns:
             An unnamed series of numbers, one a row.
         """
-        _held_at(
-            "ascending",
-            ascending,
-            True,
-            "counting from the end is a second pass over each group, and nothing"
-            " has asked for it yet",
-        )
-        out = self._transform(kind)
+        if _flag("ascending", ascending):
+            out = self._transform(kind)
+        elif kind == "ngroup":
+            out = self._transform(kind)
+            out = out.max() - out
+        else:
+            # Counting from the end is counting from the start with the rows turned round.
+            turned = copy.copy(self)
+            turned._frame = self._frame.iloc[::-1]
+            out = turned._transform(kind).iloc[::-1]
         return _relabelled(out, _held_names(out)[0], None)
 
     def _shifted(self, periods: Any, freq: Any, fill_value: Any, suffix: Any) -> Answer:
@@ -26013,35 +26031,60 @@ class GroupByMixin[Answer]:
         Args:
             periods: How far to move, or a list of them, which answers a frame
                 of a shift by each side by side, as pandas does.
-            freq: Refused.
-            fill_value: Held at no value.
+            freq: Moves each group's labels instead, the groups one after another.
+            fill_value: What the rows with nothing to move into them take.
             suffix: Written before the period in the names a list of them makes.
 
         Returns:
             The frame or the series pandas answers.
         """
-        _refuse(
-            "freq",
-            freq,
-            "shifting by a frequency moves the labels rather than the values and"
-            " needs the offset vocabulary, which is the resampling milestone",
-        )
         if _list_like(periods):
             return _shifted_by_each(
                 periods, suffix, lambda one: _one_frame(self._shifted(one, freq, fill_value, None))
             )
         if suffix:
             raise InvalidArgumentError("Cannot specify `suffix` if `periods` is an int.")
-        _held_at(
-            "fill_value",
-            fill_value,
-            NO_DEFAULT,
-            "filling the gap keeps a column of whole numbers whole, and the value"
-            " has to reach the kernel as a typed one rather than as a Python"
-            " object",
-        )
         _periods_whole(periods)
-        return self._shape_rows("shift", periods)
+        if freq is not None:
+            # pandas shifts each group as a frame of its own, keys and all.
+            narrowed = getattr(self, "_selection", None) or getattr(self, "_column", None)
+            source = self._source() if narrowed is not None else self._frame
+            members = self._members()
+            if not members:
+                return self._renamed(source.iloc[:0])
+            moved = [source.iloc[places].shift(periods, freq=freq) for _, places in members]
+            return self._renamed(concat(moved))
+        shifted = self._shape_rows("shift", periods)
+        if fill_value is NO_DEFAULT or fill_value is None:
+            return shifted
+        return self._shift_filled(shifted, periods, fill_value)
+
+    def _shift_filled(self, shifted: Any, periods: int, fill_value: Any) -> Answer:
+        """A group shift with `fill_value` in the rows nothing moved into.
+
+        Those are the first or last rows of each group and every row with a
+        missing key, as in pandas, and each column keeps the type a plain shift
+        with the same fill gives it.
+        """
+        counted = self._counted("cumcount", periods >= 0)
+        empty = counted.isna() | (counted < abs(periods))
+        if not hasattr(shifted, "columns"):
+            return self._filled_like(self._frame[self._column], shifted, empty, fill_value)
+        out = shifted.copy()
+        for name in _shown_names(shifted):
+            out[name] = self._filled_like(self._frame[name], shifted[name], empty, fill_value)
+        return out
+
+    @staticmethod
+    def _filled_like(original: Any, column: Any, empty: Any, fill_value: Any) -> Any:
+        """`column` with `fill_value` where `empty`, in the type a shift of `original` fills to."""
+        if _is_text(original) and not isinstance(fill_value, str):
+            raise _refused(str(original.dtype), fill_value, type(fill_value).__name__)
+        filled = column.mask(empty.set_axis(column.index), fill_value)
+        if not len(original):
+            return filled
+        wanted = original.iloc[:1].shift(1, fill_value=fill_value).dtype
+        return filled if filled.dtype == wanted else filled.astype(wanted)
 
     def _differenced(self, periods: Any) -> Answer:
         """Each row less the row `periods` before it in its group.

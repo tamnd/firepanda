@@ -269,7 +269,6 @@ def test_a_key_and_a_level_together_refuse(firepanda: ModuleType) -> None:
         ("sum", {"engine_kwargs": {}}, "engine_kwargs"),
         ("min", {"engine": "numba"}, "engine"),
         ("std", {"engine": "numba"}, "engine"),
-        ("nunique", {"dropna": False}, "dropna"),
         ("any", {"skipna": False}, "skipna"),
         ("all", {"skipna": False}, "skipna"),
     ],
