@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: A gap on a level of numbers reads back as NaN
+
+`MultiIndex.get_level_values` now fills a gap on a level of numbers with NaN rather than a null, as pandas' float level does, so the labels of a group by that keeps missing keys hold the same values as pandas'.
+
 ### Added: Group value counts with a dropna of their own
 
 A group by's `value_counts` now takes a `dropna` that differs from the group by's. It groups with every gap kept and then drops the combinations with a gap in the keys, when the group by drops those, or in the values, when `value_counts` does, so the counts match pandas.
