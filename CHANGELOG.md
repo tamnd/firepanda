@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: a map's key and value types, and histogram's MAP(K, UBIGINT)
 
 A `MAP` type now carries its key and value types, written `MAP(K, V)` as DuckDB writes them, and two maps are the same type only when both agree. `histogram` answers `MAP(K, UBIGINT)` for a key of any flat type, including the bins form, as DuckDB does, so the differential semantics check now compares its full type rather than the overload alone. A map whose key or value is itself nested is still a bare `MAP`, and says nothing about what it holds.
+### Changed: Rolling.max takes pandas' extra arguments
+
+`Rolling.max` is the one window reduction pandas declares with `*args` before its engine arguments and `**kwargs` after them, and its body never reads either. firepanda declared the same three parameters as the other reductions and refused anything else, which was a registered divergence. The signature now matches pandas, and the extra arguments are dropped as pandas drops them. `Expanding.max` declares neither in pandas and still refuses them here.
 
 ### Added: Styler.to_excel
 

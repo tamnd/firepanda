@@ -1114,7 +1114,12 @@ class Rolling(RollingMixin):
             raise translate(error) from None
 
     def max(
-        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+        self,
+        numeric_only: bool = False,
+        *args: Any,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        **kwargs: Any,
     ) -> Series | DataFrame:
         """The largest value in the window. Over every rolling window."""
         try:
