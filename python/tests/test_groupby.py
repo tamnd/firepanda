@@ -264,21 +264,13 @@ def test_a_key_and_a_level_together_refuse(firepanda: ModuleType) -> None:
 @pytest.mark.parametrize(
     ("call", "arguments", "expected"),
     [
-        ("sum", {"numeric_only": True}, "numeric_only"),
-        ("sum", {"skipna": False}, "skipna"),
-        ("sum", {"min_count": 1}, "min_count"),
         ("sum", {"engine": "numba"}, "engine"),
         ("sum", {"engine_kwargs": {}}, "engine_kwargs"),
-        ("min", {"min_count": 1}, "min_count"),
         ("min", {"engine": "numba"}, "engine"),
-        ("mean", {"numeric_only": True}, "numeric_only"),
         ("std", {"engine": "numba"}, "engine"),
-        ("median", {"skipna": False}, "skipna"),
         ("nunique", {"dropna": False}, "dropna"),
         ("quantile", {"interpolation": "lower"}, "interpolation"),
         ("quantile", {"q": [0.1, 0.9]}, "single quantile"),
-        ("prod", {"min_count": 1}, "min_count"),
-        ("prod", {"numeric_only": True}, "numeric_only"),
         ("any", {"skipna": False}, "skipna"),
         ("all", {"skipna": False}, "skipna"),
     ],
@@ -364,20 +356,34 @@ def test_a_grouped_product_of_words_is_refused(firepanda: ModuleType) -> None:
         pd.DataFrame(data).groupby("k").prod()
 
 
-def test_the_product_takes_a_min_count_of_zero_and_the_extremes_do_not(
-    firepanda: ModuleType,
+@needs_pandas
+@pytest.mark.parametrize(
+    ("call", "arguments"),
+    [
+        ("prod", {"min_count": 0}),
+        ("prod", {"min_count": -1}),
+        ("min", {"min_count": -1}),
+        ("min", {"min_count": 0}),
+        ("sum", {"min_count": 2}),
+        ("sum", {"skipna": False}),
+        ("median", {"skipna": False}),
+        ("sum", {"numeric_only": True}),
+        ("mean", {"numeric_only": True}),
+    ],
+)
+def test_skipna_min_count_and_numeric_only_answer_as_pandas(
+    firepanda: ModuleType, call: str, arguments: dict[str, Any]
 ) -> None:
-    """pandas defaults this to zero for the two that combine values with an
-    operator and to minus one for the four that pick one out, so the value that
-    means nobody asked for anything is not the same number in both places and
-    passing the other one has to refuse rather than pass silently."""
-    grouped = firepanda.DataFrame(DATA).groupby("k")
-    grouped.prod(min_count=0)
-    with pytest.raises(NotImplementedError, match="min_count"):
-        grouped.prod(min_count=-1)
-    grouped.min(min_count=-1)
-    with pytest.raises(NotImplementedError, match="min_count"):
-        grouped.min(min_count=0)
+    """A group with a gap or with fewer values than `min_count` answers NaN, as in pandas."""
+    import pandas as pd
+
+    data = {"k": ["a", "a", "b", "b", "c"], "v": [1.0, None, 3.0, 4.0, 5.0], "n": [1, 2, 3, 4, 5]}
+    mine = getattr(firepanda.DataFrame(data).groupby("k"), call)(**arguments)
+    theirs = getattr(pd.DataFrame(data).groupby("k"), call)(**arguments)
+    assert repr(mine) == repr(theirs)
+    mine = getattr(firepanda.DataFrame(data).groupby("k")["v"], call)(**arguments)
+    theirs = getattr(pd.DataFrame(data).groupby("k")["v"], call)(**arguments)
+    assert repr(mine) == repr(theirs)
 
 
 def test_a_grouping_computes_nothing_until_it_is_reduced(firepanda: ModuleType) -> None:
