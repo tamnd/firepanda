@@ -4952,6 +4952,21 @@ def _quantile_rows(wanted: list[float], names: list[str], columns: dict[str, lis
     return _answered(made.set_index(key)).rename_axis(None)
 
 
+def _reset_clash(frame: Any, name: str) -> None:
+    """Refuses a reset that `allow_duplicates` would let put a second column under one label.
+
+    The labels land under the index's name, or under `index` when it has none.
+    A frame holds each column label once, so the one shape `allow_duplicates`
+    adds is the one it cannot carry.
+    """
+    label = "index" if frame.index.name is None else frame.index.name
+    if label in _shown_names(frame):
+        raise UnsupportedError(
+            f"firepanda:unsupported: {name} with allow_duplicates=True onto the column "
+            f"{label!r} is not written, since a firepanda frame holds each column label once"
+        )
+
+
 def _labelled(labels: list[Any], values: list[Any]) -> Any:
     """A column carrying the labels it was given, made out of two lists.
 
@@ -13836,8 +13851,8 @@ class DataFrameMixin(_Carries):
             loc: Where the column goes, from 0 to the number of columns.
             column: The new column's label.
             value: A value for every row, a list or a column.
-            allow_duplicates: Refused when True, since a firepanda frame holds each
-                label once.
+            allow_duplicates: Refused when True and the label is already a column,
+                since a firepanda frame holds each label once.
 
         Raises:
             TypeError: When `loc` is not an integer.
@@ -13845,10 +13860,10 @@ class DataFrameMixin(_Carries):
             ValueError: When the label is already a column, or the values are the
                 wrong length.
         """
-        if allow_duplicates is True:
+        if allow_duplicates is True and column in _shown_names(self):
             raise UnsupportedError(
-                "firepanda:unsupported: insert with allow_duplicates=True is not written, "
-                "since a firepanda frame holds each column label once"
+                "firepanda:unsupported: insert with allow_duplicates=True of a label already "
+                "there is not written, since a firepanda frame holds each column label once"
             )
         if isinstance(loc, bool) or not isinstance(loc, int):
             raise DTypeError("loc must be int")
@@ -15740,11 +15755,6 @@ class DataFrameMixin(_Carries):
         if isinstance(self.index, MultiIndex):
             return _settled(self, self._reset_levels(level, bool(drop), names), inplace)
         _no_level(level)
-        if allow_duplicates is not NO_DEFAULT and allow_duplicates:
-            raise NotImplementedError(
-                "allow_duplicates=True is not supported yet, because two columns"
-                " under one name is a shape the schema does not carry"
-            )
         source = self
         if isinstance(names, list):
             # pandas names the one column from the first name of a list, and an
@@ -15754,6 +15764,11 @@ class DataFrameMixin(_Carries):
             raise InvalidArgumentError("Index names must be str or 1-dimensional list")
         elif names is not None:
             source = self.rename_axis(names)
+        if source.index.name is None and "index" in _shown_names(source) and not drop:
+            # pandas falls back to `level_0` when `index` is already a column.
+            source = source.rename_axis("level_0")
+        if allow_duplicates is not NO_DEFAULT and allow_duplicates and not drop:
+            _reset_clash(source, "reset_index")
         try:
             made = DataFrame._wrap(source._inner.reset_index(bool(drop)))
         except Exception as error:
