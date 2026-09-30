@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: numeric_only windows, blanked filters, counted nth, resample group_keys and copy=
+
+A rolling, expanding or ewm window over a frame now reads only its number columns with `numeric_only=True`, `GroupBy.filter(dropna=False)` blanks the rows it drops, `GroupBy.nth(n, dropna=)` counts only the rows without a gap, `resample(group_keys=True)` puts the bins in front of what `apply` answers, `resample(convention=)` is checked and set aside for timestamps, and `DataFrame` and `Series` accept `copy=`.
+
+### Fixed: frequencies of joined pieces, midnight under a short step, and picked group columns
+
+A concat keeps a frequency only when its pieces join up, a DatetimeIndex whose step is shorter than a day shows the time of a label at midnight, a resample `apply` answering one row a bin is labelled as the bins are, and `filter` and `head` after `groupby(...)[[...]]` answer only the picked columns.
+
 ### Added: ambiguous="infer", align by a level of a MultiIndex, and quantiles as an array
 
 `tz_localize(ambiguous="infer")` on a Series, a DatetimeIndex and through `dt.round` now works out which side of a repeated hour each reading is on from where the readings go back, and refuses what cannot be inferred in pandas' words. `align(level=)` lines a flat index up with one level of a MultiIndex for every join, and `quantile` takes an Index or a Series of quantiles as well as a list.

@@ -261,8 +261,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: numbers(m).resample("h", convention="end").sum(),
-    lambda m: numbers(m).resample("h", group_keys=True).sum(),
     lambda m: numbers(m).resample("ns").sum(),
 ]
 

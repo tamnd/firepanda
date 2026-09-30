@@ -203,24 +203,6 @@ def test_a_shape_that_is_not_a_frame_says_so(firepanda: ModuleType) -> None:
         firepanda.DataFrame(42)
 
 
-def test_the_declared_pandas_parameters_are_refused_by_name(firepanda: ModuleType) -> None:
-    """Declared and not honoured, which is only honest if it says so.
-
-    The signature is the pandas one in full so that the parity test compares five
-    parameters rather than one. A parameter that is silently ignored would be
-    worse than one that is missing, so each of them raises with its own name in
-    the message.
-
-    `dtype`, `index` and `columns` used to be on this list and are not any
-    more, because they are honoured now. `test_astype.py` and
-    `test_construct_shapes.py` have what they do instead.
-    """
-    with pytest.raises(NotImplementedError, match="copy"):
-        firepanda.DataFrame({"a": [1]}, copy=object())
-    with pytest.raises(NotImplementedError, match="copy"):
-        firepanda.Series([1], copy=object())
-
-
 @needs_pandas
 def test_the_same_literal_means_the_same_thing_in_both(firepanda: ModuleType) -> None:
     """The claim reduced to a comparison, over every type inference handles."""

@@ -31,6 +31,7 @@ import contextlib
 import copy
 import functools
 import inspect
+import itertools
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -857,8 +858,21 @@ def _agreed_freq(result: Any, inputs: list[Any], kwargs: dict[str, Any]) -> None
         return
     held = [row_freq(one) for one in inputs]
     shared = held[0]
-    if shared is not None and all(one == shared for one in held) and row_freq(result) is None:
+    agreed = shared is not None and all(one == shared for one in held)
+    if (
+        agreed
+        and row_freq(result) is None
+        and _joined_up([one.index for one in inputs if len(one)], shared)
+    ):
         hold_freq(result, shared)
+
+
+def _joined_up(labels: list[Any], freq: Any) -> bool:
+    """Whether each piece starts one step after the one before it ends, as pandas asks."""
+    try:
+        return all(before[-1] + freq == after[0] for before, after in itertools.pairwise(labels))
+    except (TypeError, ValueError):
+        return False
 
 
 def _concat_inputs(objs: Any = None, *args: Any, **kwargs: Any) -> list[Any]:

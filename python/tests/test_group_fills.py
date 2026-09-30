@@ -139,14 +139,13 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: m.DataFrame(FRAME).groupby("k").filter(lambda g: True, dropna=False),
     lambda m: m.DataFrame(FRAME).groupby("k").pct_change(freq="D"),
 ]
 
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """Keeping the lost rows as blanks, and a shift by a frequency."""
+    """A shift by a frequency."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 
