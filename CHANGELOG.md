@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: ewm times= with an index or infinities
+
+`ewm(times=...)` now takes a `DatetimeIndex` such as `to_datetime([...], unit="s")` as well as a column of instants, and reads an infinite value as a gap, as pandas' window code does before its kernel runs.
+
 ### Added: ewm times=
 
 `ewm(halflife=..., times=...)` decays each row's weight by the time since it rather than by the row count, as pandas does, for a Series, a frame and a grouped column. The mean follows pandas' recurrence, including gaps, `ignore_na`, `min_periods` and `adjust=False`, and the other reductions, a missing instant, times of another length or kind, and a decay given another way beside `adjust=False` are refused with pandas' messages. The evenly spaced `adjust=False` mean with a centre of mass of one now also gives a value after a gap what the old weight left over, as pandas' kernel does.
