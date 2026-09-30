@@ -27343,15 +27343,37 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         Each column's statistics are named by the pair of the column and the
         statistic, as pandas names them. The columns of numbers are described
         when there are any, which is what `DataFrame.describe` picks for each
-        group in pandas. `include` and `exclude` are refused.
+        group in pandas. `include` and `exclude` pick the columns the way
+        `DataFrame.describe` does, and when their statistics differ each column
+        takes them all, the ones it has no answer for missing.
         """
-        _refuse("include", include, "only the columns of numbers are described for now")
-        _refuse("exclude", exclude, "only the columns of numbers are described for now")
         columns = self._value_columns()
-        numeric = [name for name in columns if _text_numeric(_word(self._frame[name].dtype))]
-        return self._levelled(
-            {name: self._column_group(name).describe(percentiles) for name in numeric or columns}
-        )
+        if include is None and exclude is None:
+            numeric = [name for name in columns if _text_numeric(_word(self._frame[name].dtype))]
+            columns = numeric or columns
+            return self._levelled(
+                {name: self._column_group(name).describe(percentiles) for name in columns}
+            )
+        if include == "all" and exclude is not None:
+            raise InvalidArgumentError("exclude must be None when include is 'all'")
+        values = self._frame[columns]
+        if include != "all":
+            columns = _shown_names(values.select_dtypes(include=include, exclude=exclude))
+        if not columns:
+            raise InvalidArgumentError(
+                "No columns match the specified include or exclude data types"
+            )
+        parts = {name: self._column_group(name).describe(percentiles) for name in columns}
+        # pandas takes the statistics of the shortest answers first, as `DataFrame.describe` does.
+        labels: list[Any] = []
+        for part in sorted(parts.values(), key=lambda part: len(_shown_names(part))):
+            labels += [label for label in _shown_names(part) if label not in labels]
+        widened = {name: part.reindex(columns=labels) for name, part in parts.items()}
+        # A part of object columns keeps the statistics it has no answer for as objects too.
+        for name, part in parts.items():
+            if all(str(dtype) == "object" for dtype in part.dtypes):
+                widened[name] = widened[name].astype(object)
+        return self._levelled(widened)
 
     def ohlc(self) -> DataFrame:
         """What `SeriesGroupBy.ohlc` gives, a column at a time, under two levels of labels.
@@ -27909,18 +27931,15 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         columns on the keys, so a group with one value has no spread and a group
         with no values has a count of zero and gaps elsewhere. `include` and
         `exclude` are ignored, as pandas ignores them for a column. A column of
-        text, flags, moments or spans is refused as `Series.describe` refuses it.
+        text, flags, moments or spans is described group by group as
+        `Series.describe` describes it, in object columns.
         """
         from ._frame import SeriesGroupBy
 
         asked = _percentiles_asked(percentiles)
         printed = str(self._source().dtype)
         if printed not in _SIGNED | _UNSIGNED | _FLOATING:
-            raise NotImplementedError(
-                f"describe is not supported yet for a {printed} column, because pandas"
-                " answers it with columns of mixed values and firepanda has no object"
-                " column to hold them"
-            )
+            return self._described_each(percentiles)
         grouped = SeriesGroupBy(
             self._frame, self._by, self._as_index, self._sort, self._dropna, self._column
         )
@@ -27941,6 +27960,17 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
                 else part.astype("float64").reset_index(drop=True)
                 for name, part in parts.items()
             }
+        )
+
+    def _described_each(self, percentiles: Any) -> DataFrame:
+        """`Series.describe` of each group's values, a row a group, as object columns."""
+        from ._frame import Series
+
+        source = self._source()
+        answers = [source.iloc[places].describe(percentiles) for _, places in self._members()]
+        labels = answers[0].index.tolist() if answers else ["count", "unique", "top", "freq"]
+        return self._on_groups(
+            {label: Series([answer[label] for answer in answers], dtype=object) for label in labels}
         )
 
     def _plan(self, func: Any) -> list[tuple[str, str, Any]]:

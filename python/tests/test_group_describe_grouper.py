@@ -146,7 +146,11 @@ def test_a_mistake_raises_what_pandas_raises(firepanda: ModuleType, name: str) -
         lambda m: data(m).groupby("k")["t"].describe(),
     ],
 )
-def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Any) -> None:
-    """Text and moments have no numbers to describe."""
-    with pytest.raises(NotImplementedError):
-        build(firepanda)
+@needs_pandas
+def test_text_and_moments_are_described_as_pandas_describes_them(
+    firepanda: ModuleType, build: Any
+) -> None:
+    """Group by group, as `Series.describe` describes them, in object columns."""
+    import pandas as pd
+
+    assert repr(build(firepanda)) == repr(build(pd))
