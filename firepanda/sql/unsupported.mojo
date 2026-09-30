@@ -385,10 +385,10 @@ def sql_support() -> List[Refusal]:
             "join-form",
             "this kind of join",
             (
-                "firepanda runs the joins that name a condition or take none."
-                " POSITIONAL and NEAREST are not among them, and nor are the"
-                " mark, single, right_semi and right_anti types JOIN BY can"
-                " name."
+                "firepanda runs the joins that name a condition or take none,"
+                " and POSITIONAL and ASOF joins. NEAREST is not among them,"
+                " and nor are the mark, single, right_semi and right_anti types"
+                " JOIN BY can name."
             ),
             SQL_ISSUE,
         ),
