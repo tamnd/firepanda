@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Sums and scans over text, and pandas' refusals for the rest
+
+Summing text joins it in row order, as pandas does, over a column, a frame (an object answer beside the numbers) and each group, with `skipna` and `min_count` answered as pandas answers them. `cumsum`, `cummin` and `cummax` run down a text column. `mean`, `median`, `std`, `var`, `sem`, `skew` and `prod` on text, and `cumprod`, raise pandas' `TypeError` in the words pandas uses for a column, a frame and a group, for both `str` and `string`.
+
 ### Fixed: Text and numbers refused with pandas' TypeError, and df.a writing column a
 
 A whole number column added to a text column, such as `n + s`, now raises pandas' `TypeError` naming the reflected operator (`operation 'radd' not supported for dtype 'str' with dtype 'int64'`) instead of a core type error. A frame with a text column plus a number, by operator or by the named form, raises the same `TypeError` pandas raises for that column. Assigning to an attribute that names an existing column, `df.a = [7, 8]`, now writes the column as pandas does.
