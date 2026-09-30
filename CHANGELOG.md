@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: PIVOT with no IN list pivots on the values the column holds
+
+`PIVOT t ON c USING sum(x)` without `IN (...)` makes a column for every value `c` holds, nulls left out and smallest first, by running the distinct over the source before the pivot is lowered, which is what DuckDB does. The pivot key also keeps its own name when the query projects it.
+
 ### Changed: where, mask and shift widen the way pandas does
 
 `where` and `mask` on a column of whole numbers now answer float64 when a row takes nothing or takes a fraction, and a column of flags becomes object when a row takes nothing, which is what pandas does because a numpy column has nowhere to keep a gap. The nullable types keep their own type as before. `shift` on a column of flags, alone or in a frame, now answers object with NaN in the gap, and `DataFrame.dtypes` is an object column, so it prints `dtype: object` as pandas does. `where(cond, None)` reads the None as a missing value outside an object column, and a plain float column takes NaN in the rows it does not keep, which is how pandas spells a gap there.
@@ -55,10 +59,6 @@ With `expand=False` the pair now answers one object column of three element tupl
 ### Changed: A list of integers with a gap reads as float64
 
 `Series`, `Index` and `DataFrame` built from a list of integers with a None in it are float64 with a NaN, as in pandas, rather than int64 with a hole, and so are the same lists given to `DataFrame.from_dict`, `DataFrame.from_records`, `assign` and a column set with `[]`. A mapping read as a series widens the same way when a label finds no value. Only lists that come from outside firepanda widen, since its own layer builds integer columns with gaps on purpose. A float gap stays a null, and flags and text keep their types.
-### Added: PIVOT with no IN list pivots on the values the column holds
-
-`PIVOT t ON c USING sum(x)` without `IN (...)` makes a column for every value `c` holds, nulls left out and smallest first, by running the distinct over the source before the pivot is lowered, which is what DuckDB does. The pivot key also keeps its own name when the query projects it.
-
 ## [0.8.37] - 2026-09-30
 
 Built against Mojo 1.0.0 (ed45d567).
