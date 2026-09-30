@@ -9519,7 +9519,14 @@ class DataFrameMixin(_Carries):
         """
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         index = _written_index(index)
+        listed = set()
         if isinstance(data, collections.abc.Mapping):
+            if dtype is None and _from_outside():
+                listed = {
+                    _names.held(name)
+                    for name, values in data.items()
+                    if isinstance(values, (list, tuple)) and None in values
+                }
             data = self._arrays_as_series(data, index)
         if isinstance(data, DataFrameMixin):
             self._inner = self._copied(data, index, columns)
@@ -9531,6 +9538,8 @@ class DataFrameMixin(_Carries):
             self._inner = self._built(data)
         else:
             self._inner = self._shaped(data, index, columns)
+        if listed:
+            self._inner = _int_gaps_widened(self._inner, listed)
         if dtype is not None and (
             type(dtype).__name__ == "ArrowDtype"
             or _masked.masked_name(dtype) is not None
@@ -10892,6 +10901,8 @@ class DataFrameMixin(_Carries):
         if orient == "columns":
             if columns is not None:
                 raise InvalidArgumentError("cannot use columns parameter with orient='columns'")
+            if dtype is None and isinstance(data, collections.abc.Mapping):
+                data = {name: _floated(values) for name, values in data.items()}
             return cls(data, dtype=dtype)
         if orient == "tight":
             return cls(data["data"], index=data["index"], columns=data["columns"], dtype=dtype)
@@ -10936,7 +10947,9 @@ class DataFrameMixin(_Carries):
         else:
             width = max((len(row) for row in rows), default=0)
             names = list(range(width)) if columns is None else list(columns)
-            pieces = {name: [row[place] for row in rows] for place, name in enumerate(names)}
+            pieces = {
+                name: _floated([row[place] for row in rows]) for place, name in enumerate(names)
+            }
         labels, taken = None, None
         if isinstance(index, str) and index in pieces:
             taken = index
@@ -11679,8 +11692,10 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame
 
         out = DataFrame._wrap(self._inner)
+        outside = _from_outside()
         for name, value in kwargs.items():
-            out = out._assigned(name, applied(value, out))
+            value = applied(value, out)
+            out = out._assigned(name, _floated(value) if outside else value)
         return out
 
     def __setitem__(self, key: Any, value: Any) -> None:
@@ -11718,6 +11733,8 @@ class DataFrameMixin(_Carries):
                 " firepanda has no object column to hold it"
             )
         if not isinstance(key, list):
+            if isinstance(value, (list, tuple)) and _from_outside():
+                value = _floated(value)
             self._inner = self._assigned(key, value)._inner
             return
         out = DataFrame._wrap(self._inner)
@@ -14932,6 +14949,13 @@ class SeriesMixin(_Carries):
         try:
             if keyed:
                 self._inner = _keyed_series(data, index, name)
+                if (
+                    dtype is None
+                    and self._inner.dtype().startswith(("int", "uint"))
+                    and self._inner.null_count()
+                    and _from_outside()
+                ):
+                    self._inner = self._inner.cast("float64", True)
             elif isinstance(data, SeriesMixin) and index is not None:
                 # pandas reads a series and an index together as a reindex,
                 # and the labels are the index given, name and all.
@@ -14943,6 +14967,15 @@ class SeriesMixin(_Carries):
                 elif data is not None and _is_scalar(data):
                     data = [data] * (1 if index is None else len(list(index)))
                 self._inner = self._made(data, name)
+                if (
+                    typed is None
+                    and dtype is None
+                    and isinstance(data, (list, tuple))
+                    and self._inner.dtype().startswith(("int", "uint"))
+                    and self._inner.null_count()
+                    and _from_outside()
+                ):
+                    self._inner = self._inner.cast("float64", True)
                 if str(dtype).startswith("interval[") and _objects.interval_name_of(self._inner):
                     self._inner = _interval_typed(self._inner, str(dtype))
                 if _is_period_type(dtype):
@@ -25649,6 +25682,15 @@ class IndexMixin:
                 self.__class__ = type(moved)
             else:
                 self._inner = _firepanda.Index(data, label)
+                if (
+                    dtype is None
+                    and isinstance(data, (list, tuple))
+                    and self._inner.null_count()
+                    and self._inner.dtype().startswith(("int", "uint"))
+                    and _from_outside()
+                ):
+                    column = _firepanda.Series(data, label).cast("float64", True)
+                    self._inner = column.to_index(label)
         except Exception as error:
             raise translate(error) from None
 
@@ -27814,6 +27856,53 @@ def _anti(
     if not indicator:
         out = out.drop(columns=[named])
     return out
+
+
+def _from_outside(depth: int = 2) -> bool:
+    """Whether the constructor running was called by code outside firepanda.
+
+    pandas reads `[1, None, 3]` as float64 with a NaN, because a numpy integer has
+    nowhere to put a gap, and that is the answer a caller's own list gets here too.
+    firepanda's own layer builds integer columns with gaps from lists all the time,
+    counts under instants and spans above all, and relies on them staying integers
+    with a hole, so the widening is kept to lists that come from outside. `depth` is
+    how many frames up the caller is from here, and the wrapper `_attrs` puts around a
+    method is looked through, since it is part of the method rather than a caller.
+    """
+    frame = sys._getframe(depth)
+    while frame.f_back is not None and frame.f_globals.get("__name__") == "firepanda._attrs":
+        frame = frame.f_back
+    return not frame.f_globals.get("__name__", "").startswith("firepanda")
+
+
+def _floated(values: Any) -> Any:
+    """A list of integers with a None in it, the integers made floats, as pandas reads it.
+
+    Anything else comes back as it went in, a list with no gap, a list holding
+    anything but plain integers, or something that is not a list.
+    """
+    if not isinstance(values, (list, tuple)) or None not in values:
+        return values
+    if not all(value is None or type(value) is int for value in values):
+        return values
+    return [None if value is None else float(value) for value in values]
+
+
+def _int_gaps_widened(inner: Any, names: Any) -> Any:
+    """The frame with each named integer column that has a gap made float64, as pandas reads it.
+
+    Only integers widen: a float gap stays a null rather than turning into a NaN, and
+    flags and text keep their own types, as they do in pandas.
+    """
+    counts = inner.null_counts()
+    if not any(counts):
+        return inner
+    wide = [
+        name
+        for name, typed, count in zip(inner.names(), inner.dtypes(), counts, strict=True)
+        if count and typed.startswith(("int", "uint")) and name in names
+    ]
+    return inner.cast(wide, ["float64"] * len(wide), True) if wide else inner
 
 
 def _merge_widened(out: Any) -> Any:

@@ -273,3 +273,45 @@ def test_a_mapping_is_labels_and_values(firepanda: ModuleType, kwargs: dict[str,
     assert [None if v != v else v for v in ours.tolist()] == [
         None if v != v else v for v in theirs.tolist()
     ]
+
+
+GAPPED_INTEGERS = [
+    lambda m: m.Series([1, None, 3]).dtype,
+    lambda m: m.Series((1, None)).dtype,
+    lambda m: m.Series({"a": 1, "b": None}).dtype,
+    lambda m: m.Series({"a": 1}, index=["a", "b"]).dtype,
+    lambda m: m.Index([1, None, 3]).dtype,
+    lambda m: m.DataFrame({"k": [1, None, 3], "f": [1.5, None, 2.0]}).dtypes.tolist(),
+    lambda m: m.DataFrame({"k": [1, None, 3]}, index=[5, 6, 7]).dtypes.tolist(),
+    lambda m: m.DataFrame({"k": m.Series([1, 2]), "j": [1, None]}).dtypes.tolist(),
+    lambda m: m.DataFrame({"k": [1, None, 3]}).head(1).dtypes.tolist(),
+    lambda m: m.DataFrame.from_dict({"a": [1, None]}).dtypes.tolist(),
+    lambda m: m.DataFrame.from_records([(1,), (None,)]).dtypes.tolist(),
+    lambda m: m.DataFrame({"a": [1, 2]}).assign(b=[1, None]).dtypes.tolist(),
+    lambda m: m.Series([1, None, 3]).tolist(),
+    lambda m: m.Series([1, None], dtype="Int64").dtype,
+]
+
+
+@needs_pandas
+@pytest.mark.parametrize("build", GAPPED_INTEGERS)
+def test_a_list_of_integers_with_a_gap_is_float64(firepanda: ModuleType, build: Any) -> None:
+    """pandas reads `[1, None, 3]` as float64 with a NaN, and it stays float64 after a slice."""
+    import pandas as pd
+
+    def spelled(value: Any) -> Any:
+        if isinstance(value, list):
+            return [spelled(item) for item in value]
+        if isinstance(value, float) and value != value:
+            return "nan"
+        return str(value)
+
+    assert spelled(build(firepanda)) == spelled(build(pd))
+
+
+def test_an_assigned_list_with_a_gap_is_float64(firepanda: ModuleType) -> None:
+    """The same list set as a column reads the way the constructor reads it."""
+    frame = firepanda.DataFrame({"a": [1, 2]})
+    frame["b"] = [None, 4]
+    assert frame["b"].dtype == "float64"
+    assert frame["b"].tolist()[1] == 4.0

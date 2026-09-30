@@ -207,7 +207,9 @@ def test_attrs_travel_in_every_direction(firepanda: ModuleType) -> None:
 
 def test_arrow_types_when_asked(firepanda: ModuleType) -> None:
     """A `dtype_backend` keeps a missing integer an integer, rather than a float."""
-    frame = firepanda.DataFrame({"a": [1, None, 3]})
+    import pyarrow as pa
+
+    frame = firepanda.from_arrow(pa.table({"a": pa.array([1, None, 3], pa.int64())}))
     data = frame.to_parquet()
     assert str(firepanda.read_parquet(io.BytesIO(data)).dtypes["a"]) == "float64"
     for backend in ("numpy_nullable", "pyarrow"):
