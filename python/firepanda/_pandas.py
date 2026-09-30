@@ -30013,10 +30013,14 @@ def _text_temporal_target(printed: str, dtype: Any) -> str:
 
 
 def _parsed_temporal(column: Any, wanted: str) -> Any:
-    """A column of text parsed into the instants or spans of `wanted`, at its unit."""
-    unit = _unit_of(wanted)
-    parse = to_timedelta if wanted.startswith("timedelta") else to_datetime
-    return parse(column).dt.as_unit(unit)
+    """A column of text parsed into the instants or spans of `wanted`, at its unit.
+
+    Each text is read on its own, as the constructor reads it, since pandas does
+    not take one format from the first and hold the rest to it.
+    """
+    from ._frame import Series
+
+    return Series(column.tolist(), dtype=wanted, index=column.index, name=column.name)
 
 
 def _unit_change(printed: str, dtype: Any) -> str:

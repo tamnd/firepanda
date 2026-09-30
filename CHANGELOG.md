@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: astype reads each text on its own when parsing instants
+
+`astype("datetime64[ms]")` on text that mixes a day with a day and a time, or writes a month as a word, now parses each text on its own as pandas does. It used to take one format from the first text and refuse the rest.
+
 ### Changed: Text parses to instants and spans through astype, and three smaller gaps
 
 `astype("datetime64[ns]")` and `astype("timedelta64[s]")` on a column of text now parse it as `to_datetime` and `to_timedelta` would, at the unit asked for, where they were refused before. The same goes for a frame's `astype`, for `astype(object)` on a frame, and for `dtype=` on the `DataFrame` constructor with an instant, span or object type. `Index.map` on an index of a masked type answers in a masked type as pandas does, keeping an `Int32` for whole numbers and giving `Float64` for floats. `mask` with a list or a column of objects holding a gap raises pandas' `TypeError`, since pandas turns the condition over with `~` first.
