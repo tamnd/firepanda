@@ -127,12 +127,25 @@ def test_bool_only_is_accepted_on_a_series_and_does_nothing(firepanda: ModuleTyp
     assert firepanda.Series([1.0, 0.0, 3.0]).all(bool_only=True) is False
 
 
-def test_the_arguments_that_are_held_are_still_held(firepanda: ModuleType) -> None:
-    """`skipna=False` on a truth test and `bool_only` refuse rather than being dropped."""
-    with pytest.raises(NotImplementedError, match="skipna"):
-        firepanda.Series(VALUES).any(skipna=False)
-    with pytest.raises(NotImplementedError, match="bool_only"):
-        firepanda.DataFrame(MIXED).any(bool_only=True)
+@needs_pandas
+def test_skipna_false_and_bool_only_answer_as_pandas_does(firepanda: ModuleType) -> None:
+    """A gap that is not skipped is true, and `bool_only` keeps the flag columns."""
+    import pandas as pd
+
+    for values in (VALUES, [0.0, None], [None, None], [1.0, None]):
+        mine, theirs = firepanda.Series(values, dtype="float64"), pd.Series(values, dtype="float64")
+        for name in ("any", "all"):
+            got = getattr(mine, name)(skipna=False)
+            assert got == getattr(theirs, name)(skipna=False), (values, name)
+    mine, theirs = firepanda.DataFrame(MIXED), pd.DataFrame(MIXED)
+    for name in ("any", "all"):
+        for axis in (0, None):
+            got = getattr(mine, name)(axis=axis, bool_only=True)
+            want = getattr(theirs, name)(axis=axis, bool_only=True)
+            if axis is None:
+                assert got == want, name
+            else:
+                assert got.to_dict() == want.to_dict(), name
 
 
 @needs_pandas

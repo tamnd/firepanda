@@ -221,9 +221,7 @@ def test_a_complete_column_on_its_own_is_untouched_too(firepanda):
     assert firepanda.Series([1.0, 2.0]).fillna("x").tolist() == [1.0, 2.0]
 
 
-def test_a_limit_is_refused_and_a_bad_one_is_refused_first(firepanda):
-    with pytest.raises(NotImplementedError, match="limit="):
-        frame(firepanda).fillna({"i": 0}, limit=1)
+def test_a_bad_limit_is_refused_the_way_pandas_refuses_it(firepanda):
     with pytest.raises(ValueError, match="Limit must be greater than 0"):
         frame(firepanda).fillna({"i": 0}, limit=0)
     with pytest.raises(ValueError, match="Limit must be an integer"):

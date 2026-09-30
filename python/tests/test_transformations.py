@@ -257,13 +257,10 @@ def test_an_empty_column_transforms_to_an_empty_column(firepanda: ModuleType) ->
     [
         ("Series", "ffill", {"limit_area": "inside"}, "limit_area"),
         ("Series", "shift", {"freq": "D"}, "freq"),
-        ("Series", "shift", {"fill_value": 0}, "fill_value"),
         ("Series", "shift", {"periods": [1, 2]}, "single number"),
         ("Series", "shift", {"suffix": "_x"}, "suffix"),
         ("Series", "pct_change", {"fill_method": "pad"}, "fill_method"),
-        ("Series", "cumsum", {"skipna": False}, "skipna"),
         ("Series", "dropna", {"ignore_index": True}, "ignore_index"),
-        ("DataFrame", "cumsum", {"numeric_only": True}, "numeric_only"),
         ("DataFrame", "dropna", {"thresh": 1}, "thresh"),
         ("DataFrame", "cumsum", {"axis": 1}, "axis=1"),
     ],

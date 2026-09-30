@@ -5554,11 +5554,25 @@ default there is a bool, which is not a pattern. It reads as a leak and it is
 the documented way pandas refuses `s.replace(None, 0)`.
 """
 
-_NO_REGEX = (
-    "regex is not supported yet, because a replacement read as a pattern is the text"
-    " kernel's business and this method is written over comparisons"
-)
-"""Why a pattern is refused here."""
+def _regex_replaced(column: Any, to_replace: Any, value: Any, regex: Any) -> Any:
+    """`replace` with a pattern, which rewrites the matched part of each text row.
+
+    pandas substitutes inside every string cell the pattern is found in and leaves
+    the rest alone, so a column that holds no text comes back as it was. The one
+    shape written is a single pattern and a text replacement, named either as
+    `to_replace` with `regex=True` or as `regex` itself.
+    """
+    pattern = to_replace if regex is True else regex
+    written = isinstance(pattern, (str, re.Pattern)) and isinstance(value, str)
+    if written and (regex is True or to_replace is None):
+        text = _word(column.dtype) == "string" and not _objects.is_object(column._inner)
+        if not text:
+            return column.copy()
+        return column.str.replace(pattern, value, regex=True)
+    raise NotImplementedError(
+        f"regex={regex!r} is not supported yet with these arguments, because only one"
+        " pattern replaced by one piece of text is written"
+    )
 
 
 def _lengths(wanted: int, given: int) -> str:
@@ -11940,7 +11954,7 @@ class DataFrameMixin(_Carries):
                 as long as the run being replaced, or a mapping read by column
                 name.
             inplace: Puts the answer into this object and hands the object back.
-            regex: Refused, for now.
+            regex: True to read `to_replace` as a pattern, or the pattern itself.
 
         Returns:
             A new frame of the same shape and the same types.
@@ -11948,13 +11962,17 @@ class DataFrameMixin(_Carries):
         Raises:
             DTypeError: If a column cannot hold what it is being handed.
             InvalidArgumentError: If the arguments do not say what to do.
-            NotImplementedError: For `inplace` and for `regex`.
+            NotImplementedError: For a pattern in a shape that is not written.
         """
         from ._frame import DataFrame, Series
 
         inplace = _flag("inplace", inplace)
-        _held_at("regex", regex, False, _NO_REGEX)
         names = _held_names(self)
+        if regex is not False:
+            answer = self.copy()
+            for name in names:
+                answer[name] = _regex_replaced(self[name], to_replace, value, regex)
+            return _kept(self, answer, inplace)
         wanted = _frame_replacements(to_replace, value, names, "DataFrame")
         labels = self._inner.labels().to_list()
         types = dict(zip(names, self._inner.dtypes(), strict=True))
@@ -14000,8 +14018,15 @@ class DataFrameMixin(_Carries):
         from ._multi import MultiIndex
 
         _refuse("key", key, "running a function over the labels before sorting is not written")
-        _axis_number(axis, "DataFrame", 0, (0,))
+        across = _axis_number(axis, "DataFrame", 0, (0, 1))
         inplace = _flag("inplace", inplace)
+        if across == 1 and level is None and not isinstance(ascending, (list, tuple)):
+            # The column labels are text, so their order is the order of the
+            # names, and the sort is stable, so a repeated name keeps its place.
+            names = list(self.columns)
+            order = sorted(range(len(names)), key=names.__getitem__, reverse=not ascending)
+            return _settled(self, self.iloc[:, order], inplace)
+        _axis_number(axis, "DataFrame", 0, (0,))
         _held_at(
             "na_position",
             na_position,
@@ -14026,13 +14051,9 @@ class DataFrameMixin(_Carries):
                 back = [order.index(n) for n in range(index.nlevels)]
                 moved = self.reorder_levels(order).sort_index(ascending=ascending)
                 return _settled(self, moved.reorder_levels(back), inplace)
-        _held_at(
-            "ignore_index",
-            ignore_index,
-            False,
-            "numbering the rows again after sorting them by their labels throws"
-            " away the thing that was just sorted",
-        )
+        if ignore_index:
+            ordered = self.sort_index(ascending=ascending, level=level)
+            return _settled(self, ordered.reset_index(drop=True), inplace)
         if isinstance(ascending, (list, tuple)):
             raise NotImplementedError(
                 "a direction per level is not supported yet, because there is one"
@@ -14704,20 +14725,17 @@ class DataFrameMixin(_Carries):
             " needs the offset vocabulary, which is the resampling milestone",
         )
         _refuse("suffix", suffix, "it only names the columns a list of periods produces")
-        _held_at(
-            "fill_value",
-            fill_value,
-            NO_DEFAULT,
-            "filling the gap keeps a column of whole numbers whole, and the value"
-            " has to reach the kernel as a typed one rather than as a Python"
-            " object",
-        )
         if not isinstance(periods, int) or isinstance(periods, bool):
             raise NotImplementedError(
                 "periods has to be a single number for now, because a list of them"
                 " answers a frame with one set of columns per period"
             )
-        return self._transformed("shift", periods, axis)
+        shifted = self._transformed("shift", periods, axis)
+        if fill_value is NO_DEFAULT:
+            return shifted
+        for name in shifted._inner.names():
+            shifted[name] = self[name]._shift(periods, None, 0, fill_value, None)
+        return shifted
 
     def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> DataFrame:
         """The fractional change between each row and the one before it."""
@@ -16590,7 +16608,7 @@ class SeriesMixin(_Carries):
             value: What to put in place of it, which is a value or a run of them
                 as long as the run being replaced.
             inplace: Puts the answer into this object and hands the object back.
-            regex: Refused, for now.
+            regex: True to read `to_replace` as a pattern, or the pattern itself.
 
         Returns:
             A new column of the same height and the same type.
@@ -16598,12 +16616,13 @@ class SeriesMixin(_Carries):
         Raises:
             DTypeError: If the column cannot hold what it is being handed.
             InvalidArgumentError: If the arguments do not say what to do.
-            NotImplementedError: For `inplace` and for `regex`.
+            NotImplementedError: For a pattern in a shape that is not written.
         """
         from ._frame import Series
 
         inplace = _flag("inplace", inplace)
-        _held_at("regex", regex, False, _NO_REGEX)
+        if regex is not False:
+            return _kept(self, _regex_replaced(self, to_replace, value, regex), inplace)
         pairs = _replacements(to_replace, value, "Series")
         if _objects.period_name_of(self._inner):
             return _kept(self, _periods_replaced(self, pairs), inplace)
@@ -17914,20 +17933,30 @@ class SeriesMixin(_Carries):
             " needs the offset vocabulary, which is the resampling milestone",
         )
         _refuse("suffix", suffix, "it only names the columns a list of periods produces")
-        _held_at(
-            "fill_value",
-            fill_value,
-            NO_DEFAULT,
-            "filling the gap keeps a column of whole numbers whole, and the value"
-            " has to reach the kernel as a typed one rather than as a Python"
-            " object",
-        )
         if not isinstance(periods, int) or isinstance(periods, bool):
             raise NotImplementedError(
                 "periods has to be a single number for now, because a list of them"
                 " answers a frame with one column per period"
             )
-        return self._transformed("shift", periods, axis)
+        shifted = self._transformed("shift", periods, axis)
+        rows = len(self)
+        moved = min(abs(periods), rows)
+        if fill_value is NO_DEFAULT or moved == 0:
+            return shifted
+        # The rows the shift opened are filled by joining a column of the value
+        # to the rows that stayed, so a whole number filling a column of whole
+        # numbers keeps it whole where a fill of the gaps would not know which
+        # gaps the shift made.
+        from ._frame import Series
+
+        kept = self.iloc[: rows - moved] if periods > 0 else self.iloc[moved:]
+        opened = Series([fill_value] * moved, name=self.name)
+        if not len(kept):
+            joined = opened
+        else:
+            pieces = [opened, kept] if periods > 0 else [kept, opened]
+            joined = concat(pieces, ignore_index=True)
+        return joined.set_axis(self.index)
 
     def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> Series:
         """The fractional change between each row and the one before it."""

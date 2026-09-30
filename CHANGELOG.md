@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: seven parameters that used to refuse
+
+`shift` fills the rows it opens with `fill_value` on a series and a frame, keeping a column of whole numbers whole. The four scans take `skipna=False`, where every row after the first gap is a gap, and the frame scans take `numeric_only`. `any` and `all` take `skipna=False`, where a gap counts as true and a masked column answers `NA` when the known values do not settle it, and the frame spelling takes `bool_only`. `fillna` stops after `limit` gaps down each column. `DataFrame.sort_index` sorts the columns with `axis=1` and numbers the rows again with `ignore_index`. `replace` with `regex` rewrites the matched part of every text row, for one pattern and one piece of text. Each answer is checked against pandas.
+
 ### Added: `str.partition` and `str.rpartition` with `expand=False`
 
 With `expand=False` the pair now answers one object column of three element tuples, with a missing row left missing and the index and name kept, as pandas does, where it used to refuse. On an index pandas answers an index of tuples, which firepanda does not hold, so the index accessor now refuses any answer that is a column of objects by name rather than handing back an index of mangled text.
