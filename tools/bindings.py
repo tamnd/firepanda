@@ -3766,10 +3766,10 @@ SERIES = Exposed(
         Member(
             name="nbytes",
             kind="property",
-            body="self._inner.nbytes()",
+            body="self._counted_bytes()",
             doc=(
-                "The bytes the column's buffers occupy, which is what the data"
-                " weighs rather than what a numpy array holding it would."
+                "The bytes pandas would report for the column, which is what the"
+                " numpy or Arrow arrays it would hold weigh."
             ),
             returns="int",
         ),
@@ -4480,8 +4480,8 @@ INDEX = Exposed(
         Member(
             name="nbytes",
             kind="property",
-            body="self._inner.nbytes()",
-            doc="The bytes the labels occupy, which is zero for a range that stores none.",
+            body="self._counted_bytes()",
+            doc="The bytes pandas would report for the labels, which for a range is the range.",
             returns="int",
         ),
         Member(

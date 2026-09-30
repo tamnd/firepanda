@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Byte counts are pandas' byte counts
+
+`Series.nbytes`, `Index.nbytes` and `memory_usage` on the frame, the column and the index now answer the number pandas answers, counted from the numpy or Arrow arrays pandas would hold the data in: a width a row for numbers, a mask byte on top for a masked type, offsets and UTF-8 bytes and a bitmap for text, codes and categories for a category, a pointer a row for objects with `deep` adding each object, and the Python range and its three numbers for a `RangeIndex`. `info` spells text `str` and objects `object`, and writes pandas' `+` when object memory was left out. A column or frame built from columns that carry the plain range from zero now keeps a `RangeIndex` rather than turning it into stored integers, which also fixes their repr.
+
 ### Changed: a series' var, std and sem are pandas' floats
 
 `Series.var`, `Series.std` and `Series.sem` of a column of numbers take the squared distances from the mean numpy sums and leave its error alone, the steps pandas' `nanvar` takes, where the kernel corrected for that error. On five values near two to the fifty two that is pandas' 37.25 where exact arithmetic gives 37.2, and `skew` agrees with pandas' twelve percent on the same column. Without numpy the kernel still answers.
