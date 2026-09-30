@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Fixed: the join refusal no longer names POSITIONAL, which runs
 
 The `join-form` refusal, and the README table generated from it, said POSITIONAL joins were not run. They are, and so are ASOF joins. The refusal now names only what it refuses: NEAREST, and the mark, single, right_semi and right_anti types JOIN BY can name. The module notes in `firepanda/sql/plan.mojo` also said a recursive CTE was refused by name. It lowers to the fixed point it asks for, and only a `WITH` inside one or a union by name as its body is refused.
+### Added: shift by a frequency across columns and on periods
+
+`DataFrame.shift(freq=..., axis=1)` moves the column labels, a period index accepts any offset that names its own frequency, such as `MonthEnd(1)` on monthly periods, and refuses any other frequency with pandas' "Given freq ... does not match PeriodIndex freq ..." error. A range index is named RangeIndex in the refusal on plain labels, as in pandas.
 
 ### Added: limit_area on ffill and bfill
 

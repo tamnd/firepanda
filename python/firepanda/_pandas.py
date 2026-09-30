@@ -5829,8 +5829,8 @@ def _other_side(
     return _fallback(printed, other, column)
 
 
-def _moved_labels(obj: Any, periods: Any, freq: Any, axis: Any) -> Any:
-    """The row labels a shift by a frequency moves the rows to, or None to refuse it.
+def _moved_labels(labels: Any, periods: int, freq: Any) -> Any:
+    """The labels a shift by a frequency moves the rows or columns to.
 
     Shifting by a frequency leaves every value where it is and moves the labels
     instead, which an index of instants, spans or periods knows how to do, and
@@ -5838,23 +5838,24 @@ def _moved_labels(obj: Any, periods: Any, freq: Any, axis: Any) -> Any:
     """
     from ._period_index import PeriodIndex
 
-    whole = isinstance(periods, int) and not isinstance(periods, bool)
-    if freq is None or not whole or axis not in (0, "index", "rows", None):
-        return None
-    labels = obj.index
     if not isinstance(labels, (HeldFreq, PeriodIndex)):
-        raise NotImplementedError(
-            "This method is only implemented for DatetimeIndex, PeriodIndex and "
-            f"TimedeltaIndex; Got type {type(labels).__name__}"
-        )
+        # Every other index refuses it in pandas' words.
+        return labels.shift(periods, freq=freq)
     if isinstance(freq, str) and freq == "infer":
         freq = labels.freq if labels.freq is not None else labels.inferred_freq
         if freq is None:
             raise InvalidArgumentError("Freq was not set in the index hence cannot be inferred")
+    if isinstance(labels, PeriodIndex):
+        from ._period import Period
+
+        given = Period("2000-01-01", freq=freq).freqstr
+        if given != labels.freqstr:
+            raise InvalidArgumentError(
+                f"Given freq {given} does not match PeriodIndex freq {labels.freqstr}"
+            )
+        return labels.shift(periods)
     if not isinstance(freq, str):
         freq = getattr(freq, "freqstr", freq)
-    if isinstance(labels, PeriodIndex):
-        return labels.shift(periods) if freq == labels.freqstr else None
     return labels.shift(periods, freq=freq)
 
 
@@ -16393,15 +16394,10 @@ class DataFrameMixin(_Carries):
         if suffix:
             raise InvalidArgumentError("Cannot specify `suffix` if `periods` is an int.")
         _periods_whole(periods)
-        moved = _moved_labels(self, periods, freq, axis)
-        if moved is not None:
-            return self.set_axis(moved, axis=0)
-        _refuse(
-            "freq",
-            freq,
-            "shifting by a frequency moves the labels rather than the values and"
-            " needs the offset vocabulary, which is the resampling milestone",
-        )
+        if freq is not None:
+            across = _axis_number(axis, "DataFrame", 0, (0, 1))
+            moved = _moved_labels(self.columns if across else self.index, periods, freq)
+            return self.set_axis(moved, axis=across)
         if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
             return _columns_shifted(self, periods, fill_value)
         shifted = self._transformed("shift", periods, axis)
@@ -19800,15 +19796,9 @@ class SeriesMixin(_Carries):
             _axis_number(axis, "Series", 0, (0,))
             return self.to_frame()._shift(periods, freq, axis, fill_value, None)
         _periods_whole(periods)
-        moved = _moved_labels(self, periods, freq, axis)
-        if moved is not None:
-            return self.set_axis(moved, axis=0)
-        _refuse(
-            "freq",
-            freq,
-            "shifting by a frequency moves the labels rather than the values and"
-            " needs the offset vocabulary, which is the resampling milestone",
-        )
+        if freq is not None:
+            _axis_number(axis, "Series", 0, (0,))
+            return self.set_axis(_moved_labels(self.index, periods, freq), axis=0)
         rows = len(self)
         moved = min(abs(periods), rows)
         base = self
@@ -29078,9 +29068,10 @@ class IndexMixin:
         Moving a label by a step only means something for instants, spans and
         periods, and their index types answer it themselves.
         """
+        named = "RangeIndex" if self._inner.is_range() else type(self).__name__
         raise NotImplementedError(
             "This method is only implemented for DatetimeIndex, PeriodIndex and"
-            f" TimedeltaIndex; Got type {type(self).__name__}"
+            f" TimedeltaIndex; Got type {named}"
         )
 
     def asof(self, label: Any) -> Any:
