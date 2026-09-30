@@ -2515,6 +2515,291 @@ def _on_the_clock[Answer](
     return pick(flags, placed("True"), placed("False"))
 
 
+def _label_order(
+    index: Any, level: Any, ascending: Any, na_first: bool, sort_remaining: bool, key: Any
+) -> list[int]:
+    """The row positions `sort_index` puts the rows in, worked out a level at a time.
+
+    This is the path for what the kernel's one sort does not do: a `key` run over
+    the labels first, missing labels at the front, and a sort on some levels that
+    leaves the rest alone. As in pandas, `key` is handed each sorted level as an
+    index, a missing label goes first or last whichever way the level sorts, and
+    rows that tie keep the order they came in. The levels are sorted from the
+    least significant to the most, each pass stable, which is a sort on all of
+    them together.
+    """
+    from ._frame import Index
+    from ._multi import MultiIndex
+
+    depth = index.nlevels if isinstance(index, MultiIndex) else 1
+    if level is None:
+        levels = list(range(depth))
+    else:
+        asked = level if isinstance(level, (list, tuple)) else [level]
+        if isinstance(index, MultiIndex):
+            levels = index._level_numbers(asked)
+        else:
+            for one in asked:
+                index._only_level(one)
+            levels = [0]
+    downward = _directions(ascending, len(levels))
+    if level is not None and sort_remaining:
+        rest = [n for n in range(depth) if n not in levels]
+        levels += rest
+        downward += [downward[0] if not isinstance(ascending, (list, tuple)) else False] * len(rest)
+    order = list(range(len(index)))
+    for number, descending in reversed(list(zip(levels, downward, strict=True))):
+        labels = index.get_level_values(number) if depth > 1 else index
+        if key is not None:
+            labels = Index(key(labels))
+        values = list(labels)
+        present = [at for at in order if not _missing(values[at])]
+        gaps = [at for at in order if _missing(values[at])]
+        present.sort(key=values.__getitem__, reverse=descending)
+        order = gaps + present if na_first else present + gaps
+    return order
+
+
+_ROW_FALLBACKS = ("median", "skew", "kurt")
+"""The row reductions answered a row at a time, by the column reduction of that row."""
+
+
+def _row_columns(frame: Any, kind: str, anything: bool = False) -> list[Any]:
+    """The columns a reduction across the rows reads, each labelled by row number.
+
+    The labels are dropped so that columns combine by position whatever the row
+    labels are, repeats included, and the caller puts them back on the answer.
+    Numbers and plain flags are read. Anything else is refused unless `anything`
+    says the reduction reads every type, since pandas reads a row of mixed types
+    as objects and the answers it has for those are not written here.
+    """
+    columns = []
+    for at in range(frame.shape[1]):
+        column = frame.iloc[:, at].reset_index(drop=True)
+        printed = _word(column.dtype)
+        plain = printed == "bool" or printed.startswith(("int", "uint", "float"))
+        if not anything and not plain:
+            raise NotImplementedError(
+                f"{kind}(axis=1) is not supported yet over a column of {column.dtype}, because"
+                " pandas reads a row of mixed types as objects and only numbers and flags"
+                " are written"
+            )
+        columns.append(column)
+    return columns
+
+
+def _row_present(columns: list[Any], height: int) -> Any:
+    """How many values each row holds, as int64 by row number."""
+    from ._frame import Series
+
+    count = Series([0] * height, dtype="int64")
+    for column in columns:
+        count = count + column.notna().astype("int64")
+    return count
+
+
+def _row_reduced(frame: Any, kind: str, param: float, skipna: bool, min_count: int) -> Any:
+    """One reduction across every row, a column labelled by the frame's rows.
+
+    pandas turns the frame into one block and reduces along its second axis. Here
+    the columns are combined a pair at a time with the column kernels: a sum adds
+    the columns with each gap read as zero, a product multiplies them with each
+    gap read as one, `max` and `min` keep the larger or smaller side, and the
+    mean, variance and deviation are worked out from those in pandas' two passes.
+    Whole numbers and flags stay whole where pandas keeps them whole. A row
+    missing a value is NaN under `skipna=False`, and a row with fewer than
+    `min_count` values is NaN, as pandas answers. The median, skew and kurtosis
+    are the column reduction run over each row.
+    """
+    from ._frame import Series
+
+    index = frame.index
+    height = len(index)
+    texts = [_word(dtype) == "string" for dtype in frame.dtypes] if frame.shape[1] else [False]
+    if all(texts) and not _objects.is_object(frame.iloc[:, 0]._inner) and kind != "count":
+        return _row_text(frame, kind, skipna, min_count)
+    columns = _row_columns(frame, kind, anything=kind == "count")
+    present = _row_present(columns, height)
+    if kind == "count":
+        return present.set_axis(index)
+    printed = [_word(column.dtype) for column in columns]
+    whole = bool(columns) and all(not kind.startswith("float") for kind in printed)
+    flags = bool(columns) and all(kind == "bool" for kind in printed)
+    if not flags and "bool" in printed:
+        raise NotImplementedError(
+            f"{kind}(axis=1) is not supported yet over flags beside numbers, because pandas"
+            " reads such a row as objects and answers in Python's own arithmetic"
+        )
+    if kind in _ROW_FALLBACKS:
+        rows = zip(*(column.tolist() for column in columns), strict=True) if columns else ()
+        answers = [
+            getattr(Series(list(row), dtype="float64"), kind)(skipna=skipna) for row in rows
+        ]
+        if not columns:
+            answers = [math.nan] * height
+        return Series(answers, dtype="float64").set_axis(index)
+    if kind in ("sum", "prod", "max", "min") and whole:
+        answer = _row_whole(columns, kind, flags)
+        if kind in ("sum", "prod") and len(columns) < min_count:
+            return Series([math.nan] * height, dtype="float64").set_axis(index)
+        return answer.set_axis(index)
+    numbers = [column.astype("float64") for column in columns]
+    if kind in ("sum", "prod", "mean", "var", "std", "sem"):
+        seed = 1.0 if kind == "prod" else 0.0
+        total = Series([seed] * height, dtype="float64")
+        for column in numbers:
+            filled = column.fillna(seed)
+            total = total * filled if kind == "prod" else total + filled
+        if kind == "mean":
+            total = total / present.astype("float64")
+        elif kind in ("var", "std", "sem"):
+            total = _row_spread(numbers, total, present, kind, int(param), height)
+        answer = total
+    elif kind in ("max", "min"):
+        answer = Series([math.nan] * height, dtype="float64")
+        for column in numbers:
+            beaten = column.gt(answer) if kind == "max" else column.lt(answer)
+            answer = answer.where(~(beaten | answer.isna()) | column.isna(), column)
+    else:
+        raise NotImplementedError(f"{kind}(axis=1) is not supported yet")
+    voided = present < len(columns) if not skipna else present < 0
+    if kind in ("sum", "prod") and min_count > 0:
+        voided = voided | (present < min_count)
+    return answer.mask(voided, math.nan).set_axis(index)
+
+
+def _row_text(frame: Any, kind: str, skipna: bool, min_count: int) -> Any:
+    """A sum, `max` or `min` across columns of text, which pandas answers as text.
+
+    A sum joins the row's strings in column order and `max` and `min` compare
+    them. A row missing a value is NaN for a sum under `skipna=False`, which
+    pandas' `max` and `min` do not read, and so is a row with fewer than
+    `min_count` values. Any other reduction raises pandas' TypeError.
+    """
+    from ._frame import Series
+
+    if kind not in ("sum", "max", "min"):
+        raise TypeError(f"dtype 'str' does not support operation '{kind}'")
+    columns = [frame.iloc[:, at].tolist() for at in range(frame.shape[1])]
+    answers: list[Any] = []
+    for row in zip(*columns, strict=True):
+        values = [value for value in row if not _missing(value)]
+        short = not skipna and kind == "sum" and len(values) < len(row)
+        if short or len(values) < min_count:
+            answers.append(None)
+        elif kind == "sum":
+            answers.append("".join(values))
+        else:
+            answers.append((max if kind == "max" else min)(values) if values else None)
+    return Series(answers, dtype="str").set_axis(frame.index)
+
+
+def _row_whole(columns: list[Any], kind: str, flags: bool) -> Any:
+    """A sum, product, `max` or `min` across columns of whole numbers or flags, kept whole.
+
+    pandas answers int64 for a sum or product of whole numbers or flags and keeps
+    the flags for a `max` or `min` of flags alone. No row has a gap, since these
+    types hold none.
+    """
+    if flags and kind in ("max", "min"):
+        answer = columns[0]
+        for column in columns[1:]:
+            answer = answer | column if kind == "max" else answer & column
+        return answer
+    numbers = [column.astype("int64") for column in columns]
+    answer = numbers[0]
+    for column in numbers[1:]:
+        if kind == "sum":
+            answer = answer + column
+        elif kind == "prod":
+            answer = answer * column
+        else:
+            beaten = column.gt(answer) if kind == "max" else column.lt(answer)
+            answer = answer.where(~beaten, column)
+    return answer
+
+
+def _row_spread(
+    numbers: list[Any], total: Any, present: Any, kind: str, ddof: int, height: int
+) -> Any:
+    """The variance, deviation or standard error of each row, from its sum, in two passes.
+
+    The mean comes first, then the squared distance of each value from it is
+    summed, which is pandas' `nanvar`. A row with no more values than `ddof` is
+    NaN. The square roots are taken one value at a time with `math.sqrt`, as
+    numpy takes them.
+    """
+    from ._frame import Series
+
+    counts = present.astype("float64")
+    mean = total / counts
+    squares = Series([0.0] * height, dtype="float64")
+    for column in numbers:
+        apart = column - mean
+        squares = squares + (apart * apart).fillna(0.0)
+    room = counts - ddof
+    variance = (squares / room).mask(room <= 0, math.nan)
+    if kind == "var":
+        return variance
+    roots = [math.nan if _missing(value) else math.sqrt(value) for value in variance.tolist()]
+    if kind == "std":
+        return Series(roots, dtype="float64")
+    return Series(
+        [
+            math.nan if _missing(root) or count <= 0 else root / math.sqrt(count)
+            for root, count in zip(roots, counts.tolist(), strict=True)
+        ],
+        dtype="float64",
+    )
+
+
+def _row_truth(frame: Any, kind: str, skipna: bool) -> Any:
+    """`any` or `all` across every row, a column of flags labelled by the frame's rows.
+
+    A number is true when it is not zero and text when it is not empty. Under
+    `skipna` a gap is left out, which is false for `any` and true for `all`, and
+    without it a gap is NaN, which is true, since Python reads NaN as true.
+    """
+    from ._frame import Series
+
+    index = frame.index
+    columns = _row_columns(frame, kind, anything=True)
+    answer = Series([kind == "all"] * len(index), dtype="bool")
+    for column in columns:
+        printed = _word(column.dtype)
+        if printed == "bool":
+            truth = column
+        elif printed == "string" and not _objects.is_object(column._inner):
+            truth = (column.str.len() > 0).fillna(True).astype("bool")
+        elif printed.startswith(("int", "uint", "float")):
+            truth = column != 0
+        else:
+            raise NotImplementedError(
+                f"{kind}(axis=1) is not supported yet over a column of {column.dtype}, because"
+                " only numbers, flags and text are written"
+            )
+        if skipna:
+            truth = truth & column.notna() if kind == "any" else truth | column.isna()
+        answer = answer | truth if kind == "any" else answer & truth
+    return answer.set_axis(index)
+
+
+def _row_distinct(frame: Any, dropna: bool) -> Any:
+    """How many distinct values each row holds, as int64 labelled by the frame's rows.
+
+    A gap is left out, or counted once however it is spelt under `dropna=False`.
+    """
+    from ._frame import Series
+
+    columns = [frame.iloc[:, at].tolist() for at in range(frame.shape[1])]
+    counts = []
+    for row in zip(*columns, strict=True) if columns else [()] * len(frame.index):
+        values = {value for value in row if not _missing(value)}
+        gap = any(_missing(value) for value in row)
+        counts.append(len(values) + (1 if gap and not dropna else 0))
+    return Series(counts, dtype="int64").set_axis(frame.index)
+
+
 def _reducing_axis(axis: Any, owner: str) -> None:
     """Refuses a reduction along the second axis.
 
@@ -13353,9 +13638,11 @@ class DataFrameMixin(_Carries):
         from ._frame import Series
 
         _refuses_a_fold(axis, "kurt")
-        _reducing_axis(axis, "DataFrame")
+        across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         skipna = _flag("skipna", skipna)
         read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        if across:
+            return _row_reduced(read, "kurt", 0.0, skipna, 0)
         names = _shown_names(read)
         for printed in read._inner.dtypes():
             _kurt_refusal(printed)
@@ -13426,9 +13713,11 @@ class DataFrameMixin(_Carries):
         two refusals it gets.
         """
         _refuses_a_fold(axis, kind)
-        _reducing_axis(axis, "DataFrame")
+        across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         skipna = _flag("skipna", skipna)
         read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        if across:
+            return _row_reduced(read, kind, param, skipna, min_count)
         if kind == "quantile":
             _no_boolean_quantile(read._inner.dtypes())
         return read._voided(read._per_column(kind, param), skipna, min_count)
@@ -13552,8 +13841,13 @@ class DataFrameMixin(_Carries):
         from ._frame import Series
 
         folding = axis is None
-        _reducing_axis(axis, "DataFrame")
+        across = not folding and _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         frame: Any = self
+        if across:
+            if bool_only:
+                names = self._inner.names()
+                frame = self[[name for name in names if _word(self[name].dtype) in _TRUTHS]]
+            return _row_truth(frame, kind, skipna)
         if bool_only:
             # pandas keeps the columns that already hold booleans and asks nothing
             # of the rest, so a frame with none of them answers an empty column.
@@ -13904,6 +14198,8 @@ class DataFrameMixin(_Carries):
         is the same rule the series follows, and a frame with none missing
         answers straight from the kernel.
         """
+        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            return _row_distinct(self, _flag("dropna", dropna))
         counts = self._reduce("nunique", 0.0, axis, True, False, 0)
         if _flag("dropna", dropna):
             return counts
@@ -14064,9 +14360,16 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame
         from ._multi import MultiIndex
 
-        _refuse("key", key, "running a function over the labels before sorting is not written")
         across = _axis_number(axis, "DataFrame", 0, (0, 1))
         inplace = _flag("inplace", inplace)
+        if across == 1 and key is not None:
+            _refuse("key", key, "running a function over the column labels is not written")
+        if across == 0 and (key is not None or na_position != "last" or not sort_remaining):
+            first = _na_first(na_position)
+            order = _label_order(self.index, level, ascending, first, sort_remaining, key)
+            ordered = self.iloc[order]
+            ordered = ordered.reset_index(drop=True) if ignore_index else ordered
+            return _settled(self, ordered, inplace)
         if across == 1 and level is None and not isinstance(ascending, (list, tuple)):
             # The column labels are text, so their order is the order of the
             # names, and the sort is stable, so a repeated name keeps its place.
