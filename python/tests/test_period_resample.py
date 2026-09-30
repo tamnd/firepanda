@@ -95,3 +95,13 @@ PERIODS = {
 @pytest.mark.parametrize("make", PERIODS.values(), ids=PERIODS.keys())
 def test_period_of_a_period_is_pandas(firepanda: Any, make: Any) -> None:
     assert repr(make(firepanda)) == repr(make(pd))
+
+
+def test_period_labels_cross_to_arrow_as_pandas_does(firepanda: Any) -> None:
+    import pyarrow as pa
+
+    index = firepanda.PeriodIndex(["2024-01", "NaT", "2024-04"], freq="M")
+    ours = pa.array(index)
+    theirs = pa.array(pd.PeriodIndex(["2024-01", "NaT", "2024-04"], freq="M").array)
+    assert ours.type == theirs.type
+    assert ours.storage.to_pylist() == theirs.storage.to_pylist()
