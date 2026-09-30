@@ -201,6 +201,7 @@ A list of `Interval` values that share a side is now an interval column with pan
 ### Added: a column named with empty text exports to Arrow
 
 A frame with a column named with empty text, which `get_dummies` makes from an empty text value, used to crash inside pyarrow with a SystemError. The column now goes out under a spare name and takes its own name back in the batch, so `pa.table` and `pa.record_batch` read the frame as pandas' would.
+
 ### Fixed: the bench driver builds again
 
 From #1232 on, building the firepanda-bench driver never finished: the compiler stopped using CPU a couple of minutes in and waited forever. The check that skips text group keys a fixed width key already decides called itself on a coded column's codes, and that is what the compiler could not get past. It now calls a second function instead, and a coded column is still checked on its codes.
