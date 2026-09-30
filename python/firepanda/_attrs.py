@@ -261,7 +261,6 @@ _COLUMNS_DROPS = frozenset(
         "pivot",
         "pivot_table",
         "value_counts",
-        "memory_usage",
         "duplicated",
         "set_axis",
         "T",
@@ -291,6 +290,8 @@ def _carry_columns(result: Any, source: Any, name: str) -> None:
             _name_labels(result, source, held[0])
     elif kind in _SLOTS and len(held) == 1 and held[0] is not None:
         _name_labels(result, source, held[0])
+    elif kind in _SLOTS and len(held) > 1 and any(one is not None for one in held):
+        _name_levels(result, source)
 
 
 def _name_labels(column: Any, frame: Any, name: Any) -> None:
@@ -300,6 +301,20 @@ def _name_labels(column: Any, frame: Any, name: Any) -> None:
         return
     if labels.tolist() == frame.columns.tolist():
         column._inner = column.rename_axis(name)._inner
+
+
+def _name_levels(column: Any, frame: Any) -> None:
+    """Labels a column by the frame's columns of several levels, names and all.
+
+    The column's labels have to be the frame's columns in order, and carry no
+    names of their own, before the frame's are put on them.
+    """
+    labels = column.index
+    if any(one is not None for one in labels.names) or len(labels) != frame._inner.width():
+        return
+    columns = frame.columns
+    if labels.tolist() == columns.tolist():
+        column._inner = column.set_axis(columns)._inner
 
 
 def _turning(fn: Callable[..., Any], source_of: Callable[[Any], Any]) -> Any:

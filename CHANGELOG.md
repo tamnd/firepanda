@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: nunique with NaN and column level names on reductions
+
+`Series.nunique` and `DataFrame.nunique` no longer count a NaN as a value of its own beside a missing entry, so `Series([1.0, nan]).nunique()` answers 1 as pandas does. A reduction, `dtypes` or `idxmax` over a frame whose columns carry level names now keeps those names on its answer, and `memory_usage` over columns of several levels labels them as pandas does.
+
 ### Added: pivot and pivot_table over several columns keys
 
 `pivot` and `pivot_table` take several `columns` keys and answer columns labelled by a MultiIndex, following pandas' recipe of setting or aggregating over the keys and unstacking the columns keys. With it, `fillna`, `dropna(axis=1)`, `astype` with a dict and the reductions of flag frames read a column name that is a tuple.

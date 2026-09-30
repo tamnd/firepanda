@@ -9840,6 +9840,20 @@ def _moved_to(owner: Any, rows: Index | None, columns: list[Any] | None, fill_va
     return moved if rows is None else moved.rename_axis(rows.name)
 
 
+def _distinct_kept(inner: Any) -> int | None:
+    """The distinct values of a float column with gaps, counted without the gaps.
+
+    The distinct-value kernel can read the NaN held under a cleared validity
+    bit as a value of its own, where pandas counts it as missing, so such a
+    column is counted after its gaps are dropped. None for any other column.
+    """
+    from ._frame import Series
+
+    if inner.null_count() == 0 or _word(inner.dtype()) not in _FLOATING:
+        return None
+    return int(Series._wrap(inner).dropna()._reduce("nunique", 0.0, 0, True, False, 0))
+
+
 def _column_labels(frame: DataFrame) -> Index:
     """A frame's column labels as an index, which is what `DataFrame.columns` hands out.
 
@@ -11746,7 +11760,7 @@ class DataFrameMixin(_Carries):
         Returns:
             A column of byte counts, labelled by column name.
         """
-        from ._frame import Series
+        from ._frame import Index, Series
 
         labels: list[Any] = list(self._inner.names())
         counts: list[Any] = [
@@ -11755,6 +11769,10 @@ class DataFrameMixin(_Carries):
         if index:
             labels.insert(0, "Index")
             counts.insert(0, int(self.index.memory_usage(deep=bool(deep))))
+        shown = _shown_names(self)
+        if index and any(isinstance(name, tuple) for name in shown):
+            # pandas holds "Index" beside names of several levels as objects.
+            return Series(counts, index=Index(["Index", *shown], dtype=object))
         made = _labelled(labels, counts)
         return Series._wrap(made._inner.relabel(None).renamed_axis(None))
 
@@ -15800,20 +15818,23 @@ class DataFrameMixin(_Carries):
         """Counts the distinct values in every column.
 
         `dropna=False` adds one to each column that has a missing value, which
-        is the same rule the series follows, and a frame with none missing
-        answers straight from the kernel.
+        is the same rule the series follows, and a float column with gaps is
+        counted without them. A frame with none missing answers straight from
+        the kernel.
         """
         if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
             return _row_distinct(self, _flag("dropna", dropna))
         counts = self._reduce("nunique", 0.0, axis, True, False, 0)
-        if _flag("dropna", dropna):
-            return counts
-        gaps = self._inner.null_counts()
-        if not any(gaps):
-            return counts
         names = self._inner.names()
+        columns = [self._inner.column(name) for name in names]
+        fixed = [_distinct_kept(column) for column in columns]
+        kept = _flag("dropna", dropna)
+        gaps = [0 if kept else column.null_count() for column in columns]
+        if not any(gaps) and all(one is None for one in fixed):
+            return counts
         bumped = [
-            int(count) + (1 if gap else 0) for count, gap in zip(counts.tolist(), gaps, strict=True)
+            (int(count) if one is None else one) + (1 if gap else 0)
+            for count, one, gap in zip(counts.tolist(), fixed, gaps, strict=True)
         ]
         return _labelled(names, bumped).rename(None).rename_axis(None)
 
@@ -20282,7 +20303,8 @@ class SeriesMixin(_Carries):
         missing values there are and whichever spelling they have, since a
         None and a NaN in the same column count as one value between them.
         """
-        count = self._reduce("nunique", 0.0, axis, True, False, 0)
+        kept = _distinct_kept(self._inner)
+        count = self._reduce("nunique", 0.0, axis, True, False, 0) if kept is None else kept
         if not _flag("dropna", dropna) and self.hasnans:
             return count + 1
         return count
