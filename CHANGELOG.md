@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: FrozenList for names, levels and codes
+
+`names` on an index, and `levels` and `codes` on a MultiIndex, answer pandas' `FrozenList`: a list that refuses to be written into with pandas' `TypeError`, prints under its own name with an index or an array inside it printed as its values, and hashes, adds, slices and compares as pandas' does.
+
 ### Fixed: Whole number levels with a gap stay whole
 
 A level of a MultiIndex that holds whole numbers and a gap keeps them as int64, as pandas does, rather than turning them into floats. A frame or a column labelled by it prints the numbers whole and NaN for the gap, and the MultiIndex itself still prints them as floats, as pandas reads them.

@@ -29844,19 +29844,16 @@ class IndexMixin:
         return None
 
     @property
-    def names(self) -> list[Any]:
-        """The level names, which for a flat index is one of them.
-
-        pandas answers a `FrozenList` here and this answers a list, because the
-        only thing the frozen one adds is a refusal to be written into and a
-        list that is built fresh on every read has nothing to protect. A caller
-        who mutates what comes back is mutating something nobody else holds.
+    def names(self) -> Any:
+        """The level names, which for a flat index is one of them, as a `FrozenList`.
 
         It is a list rather than the name itself because this is the shape that
         generalises to a multi level index, which is the whole reason pandas has
         both this and `name`.
         """
-        return [self.name]
+        from ._frozen import FrozenList
+
+        return FrozenList([self.name])
 
     def set_names(self, names: Any, *, level: Any = None, inplace: bool = False) -> Index | None:
         """The index under a different level name, given the way `names` reads it.
