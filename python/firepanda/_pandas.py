@@ -1540,6 +1540,9 @@ def _core_labels(labels: Any, source: Any = None) -> Any:
         spelling = _objects.spelling_of(source._inner) or ""
         return _objects.cells(list(labels), spelling)
     if isinstance(labels, IndexMixin):
+        if str(labels.dtype) == "category":
+            # The core would look the codes up, so the categories' values go instead.
+            return labels.tolist()
         return labels._inner.to_list() if _objects.period_name_of(labels._inner) else labels
     if isinstance(labels, list | tuple) and (kind := _period.period_kind(labels)):
         return _objects.period_cells(_period.period_ordinals(labels, kind), kind)
@@ -1603,6 +1606,20 @@ def _labels_of(index: Any) -> tuple[list[Any], Any]:
     if _is_object_index(index):
         return list(index._inner.to_list()), index.name
     return list(index), getattr(index, "name", None)
+
+
+def _categories_kept(made: Any, index: Any) -> Any:
+    """A reindexed frame or column labelled by a categorical target itself, as pandas' is."""
+    if isinstance(index, IndexMixin) and str(index.dtype) == "category":
+        return made.set_axis(index)
+    return made
+
+
+def _typed_labels(index: Any, labels: list[Any]) -> Any:
+    """The labels as they go in, a categorical index's as its categorical so its type stays."""
+    if index is not None and str(getattr(index, "dtype", "")) == "category":
+        return index.values
+    return labels
 
 
 def _plain_range(index: Any) -> bool:
@@ -2579,6 +2596,10 @@ def _reindex_here(owner: Any, target: Any, method: str | None) -> bool:
         # Labels the core cannot hold in a column, such as tuples, are found here.
         return True
     kinds = [_word(owner.index.dtype)]
+    numbers = kinds[0].startswith(("int", "uint", "float")) and _list_like(target)
+    if numbers and any(isinstance(one, str) for one in _sequence(target)):
+        # The core cannot look text up among numbers, and none of it is found there.
+        return True
     if isinstance(target, IndexMixin):
         kinds.append(_word(target.dtype))
     elif _list_like(target):
@@ -10499,6 +10520,9 @@ def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
         if _is_object_index(labels):
             # Objects go on as their cells, so they are not read again as one type.
             values = list(labels._inner.to_list())
+        elif str(getattr(labels, "dtype", "")) == "category":
+            # The categories and their order ride along as a categorical column.
+            values = labels.values
         return _with_row_labels(owner, values).rename_axis(name)
     if len(set(values)) != len(values):
         raise NotImplementedError(
@@ -11605,7 +11629,7 @@ class DataFrameMixin(_Carries):
         if widen:
             out = DataFrame._wrap(out._inner._widened_for_missing())
         if labels is not None and not ranged:
-            out = DataFrame._wrap(_put_labels(out._inner, labels, level))
+            out = DataFrame._wrap(_put_labels(out._inner, _typed_labels(index, labels), level))
         for name in series:
             if out[name].dtype != found[name].dtype:
                 out = out._assigned(name, found[name])
@@ -16967,7 +16991,7 @@ class DataFrameMixin(_Carries):
                 inner = inner.reindex(_core_labels(index, self.index), value)
                 if isinstance(index, IndexMixin):
                     inner = inner.renamed_axis(None if index.name is None else str(index.name))
-            return DataFrame._wrap(inner)
+            return _categories_kept(DataFrame._wrap(inner), index)
         except Exception as error:
             raise translate(error) from None
 
@@ -17482,7 +17506,8 @@ class SeriesMixin(_Carries):
                     if len(labels) != rows:
                         raise _mismatched(rows, len(labels))
                     frame = _series_to_frame_inner(self._inner, "values")
-                    held = _put_labels(frame, labels, level).column("values")
+                    placed = _typed_labels(index, labels)
+                    held = _put_labels(frame, placed, level).column("values")
                     self._inner = held.relabel(_names.held(name))
         except Exception as error:
             raise translate(error) from None
@@ -20712,7 +20737,7 @@ class SeriesMixin(_Carries):
             inner = self._inner.reindex(_core_labels(index, self.index), value, True)
             if isinstance(index, IndexMixin):
                 inner = inner.renamed_axis(None if index.name is None else str(index.name))
-            return Series._wrap(inner)
+            return _categories_kept(Series._wrap(inner), index)
         except Exception as error:
             raise translate(error) from None
 

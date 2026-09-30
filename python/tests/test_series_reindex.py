@@ -147,11 +147,7 @@ def test_a_limit_without_a_method_is_refused_in_pandas_words(firepanda):
         made(firepanda).reindex([10], tolerance=1)
 
 
-def test_a_label_of_the_wrong_type_is_refused(firepanda):
-    # pandas answers a series of nothing but missing rows here, on the grounds
-    # that no integer label equals a string one. The lookup puts both sets of
-    # labels in one column to compare them and there is no column that holds
-    # both, so it refuses rather than inventing a rule about which types are
-    # comparable with which. Document 40 section 7 has the price of that.
-    with pytest.raises(TypeError):
-        made(firepanda).reindex(["10"])
+def test_a_label_of_the_wrong_type_finds_nothing(firepanda):
+    # No integer label equals a text one, so pandas answers a series of nothing
+    # but missing rows, and the lookup is made here rather than in the core.
+    assert repr(made(firepanda).reindex(["10"])) == repr(made(pd).reindex(["10"]))

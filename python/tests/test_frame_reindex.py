@@ -230,10 +230,7 @@ def test_copy_and_level_are_taken_and_ignored(firepanda):
     )
 
 
-def test_a_label_of_the_wrong_type_is_refused(firepanda):
-    # pandas answers a frame of nothing but missing rows for this, on the
-    # grounds that no integer label equals a string one. The lookup here puts
-    # the two sets of labels in one column to compare them, and there is no
-    # column that holds both, so it refuses rather than inventing a rule.
-    with pytest.raises(TypeError):
-        made(firepanda).reindex(["10"])
+def test_a_label_of_the_wrong_type_finds_nothing(firepanda):
+    # No integer label equals a text one, so pandas answers a frame of nothing
+    # but missing rows, and the lookup is made here rather than in the core.
+    assert repr(made(firepanda).reindex(["10"])) == repr(made(pd).reindex(["10"]))

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Keep a CategoricalIndex handed over as the labels
+
+A `CategoricalIndex` given as `index=` to `Series` or `DataFrame`, set with `set_axis` or the `index` setter, or reindexed onto, now stays a `CategoricalIndex` with its categories, order and name, as in pandas, where before it came back as an `Index` of text. Reindexing numeric labels by text now leaves the rows missing, as pandas does, rather than refusing the lookup.
+
 ### Fixed: Level names, reindex by level, asfreq and sparsify as pandas has them
 
 `to_string(sparsify=)` and the `display.multi_sparse` option print every level label whole when off. `stack` carries the names of the column levels it moves and takes a level by name. `rename_axis(index=)` with a mapping or a function renames the level names, and a mapping as the mapper is refused in pandas' words. `reindex(level=)` reads flat labels against one level of a MultiIndex in both directions and refuses a fill method. A reindex onto a range keeps its freq, so `asfreq` with a method does too, `asfreq` over periods moves each label by `how`, and `info(memory_usage=False)` ends on its last line as pandas' report does.
