@@ -92,6 +92,19 @@ def test_the_codes_are_whole_numbers(firepanda: ModuleType) -> None:
         assert codes.dtype == "int64"
 
 
+@pytest.mark.parametrize("where", ["column", "index", "array"])
+def test_the_codes_print_as_numpy_prints_them(firepanda: ModuleType, where: str) -> None:
+    """pandas answers the codes with a numpy array, whatever was factorized."""
+    import pandas as pd
+
+    def build(lib: ModuleType) -> Any:
+        column = lib.Series(TEXT)
+        held = {"column": column, "index": lib.Index(TEXT), "array": column.array}[where]
+        return lib.factorize(held)[0]
+
+    assert repr(build(firepanda)) == repr(build(pd))
+
+
 def test_a_categorical_unique_keeps_every_category(firepanda: ModuleType) -> None:
     """Crossing to Arrow as a dictionary that still holds the unused category."""
     import pyarrow as pa

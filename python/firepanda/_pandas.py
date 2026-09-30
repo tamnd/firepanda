@@ -9037,8 +9037,8 @@ def _zoned_axis(
     The labels have to be instants, and the work is the index's own method, so
     the rules for ambiguous and missing wall times are the index's rules. An
     empty axis that is not instants becomes an empty index on the clock, which
-    is what pandas does rather than refuse it. `level` can only name the one
-    level there is, because firepanda has no MultiIndex here.
+    is what pandas does rather than refuse it. `level` names the one level
+    there is, or one level of a MultiIndex, whose instants alone move.
     """
     from ._datetime import DatetimeIndex
 
@@ -9061,6 +9061,8 @@ def _zoned_axis(
             raise TypeError("columns is not a valid DatetimeIndex or PeriodIndex")
         return owner.copy()
     labels = owner.index
+    if level is not None and _is_multi(labels):
+        return _zoned_level(owner, labels, method, tz, level, extra)
     if level is not None and level not in (0, labels.name):
         raise ValueError(f"The level {level} is not valid")
     if not _word(labels.dtype).startswith("datetime64"):
@@ -9075,6 +9077,29 @@ def _zoned_axis(
     else:
         moved = getattr(DatetimeIndex(labels, name=labels.name), method)(tz, *extra)
     return _with_row_labels(owner, moved)
+
+
+def _zoned_level(
+    owner: Any, labels: Any, method: str, tz: Any, level: Any, extra: tuple[Any, ...]
+) -> Any:
+    """`tz_localize` or `tz_convert` on one level of a MultiIndex of row labels.
+
+    Raises:
+        TypeError: When that level is not instants, in pandas' words.
+    """
+    from ._datetime import DatetimeIndex
+    from ._multi import MultiIndex
+
+    try:
+        number = labels._level_number(level)
+    except (KeyError, IndexError):
+        raise ValueError(f"The level {level} is not valid") from None
+    arrays = [labels.get_level_values(at) for at in range(labels.nlevels)]
+    if not _word(arrays[number].dtype).startswith("datetime64"):
+        raise TypeError("index is not a valid DatetimeIndex or PeriodIndex")
+    arrays[number] = getattr(DatetimeIndex(arrays[number]), method)(tz, *extra)
+    moved = MultiIndex.from_arrays(arrays, names=list(labels.names))
+    return owner.set_axis(moved, axis=0)
 
 
 def _align_axis(axis: Any, owner: str, allowed: tuple[int, ...]) -> int | None:
@@ -10069,6 +10094,20 @@ def _padded(pieces: dict[Any, list[Any]]) -> dict[Any, list[Any]]:
 
 _SPANS = re.compile(r"(datetime|timedelta)64\[(s|ms|us|ns)\]")
 """The types numpy holds as counts of a unit, instants with no zone and spans."""
+
+
+def _factor_codes(codes: Any) -> Any:
+    """Codes from `_factorized` as the numpy array pandas answers with.
+
+    Without numpy they stay an array of firepanda's own.
+    """
+    try:
+        import numpy
+    except ImportError:
+        from ._array import FirepandaArray
+
+        return FirepandaArray(codes)
+    return numpy.array(codes.tolist(), dtype="int64")
 
 
 def _numpy() -> Any:
@@ -18077,7 +18116,7 @@ class SeriesMixin(_Carries):
 
     def factorize(
         self, sort: bool = False, use_na_sentinel: bool = True
-    ) -> tuple[FirepandaArray, Index]:
+    ) -> tuple[Any, Index]:
         """The code of each value and the values the codes point at.
 
         Args:
@@ -18086,16 +18125,15 @@ class SeriesMixin(_Carries):
                 the uniques. When False it gets a code of its own and is kept.
 
         Returns:
-            The codes as an array of int64 and the uniques as an index.
+            The codes as a numpy array of int64 and the uniques as an index.
 
         Raises:
             NotImplementedError: For a categorical column.
         """
-        from ._array import FirepandaArray
         from ._frame import Index
 
         codes, uniques = _factorized(self, sort, use_na_sentinel)
-        return FirepandaArray(codes), Index(uniques)
+        return _factor_codes(codes), Index(uniques)
 
     @property
     def is_unique(self) -> bool:
@@ -28864,16 +28902,15 @@ class IndexMixin:
 
     def factorize(
         self, sort: bool = False, use_na_sentinel: bool = True
-    ) -> tuple[FirepandaArray, Index]:
+    ) -> tuple[Any, Index]:
         """The code of each label and the labels the codes point at, unnamed.
 
         See `Series.factorize`.
         """
-        from ._array import FirepandaArray
         from ._frame import Index
 
         codes, uniques = _factorized(self.to_series(), sort, use_na_sentinel)
-        return FirepandaArray(codes), Index(uniques)
+        return _factor_codes(codes), Index(uniques)
 
     def to_series(self, index: Any = None, name: Any = None) -> Series:
         """The labels as a column, which carries the labels twice.
@@ -30028,7 +30065,7 @@ def factorize(
     values = _array_like(values, "factorize")
     if isinstance(values, FirepandaArray):
         codes, uniques = _factorized(values.to_series(), sort, use_na_sentinel)
-        return FirepandaArray(codes), FirepandaArray(uniques)
+        return _factor_codes(codes), FirepandaArray(uniques)
     return values.factorize(sort=sort, use_na_sentinel=use_na_sentinel)
 
 
