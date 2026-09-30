@@ -13521,6 +13521,9 @@ class DataFrameMixin(_Carries):
             # of the rest, so a frame with none of them answers an empty column.
             names = self._inner.names()
             frame = self[[name for name in names if _word(self[name].dtype) in _TRUTHS]]
+            if not frame._inner.names():
+                empty = frame._per_column(kind, 0.0).astype("bool")
+                return empty._truth(kind, 0, False, True) if folding else empty
         if not skipna:
             names = frame._inner.names()
             answers = [frame[name]._truth(kind, 0, False, False) for name in names]
@@ -17975,7 +17978,8 @@ class SeriesMixin(_Carries):
         if True not in gaps:
             return scanned
         first = gaps.index(True)
-        return scanned.mask([at >= first for at in range(len(gaps))])
+        poisoned = scanned.mask([at >= first for at in range(len(gaps))])
+        return _nan_filled(poisoned) if _word(poisoned.dtype) in _FLOATING else poisoned
 
     def _astype(self, dtype: Any, copy: Any, errors: Any) -> Series:
         """Converts the column and hands back a new one.

@@ -189,12 +189,13 @@ def test_the_arguments_that_are_not_implemented_say_so(firepanda: ModuleType) ->
 
 
 @needs_pandas
-def test_sorting_the_columns_is_a_different_axis_and_is_not_written(
-    firepanda: ModuleType,
-) -> None:
-    """`axis=1` sorts the column names, which is a different operation wearing the name."""
-    with pytest.raises(ValueError, match="No axis named"):
-        made(firepanda).sort_index(axis=1)
+def test_sorting_the_columns_orders_the_column_names(firepanda: ModuleType) -> None:
+    """`axis=1` sorts the column names rather than the row labels."""
+    frame = made(firepanda)
+    assert list(frame.sort_index(axis=1).columns) == sorted(frame.columns)
+    assert list(frame.sort_index(axis=1, ascending=False).columns) == sorted(
+        frame.columns, reverse=True
+    )
 
 
 @needs_pandas
