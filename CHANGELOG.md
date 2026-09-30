@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Resample apply runs a function in pandas' order
+
+A function given to `apply` or `agg` over resample bins is first taken as an aggregation, one value a bin with a series of one read as its value, and over a frame it is tried on each column. An answer that is not one value makes it an apply over the whole bin, whose pieces are put end to end, under the bin labels whenever `group_keys` is set, as pandas does.
+
 ### Added: period labels cross to Arrow as pandas' do
 
 A `PeriodIndex` hands Arrow the array pandas exports for periods, the `pandas.period` extension type over the periods' ordinals with the frequency in its metadata, and a missing period as a null. It is pandas' own type when pandas is loaded, so a series or frame labelled by periods compares with pandas' through Arrow rather than as text.
