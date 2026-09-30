@@ -32712,34 +32712,35 @@ def _nested_frame(data: Any) -> Any:
     return DataFrame(columns)
 
 
-def _crosstab_keys(keys: Any, what: str) -> Any:
-    """The one set of keys `crosstab` was given for an axis.
+def _crosstab_keys(keys: Any) -> list[Any]:
+    """The sets of keys `crosstab` was given for an axis, one or several."""
+    nested = _list_like(keys) and len(keys) > 0 and all(_list_like(key) for key in keys)
+    return list(keys) if nested else [keys]
+
+
+def _crosstab_names(keys: list[Any], names: Any, prefix: str) -> list[Any]:
+    """The names of an axis's levels, given, the columns' own, or pandas' `row_0` and on.
 
     Raises:
-        NotImplementedError: For several, which pandas answers with a MultiIndex.
+        AssertionError: For a different count of names than of keys, in pandas' words.
     """
-    nested = _list_like(keys) and len(keys) > 0 and all(_list_like(key) for key in keys)
-    if not nested:
-        return keys
-    if len(keys) != 1:
-        raise NotImplementedError(
-            f"crosstab: several {what} keys label the answer with a MultiIndex, which"
-            " firepanda does not have"
-        )
-    return keys[0]
-
-
-def _crosstab_name(keys: Any, names: Any, prefix: str) -> Any:
-    """The name of an axis, given, the column's own, or pandas' `row_0` and `col_0`."""
     from ._frame import Series
 
     if names is not None:
-        if len(names) != 1:
+        if len(names) != len(keys):
             raise AssertionError("arrays and names must have the same length")
-        return next(iter(names))
-    if isinstance(keys, Series) and keys.name is not None:
-        return keys.name
-    return f"{prefix}_0"
+        return list(names)
+    return [
+        key.name if isinstance(key, Series) and key.name is not None else f"{prefix}_{at}"
+        for at, key in enumerate(keys)
+    ]
+
+
+def _crosstab_joined(parts: tuple[Any, ...]) -> Any:
+    """The key of one row on an axis: the one key, or a tuple of several, a gap as None."""
+    if len(parts) == 1:
+        return None if _missing(parts[0]) else parts[0]
+    return None if any(_missing(part) for part in parts) else parts
 
 
 def _crosstab_lined_up(pieces: list[Any], labelled: list[Any]) -> list[list[Any]]:
@@ -32879,46 +32880,66 @@ def crosstab(
     `columns`, a pair with a missing key is left out unless `dropna` is false,
     and `margins` adds a row and a column of totals over the pairs kept.
 
+    Several keys on an axis label it with a MultiIndex of the pairs seen,
+    sorted, as pandas does.
+
     Raises:
         ValueError: For values with no function or a function with no values,
             and an unknown `normalize`, with pandas' words.
-        NotImplementedError: For several keys on an axis, column keys that are
-            not text, and totals on a row of labels that are not text.
+        NotImplementedError: For column keys that are not text, totals on a row
+            of labels that are not text, and several keys with `dropna=False`
+            or totals.
     """
     from ._frame import DataFrame, Index, Series
+    from ._multi import MultiIndex
 
     if values is None and aggfunc is not None:
         raise ValueError("aggfunc cannot be used without values.")
     if values is not None and aggfunc is None:
         raise ValueError("values cannot be used without an aggfunc.")
-    down = _crosstab_keys(index, "index")
-    across = _crosstab_keys(columns, "columns")
-    row_name = _crosstab_name(down, rownames, "row")
-    column_name = _crosstab_name(across, colnames, "col")
-    labelled = [piece for piece in (down, across) if isinstance(piece, Series)]
-    pieces = [down, across] if values is None else [down, across, values]
+    downs = _crosstab_keys(index)
+    acrosses = _crosstab_keys(columns)
+    row_names = _crosstab_names(downs, rownames, "row")
+    column_names = _crosstab_names(acrosses, colnames, "col")
+    several = len(downs) > 1 or len(acrosses) > 1
+    if several and (not dropna or margins):
+        raise NotImplementedError(
+            "crosstab: several keys with dropna=False or margins label every pair of"
+            " levels, which firepanda does not build here"
+        )
+    labelled = [piece for piece in (*downs, *acrosses) if isinstance(piece, Series)]
+    pieces = [*downs, *acrosses] if values is None else [*downs, *acrosses, values]
     lined = _crosstab_lined_up(pieces, labelled)
+    split = len(downs) + len(acrosses)
+    row_keys = [_crosstab_joined(parts) for parts in zip(*lined[: len(downs)], strict=True)]
+    head_keys = [_crosstab_joined(parts) for parts in zip(*lined[len(downs) : split], strict=True)]
     printed = None
     if values is not None:
-        printed = _word(values.dtype) if hasattr(values, "dtype") else str(Series(lined[2]).dtype)
-    measured = lined[2] if values is not None else [0] * len(lined[0])
+        printed = (
+            _word(values.dtype) if hasattr(values, "dtype") else str(Series(lined[split]).dtype)
+        )
+    measured = lined[split] if values is not None else [0] * len(row_keys)
     cells: dict[tuple[Any, Any], list[Any]] = {}
-    for key, head, value in zip(lined[0], lined[1], measured, strict=True):
-        if dropna and (_missing(key) or _missing(head)):
+    for key, head, value in zip(row_keys, head_keys, measured, strict=True):
+        if dropna and (key is None or head is None):
             continue
-        pair = (None if _missing(key) else key, None if _missing(head) else head)
-        cells.setdefault(pair, []).append(value)
+        cells.setdefault((key, head), []).append(value)
     keys = {key for key, _ in cells}
     rows: list[Any] = sorted(key for key in keys if key is not None)
     if None in keys:
         rows.append(None)
     heads = {head for _, head in cells}
-    if any(_missing(head) for head in heads):
+    if None in heads:
         raise NotImplementedError(
             "crosstab: a missing column key would name a column NaN, and firepanda names"
             " columns with text"
         )
-    names = _pivot_names(sorted(heads), "crosstab")
+    if len(acrosses) > 1:
+        for level in zip(*heads, strict=True):
+            _pivot_names(sorted(set(level)), "crosstab")
+        names = sorted(heads)
+    else:
+        names = _pivot_names(sorted(heads), "crosstab")
     table = {
         name: [
             _crosstab_cell(cells[row, name], printed, aggfunc)
@@ -32966,9 +32987,12 @@ def crosstab(
             rows = rows if keep else rows[:-1]
         else:
             table = _crosstab_normalized(table, normalize)
-    labels = Index(rows, name=row_name)
+    if len(downs) > 1:
+        labels = MultiIndex.from_tuples(rows, names=row_names)
+    else:
+        labels = Index(rows, name=row_names[0])
     made = DataFrame({name: _readable(got) for name, got in table.items()}, index=labels)
-    _hold_columns(made, [column_name])
+    _hold_columns(made, column_names)
     return made
 
 

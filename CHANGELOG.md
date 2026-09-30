@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: crosstab with several keys on an axis
+
+`crosstab` takes a list of keys for the rows, the columns or both and labels that axis with a MultiIndex of the pairs it saw, sorted and named by the columns or by `rownames` and `colnames`, with `normalize` and `values` working as before. Several keys with `dropna=False` or `margins` are still refused.
+
 ### Added: numeric_only windows, blanked filters, counted nth, resample group_keys and copy=
 
 A rolling, expanding or ewm window over a frame now reads only its number columns with `numeric_only=True`, `GroupBy.filter(dropna=False)` blanks the rows it drops, `GroupBy.nth(n, dropna=)` counts only the rows without a gap, `resample(group_keys=True)` puts the bins in front of what `apply` answers, `resample(convention=)` is checked and set aside for timestamps, and `DataFrame` and `Series` accept `copy=`.
