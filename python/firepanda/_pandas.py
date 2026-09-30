@@ -26910,12 +26910,14 @@ def _temporal_insert(index: Any, loc: int, item: Any) -> Any:
 class IndexMixin:
     """The hand written half of `Index`."""
 
-    __slots__ = ("_freq", "_inner")
-    """The labels, for the reason `DataFrameMixin` gives, and the frequency an
-    index of instants or spans holds. The frequency lives here rather than on
-    those two classes so that every index has one shape, which is what lets an
-    index become one of them after it is built. It is unset on every other
-    index, and reading it goes through `getattr` with None beside it."""
+    __slots__ = ("_freq", "_inner", "_owner")
+    """The labels, for the reason `DataFrameMixin` gives, the frame or column
+    and axis the index was read off, which `_assign` names when the index is
+    named, and the frequency an index of instants or spans holds. The frequency
+    lives here rather than on those two classes so that every index has one
+    shape, which is what lets an index become one of them after it is built. It
+    is unset on every other index, and reading it goes through `getattr` with
+    None beside it."""
 
     _inner: _firepanda.Index
 

@@ -121,13 +121,22 @@ class _NoStr:
 class MultiIndex:
     """Labels made of several levels, which is `pandas.MultiIndex`."""
 
-    __slots__ = ("_codes", "_levels", "_names")
+    __slots__ = ("_codes", "_levels", "_names", "_owner")
 
     _levels: list[list[Any]]
     _codes: list[list[int]]
     _names: list[Any]
 
     str = _NoStr()
+
+    def __getstate__(self) -> tuple[None, dict[str, Any]]:
+        """The levels, codes and names, which a copy or a pickle carries.
+
+        The frame the index was read off is left behind, so renaming a copy
+        does not rename the frame.
+        """
+        kept = ("_codes", "_levels", "_names")
+        return None, {slot: getattr(self, slot) for slot in kept if hasattr(self, slot)}
 
     def __init__(
         self,
