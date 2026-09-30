@@ -3170,6 +3170,52 @@ def _kurtosis_in_numpy_order(column: Any) -> float | None:
     return float(values.dtype.type(answer))
 
 
+def _skewness_in_numpy_order(column: Any) -> float | None:
+    """pandas' `nanskew` of a column of numbers step by step in numpy, or None without numpy.
+
+    A column of whole numbers is cast to float64 first, as pandas casts it, so
+    near two to the sixty two each value moves by up to 512 before the sums
+    start and the answer is pandas' rather than the exact one. The gaps are
+    read as zeros in place, for the lane order `_kurtosis_in_numpy_order` gives.
+
+    Args:
+        column: A series of numbers, whose gaps are skipped.
+
+    Returns:
+        The skewness, NaN under three values, or None when numpy is not there.
+    """
+    try:
+        import numpy
+    except ImportError:
+        return None
+    if _word(column.dtype) not in _FLOATING:
+        column = column.astype("float64")
+    values = numpy.array(column.to_numpy(), copy=True)
+    mask = numpy.isnan(values)
+    count = values.size - int(mask.sum())
+    numpy.putmask(values, mask, 0)
+    with numpy.errstate(invalid="ignore", divide="ignore"):
+        mean = values.sum(dtype=numpy.float64) / count
+    adjusted = values - mean
+    numpy.putmask(adjusted, mask, 0)
+    squared = adjusted**2
+    m2 = squared.sum(dtype=numpy.float64)
+    m3 = (squared * adjusted).sum(dtype=numpy.float64)
+    largest = numpy.abs(values).max(initial=0.0)
+    eps = numpy.finfo(m2.dtype).eps
+    if abs(m2) < (eps * largest) ** 2 * count:
+        m2 = 0.0
+    if abs(m3) < (eps * largest) ** 3 * count:
+        m3 = 0.0
+    if count < 3:
+        return math.nan
+    if m2 == 0:
+        return 0.0
+    with numpy.errstate(invalid="ignore", divide="ignore"):
+        answer = (count * (count - 1) ** 0.5 / (count - 2)) * (m3 / m2**1.5)
+    return float(values.dtype.type(answer))
+
+
 def _percentiles_asked(percentiles: Any) -> list[float]:
     """The percentiles `describe` reports, checked and sorted the way pandas does.
 
@@ -17303,6 +17349,10 @@ class SeriesMixin(_Carries):
             " already does, and it says so with the dtype in the message",
         )
         category = self.dtype == "category"
+        if kind == "skew" and _word(self.dtype) in _SIGNED | _UNSIGNED | _FLOATING:
+            answer = None if not skipna and self.hasnans else _skewness_in_numpy_order(self)
+            if answer is not None:
+                return answer
         try:
             if category:
                 _category_reduction(kind, self._inner.ordered())
@@ -17346,20 +17396,14 @@ class SeriesMixin(_Carries):
         _kurt_refusal(self.dtype)
         if not skipna and self.hasnans:
             return math.nan
-        if _word(self.dtype) in _FLOATING:
-            answer = _kurtosis_in_numpy_order(self)
+        if _word(self.dtype) in _FLOATING | _SIGNED | _UNSIGNED:
+            # Whole numbers are cast to float64 first, as pandas casts them, so
+            # near two to the sixty two the answer is pandas' and not the exact one.
+            floats = self if _word(self.dtype) in _FLOATING else self.astype("float64")
+            answer = _kurtosis_in_numpy_order(floats)
             if answer is not None:
                 return answer
-        values = self.dropna()
-        if _word(values.dtype) in _SIGNED and len(values):
-            # A kurtosis does not move when a constant is added, so whole numbers
-            # are measured from their least as whole numbers, which is exact, and
-            # only the difference is cast. Near two to the sixty two the cast
-            # alone would move each value by up to 512, as `skew` avoids too.
-            least, most = int(values.min()), int(values.max())
-            if most - least < 2**63:
-                values = values - least
-        return _kurtosis(values.astype("float64"))
+        return _kurtosis(self.dropna().astype("float64"))
 
     kurtosis = kurt
 

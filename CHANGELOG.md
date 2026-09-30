@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: skew and kurt of whole numbers are pandas' answers
+
+`Series.skew` and `Series.kurt` cast a column of whole numbers to float64 before taking its moments and add in numpy's order, step by step as pandas' `nanskew` and `nankurt` do, so near two to the sixty two they answer pandas' float rather than the exact value a few parts in ten million away. A float column's skew now goes the same way, which was already how its kurtosis went.
+
 ### Changed: a text column's dtype is pandas' str
 
 `Series.dtype`, `Series.dtypes`, `Index.dtype` and `DataFrame.dtypes` answer pandas' `StringDtype` with NaN for a gap for a column of text, which prints as `str` the way pandas 3 prints it and still equals `string`, so code comparing against either word keeps working. Everything below the surface reads a dtype back through one helper that gives the core's word, so no internal decision changed. A column made with `dtype="string"` is also spelt `str`, because firepanda does not yet keep the `NA` variant apart.
