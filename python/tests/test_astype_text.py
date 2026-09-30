@@ -1,9 +1,9 @@
-"""Instants and spans cast to text, checked against pandas.
+"""Instants, spans and flags cast to text, checked against pandas.
 
 pandas writes them the way it prints them: the date alone when every instant
 is at midnight, as many fraction digits as the finest instant needs, a zone's
-offset at the end, and each span as `1 days 02:03:04`. Missing values stay
-missing.
+offset at the end, each span as `1 days 02:03:04` and each flag as Python
+spells it. Missing values stay missing.
 """
 
 from __future__ import annotations
@@ -64,6 +64,10 @@ BUILDS: list[Callable[[Any], Any]] = [
         {"t": str}
     ),
     lambda m: m.Index(m.to_datetime(["2020-01-01 10:00:00", "2020-01-02 00:00:00"])).astype(str),
+    lambda m: m.Series([True, False], name="f").astype(str),
+    lambda m: m.Series([True, None, False], dtype="boolean").astype(str),
+    lambda m: m.DataFrame({"f": [True, False], "x": [1, 2]}).astype(str),
+    lambda m: m.DataFrame({"f": [True, False], "x": [1, 2]}).astype({"f": "str"}),
 ]
 
 
