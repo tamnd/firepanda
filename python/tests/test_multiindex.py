@@ -9,6 +9,7 @@ name, with gaps as None and the text type spelled one way.
 from __future__ import annotations
 
 import importlib.util
+import math
 import re
 from collections.abc import Callable
 from types import ModuleType
@@ -343,3 +344,12 @@ def test_an_index_is_not_hashable(firepanda: ModuleType) -> None:
     """As in pandas, since it compares row by row."""
     with pytest.raises(TypeError):
         hash(keyed(firepanda))
+
+
+def test_a_gap_on_a_level_of_numbers_reads_back_as_nan(firepanda: ModuleType) -> None:
+    """pandas' float level holds NaN, so Arrow sees a NaN there and a null only in text."""
+    import pyarrow as pa
+
+    index = gappy(firepanda)
+    assert [pa.array(index.get_level_values(n)).null_count for n in range(2)] == [1, 0]
+    assert math.isnan(index.get_level_values(1)[2])

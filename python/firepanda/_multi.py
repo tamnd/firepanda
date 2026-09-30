@@ -546,7 +546,12 @@ class MultiIndex:
         """Every row's value on one level, as an index named after the level."""
         number = self._level_number(level)
         values = self._levels[number]
-        column = [None if code < 0 else values[code] for code in self._codes[number]]
+        # A gap on a level of numbers reads back as NaN, as pandas' float level has it.
+        numbers = values and all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) for value in values
+        )
+        gap = float("nan") if numbers else None
+        column = [gap if code < 0 else values[code] for code in self._codes[number]]
         return Index(column, name=self._names[number])
 
     def _chosen(self, numbers: list[int]) -> Any:
