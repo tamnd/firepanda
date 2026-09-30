@@ -1,4 +1,4 @@
-"""`CategoricalDtype`, `Categorical` and `CategoricalIndex`, pandas' three names for categories.
+"""`CategoricalDtype` and `Categorical`, two of pandas' three names for categories.
 
 A category column in firepanda is an Arrow dictionary column: a code for each
 row and a text column of categories. pandas spells the same thing three ways,
@@ -8,7 +8,7 @@ and each is a thin shell over that column here.
 spells every other type, so everything that compares a column's type against
 the word keeps working, and it carries `categories` and `ordered` the way
 pandas' does. `Categorical` is a `FirepandaArray` of categories, and
-`CategoricalIndex` builds an index whose type is category.
+`CategoricalIndex`, the index of categories, is in `_category_index`.
 
 The categories are text, as they are in every category column here, so values
 of any other type are refused where the column is made.
@@ -365,29 +365,3 @@ class Categorical(FirepandaArray):
             return f"[], Categories (0, {kind}): [{levels}]"
         tail = f"\nLength: {len(values)}" if len(values) > 10 else ""
         return f"[{shown}]{tail}\nCategories ({len(held)}, {kind}): [{levels}]"
-
-
-class CategoricalIndex:
-    """Builds an index of categories, as pandas' `CategoricalIndex` does.
-
-    What comes back is an `Index` whose type is category, which prints as
-    pandas' `CategoricalIndex` and has its `categories`, `ordered` and `codes`.
-    """
-
-    def __new__(
-        cls,
-        data: Any = None,
-        categories: Any = None,
-        ordered: Any = None,
-        dtype: Any = None,
-        copy: bool = False,
-        name: Any = None,
-    ) -> Any:
-        from ._frame import Index
-
-        if data is None:
-            data = []
-        column = _categorical_column(data, categories, ordered, dtype, "CategoricalIndex")
-        if name is None:
-            name = getattr(data, "name", None)
-        return Index(column, name=name)

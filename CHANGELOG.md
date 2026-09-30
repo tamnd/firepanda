@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: CategoricalIndex is a class with pandas' lookups and category methods
+
+`CategoricalIndex` is now an `Index` subclass, and any index of category labels is one, so `isinstance` works on the labels of a frame grouped by a category and `Index(Categorical(...))` keeps the categories. It finds a label with `get_loc`, `get_indexer` and `in`, answers `duplicated`, `is_unique`, `unique` and `drop` by the labels rather than their codes, keeps the categories when taking rows, orders by the categories for `is_monotonic_increasing`, hands its `values` back as a `Categorical`, and has `rename_categories`, `add_categories`, `remove_categories`, `remove_unused_categories`, `reorder_categories`, `set_categories`, `as_ordered` and `as_unordered`. `map` renames the categories when the new names are all different, as pandas does, and answers a plain index otherwise.
+
 ### Fixed: repeated row labels and categories handed in whole
 
 `drop` of a row label that repeats now drops every row holding it, as pandas does, where it used to refuse. A transpose whose row labels repeat is refused, since it would need repeated columns, where it used to answer a frame with rows silently missing. `assign` of a `Categorical` or an index of categories, and `Series` of an index of categories, keep the categories rather than their values, and `reset_index` keeps row labels of categories as a category column.
