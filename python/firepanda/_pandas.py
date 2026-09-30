@@ -7352,7 +7352,7 @@ def _one_row(owner: Any, inner: Any, position: int, chosen: list[str]) -> Any:
 
 
 _CORRELATIONS = ("pearson", "spearman", "kendall")
-"""The methods pandas names, of which the first two are written here."""
+"""The methods pandas names, beside a callable handed each pair of columns."""
 
 
 def _correlation_method(method: Any) -> None:
@@ -7360,17 +7360,9 @@ def _correlation_method(method: Any) -> None:
 
     Raises:
         ValueError: For a name pandas does not know, with pandas' message.
-        NotImplementedError: For Kendall and a callable, which pandas hands to
-            scipy and to the caller's function one pair of columns at a time.
     """
-    if method in _CORRELATIONS[:2]:
+    if method in _CORRELATIONS or callable(method):
         return
-    if method == "kendall" or callable(method):
-        raise NotImplementedError(
-            f"method={method!r} is not supported yet, because Kendall's tau counts the pairs"
-            " of rows that agree in order, which is a different computation from the"
-            " sums Pearson and Spearman share"
-        )
     raise InvalidArgumentError(
         "method must be either 'pearson', 'spearman', 'kendall', or a callable,"
         f" '{method}' was supplied"
@@ -7426,16 +7418,70 @@ def _paired(x: Series, y: Series) -> tuple[Series, Series]:
     return x[both], y[both]
 
 
-def _pearson(x: Series, y: Series, method: str, least: Any) -> float:
+def _inversions(values: list[float]) -> int:
+    """How many pairs stand in falling order, counted while merge sorting them."""
+    if len(values) < 2:
+        return 0
+    middle = len(values) // 2
+    left, right = values[:middle], values[middle:]
+    count = _inversions(left) + _inversions(right)
+    left.sort()
+    right.sort()
+    taken = 0
+    for value in right:
+        taken = bisect.bisect_right(left, value, taken)
+        count += len(left) - taken
+    return count
+
+
+def _tied_pairs(values: list[Any]) -> int:
+    """How many pairs of rows hold the same value."""
+    return sum(n * (n - 1) // 2 for n in collections.Counter(values).values())
+
+
+def _kendall(x: list[float], y: list[float]) -> float:
+    """Kendall's tau-b, which is what scipy answers pandas, ties counted on either side.
+
+    NaN where one side holds a single value throughout, as scipy answers.
+    """
+    rows = len(x)
+    pairs = rows * (rows - 1) // 2
+    ordered = sorted(zip(x, y, strict=True))
+    discordant = _inversions([b for _, b in ordered])
+    x_ties, y_ties = _tied_pairs(x), _tied_pairs(y)
+    concordant = pairs - x_ties - y_ties + _tied_pairs(ordered) - discordant
+    spread = math.sqrt(float(pairs - x_ties) * float(pairs - y_ties))
+    if spread == 0:
+        return math.nan
+    return min(1.0, max(-1.0, (concordant - discordant) / spread))
+
+
+def _handed(method: Callable[..., Any], x: Series, y: Series) -> Any:
+    """What a callable answers for two columns, handed as numpy arrays when numpy is there."""
+    try:
+        import numpy
+    except ImportError:
+        return method(x.tolist(), y.tolist())
+    return method(
+        numpy.array(x.tolist(), dtype="float64"), numpy.array(y.tolist(), dtype="float64")
+    )
+
+
+def _pearson(x: Series, y: Series, method: Any, least: Any) -> float:
     """Pearson's r over the rows both columns have, or Spearman's as r of the ranks.
 
     NaN where fewer than `least` rows are shared or either side is constant,
-    which is what pandas answers there too.
+    which is what pandas answers there too. Kendall's tau and a callable are
+    read over the same rows.
     """
     x, y = _paired(x, y)
     rows = len(x)
     if rows == 0 or rows < (1 if least is None else least):
         return math.nan
+    if callable(method):
+        return _handed(method, x, y)
+    if method == "kendall":
+        return _kendall(x.tolist(), y.tolist())
     if method == "spearman":
         x, y = x.rank(), y.rank()
     dx, dy = x - x.mean(), y - y.mean()
@@ -9065,13 +9111,7 @@ def _pair_correlation(x: Series, y: Series, method: Any) -> float:
     x, y = _paired(x, y)
     if len(x) == 0:
         return math.nan
-    try:
-        import numpy
-    except ImportError:
-        return method(x.tolist(), y.tolist())
-    return method(
-        numpy.array(x.tolist(), dtype="float64"), numpy.array(y.tolist(), dtype="float64")
-    )
+    return _handed(method, x, y)
 
 
 def _column_correlation(other: Series, part: Series, method: Any, least: Any) -> float:
@@ -14982,12 +15022,21 @@ class DataFrameMixin(_Carries):
         A pair's rows are the ones where both hold a value, so the answer for
         one pair does not depend on a gap in a third column, which is pandas'
         pairwise reading. Spearman ranks those rows before it correlates them.
+        Kendall's tau and a callable answer 1 for a column against itself, as
+        pandas answers without asking them.
         """
         read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
         names = list(read._inner.names())
         columns = _as_floats([read[name] for name in names])
         _correlation_method(method)
-        return _square(names, lambda a, b: _pearson(columns[a], columns[b], method, min_periods))
+        least = 1 if min_periods is None else min_periods
+
+        def cell(a: int, b: int) -> float:
+            if a != b or method in _CORRELATIONS[:2]:
+                return _pearson(columns[a], columns[b], method, min_periods)
+            return 1.0 if int(columns[a].notna().sum()) >= least else math.nan
+
+        return _square(names, cell)
 
     def _align(
         self, other: Any, join: Any, axis: Any, level: Any, copy: Any, fill_value: Any

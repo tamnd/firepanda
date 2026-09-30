@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Kendall's tau and callables in corr
+
+`corr` on a column and a frame, and `corrwith`, take `method="kendall"`, which answers Kendall's tau-b as scipy does for pandas, and a callable, which is handed the rows each pair of columns shares. A column against itself is 1 for both, as in pandas.
+
 ### Added: Groupers and levels beside other keys
 
 `groupby` takes a `Grouper` with a level, or with a frequency on a column or on the row labels, in a list beside other keys, as pandas does. A frequency keys each row by the label of the bin `resample` would put it in, with its `closed` and `label`. The name of a level of a MultiIndex in a list of keys groups by that level.
