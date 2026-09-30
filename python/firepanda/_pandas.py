@@ -2529,6 +2529,10 @@ def _reducing_axis(axis: Any, owner: str) -> None:
         )
 
 
+_TRUTHS = ("bool", "boolean")
+"""The types `bool_only` keeps, the plain flag and the masked one."""
+
+
 _NO_FOLD_IN_PANDAS = frozenset({"count", "quantile", "nunique"})
 """The three frame reductions pandas has no whole frame form of.
 
@@ -3556,6 +3560,16 @@ def _cast_keywords(copy: Any, errors: Any) -> bool:
             f" Supplied value is '{errors}'"
         )
     return bool(errors == "raise")
+
+
+def _first_gaps(column: Any, most: int) -> list[bool]:
+    """Which rows of a column are among its first `most` gaps, for a fill with a limit."""
+    chosen = []
+    for gap in column.isna().tolist():
+        take = bool(gap) and most > 0
+        most -= take
+        chosen.append(take)
+    return chosen
 
 
 def _limit_wanted(limit: Any) -> int:
@@ -11280,11 +11294,19 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame, Series
 
         inplace = _flag("inplace", inplace)
-        _axis_number(axis, "DataFrame", 0, (0, 1))
-        if _limit_wanted(limit):
-            raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+        across = _axis_number(axis, "DataFrame", 0, (0, 1))
+        most = _limit_wanted(limit)
         held = _shown_names(self)
+        if most and (across == 1 or value is None or _is_frame(value)):
+            raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
         wanted = _fill_values(value, held)
+        if most:
+            # A limit counts down each column on its own, so each is filled as a
+            # column is, with the same limit.
+            answer = self.copy()
+            for name, one in wanted.items():
+                answer[name] = self[name].fillna(one, limit=most)
+            return _kept(self, answer, inplace)
         # The two facts each column is judged on, its type and whether it has a
         # gap, are read off the schema and the validity bits rather than through
         # square brackets, because square brackets copy the column and this is
@@ -13471,25 +13493,22 @@ class DataFrameMixin(_Carries):
         describes, asked here rather than there because the second pass has to
         go through the same door as the first.
         """
+        from ._frame import Series
+
         folding = axis is None
         _reducing_axis(axis, "DataFrame")
-        _held_at(
-            "bool_only",
-            bool_only,
-            False,
-            "keeping only the columns that already hold booleans is a choice"
-            " about which columns are in the answer rather than about the"
-            " question being asked of each one",
-        )
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing value is skipped here as it is by every other reduction,"
-            " and pandas' other reading of it, where a gap counts as true,"
-            " is a second pass rather than a flag on this one",
-        )
-        made = self._per_column(kind, 0.0)
+        frame: Any = self
+        if bool_only:
+            # pandas keeps the columns that already hold booleans and asks nothing
+            # of the rest, so a frame with none of them answers an empty column.
+            names = self._inner.names()
+            frame = self[[name for name in names if _word(self[name].dtype) in _TRUTHS]]
+        if not skipna:
+            names = frame._inner.names()
+            answers = [frame[name]._truth(kind, 0, False, False) for name in names]
+            made = Series(answers, index=list(names), dtype=None if answers else "bool")
+        else:
+            made = frame._per_column(kind, 0.0)
         if not folding:
             return made
         return made._truth(kind, 0, False, True)
@@ -14708,21 +14727,13 @@ class DataFrameMixin(_Carries):
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> DataFrame:
         """Runs one of the four scans down every column."""
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing row is stepped over and put back where it was, and letting"
-            " one through would poison every row after it",
-        )
-        _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "dropping the columns a scan cannot read is a choice about the shape"
-            " of the answer rather than about the scan",
-        )
-        return self._transformed(kind, 0, axis)
+        read = self._numeric_part() if numeric_only else self
+        scanned = read._transformed(kind, 0, axis)
+        if skipna:
+            return scanned
+        for name in scanned._inner.names():
+            scanned[name] = read[name]._scan(kind, 0, False, False)
+        return scanned
 
     def _dropna(
         self,
@@ -16259,8 +16270,11 @@ class SeriesMixin(_Carries):
 
         inplace = _flag("inplace", inplace)
         _axis_number(axis, "Series", 0, (0,))
-        if _limit_wanted(limit):
-            raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+        most = _limit_wanted(limit)
+        if most:
+            if value is None or not _is_scalar(value):
+                raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+            return _kept(self, self.mask(_first_gaps(self, most), value), inplace)
         if _objects.is_object(self._inner) and value is not None and _is_scalar(value):
             out = _objects_filled(self, value)
             if inplace:
@@ -17672,20 +17686,20 @@ class SeriesMixin(_Carries):
         layer that refused it would be stricter than the thing it copies.
         """
         _reducing_axis(axis, "Series")
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing value is skipped here as it is by every other reduction,"
-            " and pandas' other reading of it, where a gap counts as true,"
-            " is a second pass rather than a flag on this one",
-        )
         if self.dtype == "category":
             _category_reduction(kind, False)
         try:
-            return self._inner.reduce(kind, 0.0)
+            answer = self._inner.reduce(kind, 0.0)
         except Exception as error:
             raise translate(error) from None
+        if skipna or not self._inner.null_count():
+            return answer
+        # A gap that is not skipped is true, as `bool(nan)` is, so it can only
+        # turn `any` true. A masked column reads it as unknown instead, and an
+        # answer the known values do not settle is `NA`.
+        if _masked.masked_of(self) is not None:
+            return answer if bool(answer) == (kind == "any") else NA
+        return True if kind == "any" else answer
 
     def _aligned_with(self, other: Series) -> tuple[Series, Series]:
         """This column and another over the labels both have, as pandas aligns them."""
@@ -17923,14 +17937,16 @@ class SeriesMixin(_Carries):
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> Series:
         """Runs one of the four scans over the whole column."""
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing row is stepped over and put back where it was, and letting"
-            " one through would poison every row after it",
-        )
-        return self._transformed(kind, 0, axis)
+        scanned = self._transformed(kind, 0, axis)
+        if skipna or not self._inner.null_count():
+            return scanned
+        # Not skipping lets the first gap through, and every row after it is a
+        # gap too, the way a running total that met a NaN stays NaN.
+        gaps = self.isna().tolist()
+        if True not in gaps:
+            return scanned
+        first = gaps.index(True)
+        return scanned.mask([at >= first for at in range(len(gaps))])
 
     def _astype(self, dtype: Any, copy: Any, errors: Any) -> Series:
         """Converts the column and hands back a new one.
