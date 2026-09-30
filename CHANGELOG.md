@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an alias on a table function
+
+`FROM range(5) AS r(i)` names the relation and its column, so `r.i` and `i` both reach it, and `FROM range(3) r` names the relation while the column keeps the function's name, as in DuckDB. A column list longer than the columns the function produces is cut to them, since DuckDB drops the extra names of a table function rather than refusing them, and `unnest([4, 5]) u(x)` names its column the same way. Two aliased table functions join like any two tables.
+
 ### Fixed: Index classes show pandas' signatures
 
 `inspect.signature(Index)` used to answer `(data, *args, **kwargs)`, because `inspect` reads `__new__` before `__init__` and the index's `__new__` takes anything so it can answer a list of tuples with a `MultiIndex`. Each index class that keeps that `__new__` now shows the parameters of its own `__init__`, so `Index` reads `(data, dtype, copy, name, tupleize_cols)` as pandas' does, and a class with its own `__new__` is read as before.

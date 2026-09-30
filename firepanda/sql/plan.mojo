@@ -146,10 +146,11 @@ are lowered as expressions against nothing, the way a `VALUES` lowers its rows,
 because there is nothing under a table function to read.
 
 The column comes out called after the function, which is what DuckDB calls it.
-An alias is refused for now: the column belongs to no relation, so a name
-written in front of it would have nothing to resolve against, and a scope entry
-pointing at a relation that does not exist would resolve to the wrong one rather
-than to none.
+An alias makes the call a relation the way a subquery's alias does, and is
+lowered the same way: `range(5) AS r(i)` renames the column and puts it under
+`r`, so `r.i` resolves. A column list longer than the call produces is cut to
+fit rather than refused, which is DuckDB's rule for a table function and not
+for a subquery.
 
 ### A subquery may be written where a table goes
 
@@ -5547,7 +5548,9 @@ def _no_cycle(
                 pending.append(named)
 
 
-def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
+def _function(
+    ast: Ast, at: UInt32, mut plan: Plan, mut scope: _Scope
+) raises -> _From:
     """Lowers a function written where a table goes.
 
     `FROM range(5)` is a source that reads no file and names no table, so
@@ -5574,8 +5577,8 @@ def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
         The node and what it produces.
 
     Raises:
-        If the call is `LATERAL` or `WITH ORDINALITY`, if it carries an alias,
-        or if an argument is an expression this does not lower.
+        If the call is `LATERAL` or `WITH ORDINALITY`, or if an argument is an
+        expression this does not lower.
     """
     var source = ast.refs[Int(at)]
     if source.b & 1 != 0:
@@ -5587,38 +5590,48 @@ def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
     if source.b & 2 != 0:
         raise not_implemented(WITH_ORDINALITY, "", "")
     var name = _one_name(ast, source.a, "a table function")
-    if ast.length(source.payload) != 0:
-        raise Error(
-            String(
-                (
-                    "firepanda does not lower an alias on a table function yet."
-                    " The column "
-                ),
-                name,
-                (
-                    " produces belongs to no relation, so a name written in"
-                    " front of it would have nothing to resolve against"
-                ),
-            )
-        )
 
     # Nothing under it, so nothing can aggregate and nothing can be qualified.
     # Both are here because lowering an expression takes them.
     var walk = _Walk()
     var nothing = _Scope()
     var written = ast.items(source.children)
+    var made: _From
     if fold(name) == "unnest":
-        return _unnest_from(ast, written, plan, walk, nothing)
-    var args = List[Int](capacity=len(written))
-    for i in range(len(written)):
-        args.append(_lower_operand(ast, written[i], plan, walk, nothing, False))
+        made = _unnest_from(ast, written, plan, walk, nothing)
+    else:
+        var args = List[Int](capacity=len(written))
+        for i in range(len(written)):
+            args.append(
+                _lower_operand(ast, written[i], plan, walk, nothing, False)
+            )
+        var schema = Schema()
+        schema.append(Field(name, LogicalType.INT64, False))
+        var origin = List[Int](length=1, fill=UNBOUND)
+        var names = List[String](capacity=1)
+        names.append(name.copy())
+        made = _From(
+            plan.table_function(name^, args^, names^), schema^, origin^
+        )
+    var named = ast.length(source.payload)
+    if named == 0:
+        return made^
 
-    var schema = Schema()
-    schema.append(Field(name, LogicalType.INT64, False))
-    var origin = List[Int](length=1, fill=UNBOUND)
-    var names = List[String](capacity=1)
-    names.append(name.copy())
-    return _From(plan.table_function(name^, args^, names^), schema^, origin^)
+    # An alias makes the call a relation a column can be qualified by, and
+    # its column list renames what the call produces, which is what a
+    # subquery's alias does and is lowered the same way. A list longer than
+    # what the call produces is not refused, as it is on a subquery: DuckDB
+    # renames what there is and drops the rest, so `range(3) t(i, j)` is one
+    # column called `i`.
+    var called = String(ast.text(ast.at(source.payload, 0)))
+    var root = made.at
+    if named > 1:
+        var produced = _produces(plan, root)
+        var columns = List[String](capacity=named - 1)
+        for i in range(1, min(named, len(produced) + 1)):
+            columns.append(String(ast.text(ast.at(source.payload, i))))
+        root = _renamed(plan, root, columns)
+    return _derived(plan, root, called^, scope)
 
 
 def _unnest_from(
@@ -7556,7 +7569,7 @@ def _source(
     if source.kind == REF_SUBQUERY:
         return _subquery(ast, at, catalog, grammar, plan, sources, scope, ctes)
     if source.kind == REF_FUNCTION:
-        return _function(ast, at, plan)
+        return _function(ast, at, plan, scope)
     raise Error(
         String("firepanda does not lower table reference kind ", source.kind)
     )
