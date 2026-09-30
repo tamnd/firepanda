@@ -125,11 +125,44 @@ def test_a_repeated_pair_is_pandas_mistake(firepanda: ModuleType) -> None:
     assert str(mine.value) == str(theirs.value)
 
 
+LEVELS: list[Callable[[Any], Any]] = [
+    lambda m: base(m).pivot(index="r", columns="c"),
+    lambda m: base(m).pivot(index="r", columns="c", values=["v", "w"]),
+    lambda m: base(m).pivot(columns="c", values=["w", "v"]),
+    lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc=["sum"]),
+    lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc=["sum", "max"]),
+    lambda m: base(m).pivot_table(index="r", columns="c", values=["w", "v"]),
+    lambda m: base(m).pivot_table(index="r", columns="c", values=["v"], aggfunc="sum"),
+    lambda m: base(m).pivot_table(index="r", columns="c", values=["w", "v"], sort=False),
+    lambda m: base(m)[["r", "c", "v", "w"]].pivot_table(index="r", columns="c", aggfunc="sum"),
+    lambda m: base(m).pivot_table(index="r", values=["v", "w"], aggfunc=["sum", "mean"]),
+    lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc={"v": "sum"}),
+    lambda m: base(m).pivot_table(
+        index="r", columns="c", aggfunc={"v": "sum", "w": ["min", "max"]}
+    ),
+    lambda m: base(m).pivot_table(
+        index="r", columns="c", values="v", aggfunc=[lambda s: s.sum()], fill_value=0
+    ),
+    lambda m: base(m).pivot_table(
+        index="r", columns="c", values="v", aggfunc=["sum", "max"], margins=True
+    ),
+    lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc=["sum"]).columns,
+]
+
+
+@pytest.mark.parametrize("build", LEVELS)
+def test_columns_of_several_levels_are_pandas(
+    firepanda: ModuleType, build: Callable[[Any], Any]
+) -> None:
+    """Several values or functions put the key's columns under each, with the level names."""
+    import pandas as pd
+
+    assert repr(build(firepanda)) == repr(build(pd))
+
+
 @pytest.mark.parametrize(
     "build",
     [
-        lambda m: base(m).pivot(index="r", columns="c"),
-        lambda m: base(m).pivot(index="r", columns="c", values=["v", "w"]),
         lambda m: (
             base(m)
             .assign(r=[1, 2, 1, 2, 3])
@@ -140,14 +173,14 @@ def test_a_repeated_pair_is_pandas_mistake(firepanda: ModuleType) -> None:
             .assign(c=[1, 1, 2, 3, 2])
             .pivot_table(index="r", columns="c", values="v", margins=True)
         ),
-        lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc=["sum"]),
-        lambda m: base(m).pivot_table(index="r", columns="c", values=["v", "w"]),
+        lambda m: base(m).pivot_table(index="r", columns="c", values=["v", "w"], margins=True),
+        lambda m: base(m).pivot(index="r", columns="c", values=["v", "t"]),
     ],
 )
-def test_what_pandas_labels_with_levels_or_numbers_is_refused(
+def test_what_pandas_labels_with_numbers_or_objects_is_refused(
     firepanda: ModuleType, build: Callable[[Any], Any]
 ) -> None:
-    """A MultiIndex, totals beside numbers and columns named by numbers are not firepanda's."""
+    """Totals beside numbers, columns named by numbers and values read as objects."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 
