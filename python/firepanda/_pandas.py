@@ -29616,24 +29616,25 @@ def _pivot_margins(
     though the body keeps those rows, so a total can be less than its row.
 
     Raises:
-        NotImplementedError: For totals labelled with text beside row keys that
-            are not text, which pandas holds as objects, for several row keys,
-            and for a function rather than a name.
+        NotImplementedError: For totals labelled with text beside row or column
+            keys that are not text, which pandas holds as objects, for several
+            row keys, and for a function rather than a name.
     """
     from ._frame import DataFrame, Index
 
     rows = table.index.tolist()
+    names = list(table.columns)
     if (
         isinstance(index, list | tuple)
         or callable(aggfunc)
         or not isinstance(margins_name, str)
-        or not all(isinstance(row, str) for row in rows)
+        or not all(isinstance(label, str) for label in [*rows, *names])
     ):
         raise NotImplementedError(
-            "pivot_table: the totals are labelled with text beside the row keys, which"
-            " firepanda holds only for one key of text and a function named by text"
+            "pivot_table: the totals are labelled with text beside the row and column"
+            " keys, which firepanda holds only for keys of text, one row key and a"
+            " function named by text"
         )
-    names = [str(name) for name in table.columns]
     cells = {name: table[name].tolist() for name in names}
     if columns is None:
         data = frame[[index, *names]].dropna()

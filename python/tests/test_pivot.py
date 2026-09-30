@@ -135,6 +135,11 @@ def test_a_repeated_pair_is_pandas_mistake(firepanda: ModuleType) -> None:
             .assign(r=[1, 2, 1, 2, 3])
             .pivot_table(index="r", columns="c", values="v", margins=True)
         ),
+        lambda m: (
+            base(m)
+            .assign(c=[1, 1, 2, 3, 2])
+            .pivot_table(index="r", columns="c", values="v", margins=True)
+        ),
         lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc=["sum"]),
         lambda m: base(m).pivot_table(index="r", columns="c", values=["v", "w"]),
     ],
