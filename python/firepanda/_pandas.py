@@ -25620,6 +25620,9 @@ class GroupByMixin[Answer]:
         Returns:
             The frame or the series pandas answers.
         """
+        if kind in ("any", "all") and not _flag("skipna", skipna):
+            # A gap that is not skipped is true, the way numpy reads NaN.
+            return self._gaps_true()._reduce(kind, param, numeric_only, True, min_count)
         if kind not in _GROUP_GAPS_ANSWER_NOTHING and kind not in ("first", "last"):
             _held_at(
                 "skipna",
@@ -25747,6 +25750,21 @@ class GroupByMixin[Answer]:
         if selection is not None:
             narrowed._selection = [name for name in selection if name in numbers]
         return narrowed
+
+    def _gaps_true(self) -> Any:
+        """This group by over whether each value is true, a gap counting as true."""
+        keys = set(self._by)
+        frame = self._frame
+        flags = {}
+        for name in _shown_names(frame):
+            column = frame[name]
+            if name in keys or not column.hasnans:
+                continue
+            zero = "" if _is_text(column) else False if column.dtype == "bool" else 0
+            flags[name] = column.isna() | (column.fillna(zero) != zero)
+        over = copy.copy(self)
+        over._frame = frame.assign(**flags) if flags else frame
+        return over
 
     def _over_flags(self) -> Any:
         """This group by over whether each value is there, which `skipna=False` reduces."""
@@ -27072,7 +27090,7 @@ class GroupByMixin[Answer]:
         Args:
             how: `max` or `min`.
             column: The column to look in.
-            skipna: Declared and held at True.
+            skipna: Whether a gap is passed over rather than refused.
 
         Returns:
             One label a group, on the keys, named after the column.
@@ -27083,14 +27101,9 @@ class GroupByMixin[Answer]:
         """
         from ._frame import DataFrame, DataFrameGroupBy
 
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a group whose answer is missing because one value is missing is a"
-            " second pass the kernels do not make",
-        )
         values = self._frame[column]
+        if not _flag("skipna", skipna) and values.hasnans:
+            raise InvalidArgumentError(f"idx{how} with skipna=False encountered an NA value.")
         target = DataFrameGroupBy(
             self._frame[[*self._by, column]], self._by, True, self._sort, self._dropna
         )[column].transform(how)

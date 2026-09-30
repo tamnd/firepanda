@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: skipna=False on group by any, all, idxmax and idxmin
+
+A group by's `any` and `all` now take `skipna=False` and count a gap as true, the way pandas and numpy read NaN, where they used to refuse the flag. `idxmax` and `idxmin` with `skipna=False` now raise pandas' "encountered an NA value" error when a group holds a gap, rather than refusing the flag.
+
 ### Added: group counts from the end, nunique with gaps, and shift fills
 
 A group by's `cumcount` and `ngroup` take `ascending=False`, `nunique(dropna=False)` counts a gap as one more distinct value, and `shift` takes `fill_value`, filling the rows each group's shift opens and every row with a missing key, and `freq`, which shifts each group's labels one group after another with the keys kept, as in pandas. `Series.shift` with a `fill_value` that fills every row, or that the column's own number type holds, now keeps that type.
