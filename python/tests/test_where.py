@@ -52,16 +52,13 @@ def cells(made):
 
 
 def gappy(module, values):
-    """A condition with a row saying nothing, built the way each library can.
+    """A condition with a row saying nothing, in the nullable `boolean` type.
 
-    pandas can only answer this one in a nullable type. A list with a None in it
-    becomes an object array over there, and `mask` inverts the condition with a
-    `~`, which an object array of bools and a None cannot survive. The nullable
-    `boolean` is the type whose behaviour this library's plain bool copies.
+    A list with a None in it becomes a column of objects, and `mask` inverts the
+    condition with a `~`, which an object and a None cannot survive, in either
+    library. The nullable `boolean` is the type that can say nothing in a row.
     """
-    if module is pd:
-        return pd.Series(values, dtype="boolean")
-    return module.Series(values)
+    return module.Series(values, dtype="boolean")
 
 
 def test_a_condition_keeps_the_rows_it_says_are_true(firepanda):
@@ -97,7 +94,17 @@ def test_a_row_the_condition_says_nothing_about_is_not_kept_by_a_mask_either(fir
     the same rule twice rather than one rule and its opposite.
     """
     made = firepanda.Series([1, 2, 3])
-    assert made.mask([True, None, True], 0).tolist() == [0, 0, 0]
+    flags = firepanda.Series([True, None, True], dtype="boolean")
+    assert made.mask(flags, 0).tolist() == [0, 0, 0]
+
+
+def test_a_gap_mask_cannot_turn_over_is_refused_as_pandas_refuses_it(firepanda):
+    """pandas turns a list or a column of objects over with `~`, which a None refuses."""
+    made = firepanda.Series([1, 2, 3])
+    with pytest.raises(TypeError, match="unary ~: 'NoneType'"):
+        made.mask([True, None, True], 0)
+    with pytest.raises(TypeError, match="unary ~: 'NoneType'"):
+        made.mask(firepanda.Series([True, None, True]), 0)
 
 
 def test_a_condition_that_keeps_everything_leaves_the_column_alone(firepanda):

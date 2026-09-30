@@ -104,6 +104,37 @@ class MaskedIndex(Index):
 
     __hash__ = None  # type: ignore[assignment]
 
+    def map(self, mapper: Any, na_action: Any = None) -> Any:
+        """Each label through a function or a mapping, the answer in a masked type as pandas has it.
+
+        An answer of the same kind as the labels keeps their type, so an `Int32`
+        index stays `Int32`. Numbers or flags of another kind take the masked type
+        of their own kind, and text from numbers is objects.
+        """
+        from ._pandas import _word
+
+        answer = Index.map(self, mapper, na_action)
+        source = self._type()
+        lower = _masked._LOWER[source]
+        kind = _word(answer.dtype)
+        family = _family(kind)
+        if lower == "str":
+            if family != "text":
+                return answer
+            target = source
+        elif family == _family(lower):
+            target = source
+        elif family in _WIDEST:
+            target = _WIDEST[family]
+        elif family == "text":
+            return Index(answer.tolist(), dtype=object, name=answer.name)
+        else:
+            return answer
+        try:
+            return Index(_masked.as_masked(answer.to_series(), target), name=answer.name)
+        except (TypeError, ValueError, OverflowError):
+            return answer
+
     def sort_values(
         self,
         *,
@@ -126,6 +157,23 @@ class MaskedIndex(Index):
         order = _objects_order(self.tolist(), ascending, na_position)
         made = self.take(order)
         return (made, order) if return_indexer else made
+
+
+_WIDEST = {"whole": "Int64", "float": "Float64", "flag": "boolean"}
+"""The masked type pandas gives an answer of each kind that is not the labels' kind."""
+
+
+def _family(kind: str) -> str:
+    """The kind of a core type: whole numbers, floats, flags, text, or something else."""
+    if kind.startswith(("int", "uint")):
+        return "whole"
+    if kind.startswith("float"):
+        return "float"
+    if kind == "bool":
+        return "flag"
+    if kind in ("string", "str"):
+        return "text"
+    return ""
 
 
 MaskedIndex.__name__ = "Index"

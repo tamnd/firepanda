@@ -10216,6 +10216,8 @@ class DataFrameMixin(_Carries):
             type(dtype).__name__ == "ArrowDtype"
             or _masked.masked_name(dtype) is not None
             or _sparse.sparse_dtype(dtype) is not None
+            or _is_object_dtype(dtype)
+            or str(dtype).startswith(("datetime64[", "timedelta64["))
         ):
             from ._frame import DataFrame
 
@@ -15634,6 +15636,8 @@ class DataFrameMixin(_Carries):
             for name, wanted in asked.items()
             if _decided_categories(wanted)
             or _counts_target(_word(self[name].dtype), wanted)
+            or _text_temporal_target(_word(self[name].dtype), wanted)
+            or _is_object_dtype(wanted)
             or _number_category_cast(self[name], wanted)
             or _masked.masked_name(wanted) is not None
             or _masked.masked_of(self[name]) is not None
@@ -15687,6 +15691,25 @@ def _arrow_dtype(dtype: Any) -> Any:
     from ._arrowtyped import ArrowDtype
 
     return dtype if isinstance(dtype, ArrowDtype) else ArrowDtype(dtype.pyarrow_dtype)
+
+
+def _unturnable(cond: Any) -> None:
+    """Refuses the condition of `mask` that pandas cannot turn over with `~`.
+
+    A list with a None becomes an array of objects, and so does a column of
+    objects, and `~` on the None or the NaN in one raises Python's own sentence.
+
+    Raises:
+        TypeError: For a gap in a list or in a column of objects.
+    """
+    if isinstance(cond, (list, tuple)):
+        flags: list[Any] = [flag for flag in cond if flag is None]
+    elif isinstance(cond, SeriesMixin) and _word(cond.dtype) == "object":
+        flags = [flag for flag in cond.tolist() if _objects.is_gap(flag)]
+    else:
+        return
+    if flags:
+        raise TypeError(f"bad operand type for unary ~: '{type(flags[0]).__name__}'")
 
 
 class SeriesMixin(_Carries):
@@ -17230,7 +17253,10 @@ class SeriesMixin(_Carries):
                 hold what the other side offers a row it is going to take.
             NotImplementedError: For `inplace`, and for a frame as the other
                 side.
+            TypeError: For a list of flags with a None among them, which pandas
+                cannot turn over.
         """
+        _unturnable(cond)
         return self._chosen(cond, other, inplace, axis, level, True)
 
     def _chosen(
@@ -18884,6 +18910,9 @@ class SeriesMixin(_Carries):
             if _word(self.dtype).startswith("float"):
                 return _counts_as_instants(_truncated(self.astype("float64")), unit)
             return to_datetime(self, unit=unit).dt.as_unit(unit)
+        parsed = _text_temporal_target(_word(self.dtype), dtype)
+        if parsed:
+            return _parsed_temporal(self, parsed)
         wanted = _named_dtype(dtype)
         texts = _temporal_texts(self) if wanted == "string" else None
         if texts is not None:
@@ -29967,6 +29996,27 @@ def _counts_target(printed: str, dtype: Any) -> str:
     if not numbers or not wanted.startswith(("datetime64[", "timedelta64[")) or "," in wanted:
         return ""
     return wanted if _unit_of(wanted) in _UNIT_ORDER else ""
+
+
+def _text_temporal_target(printed: str, dtype: Any) -> str:
+    """The instant or span type an `astype` parses a column of text into, or empty text.
+
+    pandas reads each text as `to_datetime` or `to_timedelta` would, so
+    `astype("datetime64[ns]")` on `"2026-01-01"` is that day.
+    """
+    wanted = str(dtype) if isinstance(dtype, str) or type(dtype).__name__ == "dtype" else ""
+    if printed not in ("string", "str") or "," in wanted:
+        return ""
+    if not wanted.startswith(("datetime64[", "timedelta64[")):
+        return ""
+    return wanted if _unit_of(wanted) in _UNIT_ORDER else ""
+
+
+def _parsed_temporal(column: Any, wanted: str) -> Any:
+    """A column of text parsed into the instants or spans of `wanted`, at its unit."""
+    unit = _unit_of(wanted)
+    parse = to_timedelta if wanted.startswith("timedelta") else to_datetime
+    return parse(column).dt.as_unit(unit)
 
 
 def _unit_change(printed: str, dtype: Any) -> str:

@@ -38,6 +38,16 @@ CASES: dict[str, Callable[[ModuleType], Any]] = {
     "contains-not": lambda lib: 2 in whole(lib),
     "eq": lambda lib: whole(lib) == 3,
     "isin": lambda lib: whole(lib).isin([1, 3]),
+    "map-floats": lambda lib: whole(lib).map(lambda x: x * 1.5),
+    "map-same-width": lambda lib: lib.Index([1, 2], dtype="Int32").map(lambda x: x + 1),
+    "map-float32": lambda lib: lib.Index([1.5, 2], dtype="Float32").map(lambda x: x + 1),
+    "map-flags": lambda lib: lib.Index([True, False], dtype="boolean").map(lambda x: not x),
+    "map-ignore": lambda lib: lib.Index([1, None], dtype="Int64").map(
+        lambda x: x, na_action="ignore"
+    ),
+    "map-text": lambda lib: lib.Index([1, 2], dtype="Int64").map(lambda x: "a"),
+    "map-dict": lambda lib: lib.Index([1, 2], dtype="Int64").map({1: 1.5, 2: 2}),
+    "map-string": lambda lib: lib.Index(["a", None], dtype="string").map(lambda x: x),
     "isna": lambda lib: [bool(each) for each in whole(lib).isna()],
     "add": lambda lib: whole(lib) + 1,
     "max": lambda lib: whole(lib).max(),
