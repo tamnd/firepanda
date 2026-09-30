@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.quantile across the rows
+
+`DataFrame.quantile(axis=1)` takes a quantile across each row, one or a list of them and under any of the rules the columns take, as the quantile down the frame turned on its side, as pandas does.
+
 ### Added: DataFrame.sql runs a query with the frame as self
 
 `df.sql("SELECT a, sum(b) FROM self GROUP BY a")` runs one statement in DuckDB's dialect with the frame under the name `self`, and every other name is found as `firepanda.sql` finds it, among the registered frames and then the caller's variables. `self` comes before a frame registered under that name, and `capture=False` leaves the caller's variables out.

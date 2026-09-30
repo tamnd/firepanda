@@ -154,10 +154,32 @@ def test_the_eight_newer_rules_are_refused(firepanda: ModuleType) -> None:
         firepanda.Series([1.0, 2.0]).quantile([0.5], interpolation="weibull")
 
 
-def test_a_frame_along_its_rows_is_refused(firepanda: ModuleType) -> None:
-    """Only down the columns so far."""
-    with pytest.raises(NotImplementedError):
-        firepanda.DataFrame({"a": [1.0], "b": [2.0]}).quantile([0.5], axis=1)
+ACROSS = {
+    "list": lambda lib: rows(lib).quantile([0.25, 0.5], axis=1),
+    "lower": lambda lib: rows(lib).quantile(0.5, axis=1, interpolation="lower"),
+    "nearest list": lambda lib: rows(lib).quantile([0.1, 0.9], axis=1, interpolation="nearest"),
+    "whole numbers": lambda lib: rows(lib)[["a", "c"]].quantile(
+        [0.5], axis="columns", interpolation="higher"
+    ),
+    "numeric only": lambda lib: (
+        rows(lib).assign(t=["p", "q", "r"]).quantile([0.5], axis=1, numeric_only=True)
+    ),
+    "one linear": lambda lib: rows(lib).quantile(0.3, axis=1),
+}
+
+
+def rows(lib: Any) -> Any:
+    return lib.DataFrame(
+        {"a": [1, 2, 3], "b": [4.5, 0.5, 6.0], "c": [7, 8, 1]}, index=["x", "y", "z"]
+    )
+
+
+@pytest.mark.parametrize("make", ACROSS.values(), ids=ACROSS.keys())
+def test_a_frame_along_its_rows_is_pandas(firepanda: ModuleType, make: Any) -> None:
+    """Each row as a column of the frame turned on its side."""
+    import pandas as pd
+
+    assert repr(make(firepanda)) == repr(make(pd))
 
 
 def test_a_grouped_quantile_outside_the_interval_says_what_groupby_says(
