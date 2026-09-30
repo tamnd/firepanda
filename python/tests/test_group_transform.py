@@ -149,15 +149,13 @@ def test_a_bool_column_folds_the_way_pandas_folds_it(firepanda: ModuleType) -> N
 
 
 def test_what_is_not_written_is_refused(firepanda: ModuleType) -> None:
-    """Counting backwards, a fill, a frequency, a suffix and a list of periods."""
+    """Counting backwards, a fill and a frequency."""
     grouped = frame(firepanda).groupby("k")["x"]
     for build in (
         lambda: grouped.cumcount(ascending=False),
         lambda: grouped.ngroup(ascending=False),
         lambda: grouped.shift(fill_value=0),
         lambda: grouped.shift(freq="D"),
-        lambda: grouped.shift([1, 2]),
-        lambda: grouped.shift(1, suffix="_s"),
         lambda: grouped.cumsum(numeric_only=True),
         lambda: grouped.transform("sum", engine="numba"),
         lambda: frame(firepanda).astype({"x": "bool"}).groupby("k")["x"].diff(),

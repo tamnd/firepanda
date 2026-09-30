@@ -15,6 +15,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: firepanda.sql runs a query over the frames in scope
 
 `firepanda.sql("SELECT ... FROM orders")` runs one statement in DuckDB's dialect and answers a frame. A table name is looked for among the frames given to `firepanda.register`, then the caller's local variables, then its globals, and only a `DataFrame` or a `Series` is taken, so a variable of another kind hides nothing. SQL folds names to lower case, so `Orders` reaches a variable called `orders`, and two variables whose names differ only in case are refused as ambiguous. `capture=False` leaves the caller's variables out. Each call runs over a catalog of its own, so a table one call creates is gone in the next. A statement firepanda does not run yet raises NotImplementedError and one that does not parse or bind raises ValueError with DuckDB's message.
+### Added: shift by a list of periods
+
+`DataFrame.shift`, `Series.shift` and a group by's `shift` take a list of periods and answer a frame of a shift by each side by side, each column named after the column and the period with `suffix` between them, as pandas does. An empty list, a period that is not a whole number, a list across the rows and a suffix beside one period are refused in pandas' words.
 
 ### Added: sort_index with a direction per level
 
