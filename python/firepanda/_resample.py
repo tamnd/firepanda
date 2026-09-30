@@ -12,8 +12,12 @@ timestamps for the labels.
 The steps are the ones pandas calls ticks, hours down to nanoseconds, and days,
 which pandas 3 does not count as a tick but which on a timestamp with no zone
 is 24 hours measured from midnight. Weeks, months, quarters, years and business
-days are calendar offsets whose bins are not all the same length, and they are
-refused by name.
+days are calendar offsets whose bins are not all the same length. Their edges
+are listed one by one, the way pandas lays them: from the first day rolled back
+onto the offset, or a step before it when the bins close on the right, to a
+step past the last day. The offsets that land on the end of a period, a month,
+quarter or year end or a week, close on the right and are named by their right
+end, and a bin closed on the right runs to the last moment of its end day.
 
 The rules below were measured against pandas 3.0.
 
@@ -80,7 +84,7 @@ def _step(rule: Any) -> tuple[int, bool]:
         InvalidArgumentError: For a rule pandas cannot read, with its message.
         ZeroDivisionError: For a rule of no length, as pandas raises.
         TypeError: For a rule that is neither text nor an offset, as pandas raises.
-        NotImplementedError: For a calendar offset.
+        NotImplementedError: For a calendar offset, which `_calendar` reads.
     """
     from .offsets import BaseOffset, Day, Tick
 
@@ -113,6 +117,59 @@ def _step(rule: Any) -> tuple[int, bool]:
     if length != int(length):
         raise InvalidArgumentError(f"Invalid frequency: {rule}")
     return int(length), unit == "D"
+
+
+def _calendar(rule: Any) -> Any:
+    """The calendar offset a rule names, or None for a fixed step or a rule pandas refuses."""
+    from . import offsets
+
+    if isinstance(rule, offsets.Tick | offsets.Day):
+        return None
+    if isinstance(rule, offsets.BaseOffset):
+        return rule
+    if not isinstance(rule, str):
+        return None
+    found = re.fullmatch(r"\s*\d*\s*([A-Za-z]+)(-[A-Za-z]+)?\s*", rule)
+    if found is None or found.group(1) not in _CALENDAR:
+        return None
+    try:
+        return offsets._parsed(rule.strip())
+    except ValueError:
+        raise InvalidArgumentError(f"Invalid frequency: {rule}") from None
+
+
+def _ends_period(offset: Any) -> bool:
+    """Whether an offset lands on the end of a period, which closes and names bins on the right."""
+    return offset.rule_code.split("-")[0] in ("ME", "YE", "QE", "BME", "BYE", "BQE", "W")
+
+
+def _calendar_bins(offset: Any, counts: Any, unit: str, right: bool) -> tuple[list[int], Any]:
+    """The labels of a calendar offset's bins and each timestamp's bin number.
+
+    The labels are one more than the bins, each bin lying between two of them,
+    and are counts in the timestamps' own unit, as the timestamps are.
+    """
+    from bisect import bisect_left, bisect_right
+
+    from ._date_range import date_range
+    from ._frame import Series
+    from ._scalars import Timestamp
+
+    per = _NANOS[unit]
+    values = counts.tolist()
+    first = Timestamp(min(values) * per).normalize()
+    last = Timestamp(max(values) * per).normalize()
+    first = first - offset if right else offset.rollback(first)
+    marks = [int(stamp.value) // per for stamp in date_range(first, last + offset, freq=offset)]
+    edges = marks
+    if _ends_period(offset):
+        if right:
+            # A bin closed on its end day holds every moment of that day.
+            edges = [mark + _NANOS["D"] // per - 1 for mark in marks]
+        if len(edges) > 1 and edges[-2] > max(values):
+            marks, edges = marks[:-1], edges[:-1]
+    place = bisect_left if right else bisect_right
+    return marks, Series([place(edges, value) - 1 for value in values], dtype="int64")
 
 
 def _numeric(dtype: str) -> bool:
@@ -242,7 +299,7 @@ class Resampler:
         if _bins is not None:
             (self._times, self._codes, self._first, self._count, self._origin, self._step,
              self._time_unit, self._right_label, self._name, self._dropped,
-             self._right_closed, self._chosen, self._rule) = _bins  # fmt: skip
+             self._right_closed, self._chosen, self._rule, self._marks) = _bins  # fmt: skip
             return
         from ._frame import DataFrame
 
@@ -252,6 +309,10 @@ class Resampler:
             raise InvalidArgumentError(f"Unsupported value {label} for `label`")
         origin = _moment(origin)
         shift = _shift(offset)
+        calendar = _calendar(rule)
+        if calendar is not None and _ends_period(calendar):
+            closed = closed or "right"
+            label = label or "right"
         if origin in ("end", "end_day"):
             # Counting back from the last timestamp, a bin is named by and holds its end.
             closed = closed or "right"
@@ -283,7 +344,7 @@ class Resampler:
                 "Only valid with DatetimeIndex, TimedeltaIndex or PeriodIndex, but got an"
                 f" instance of '{kind}'"
             )
-        length, days = _step(rule)
+        length, days = (0, False) if calendar is not None else _step(rule)
         per = _NANOS[unit]
         if length % per:
             raise NotImplementedError(
@@ -302,22 +363,29 @@ class Resampler:
         counts = times.astype("int64")
         right = closed == "right"
         day = _NANOS["D"] // per
-        if days:
+        self._marks: list[int] | None = None
+        if days or calendar is not None:
             _unmoved(origin, offset)
-        if len(counts) == 0:
+        if calendar is not None and len(counts):
+            self._marks, codes = _calendar_bins(calendar, counts, unit, right)
+            start, step = 0, 1
+        elif len(counts) == 0:
             start = 0
         elif days:
             start = int(counts.min()) // day * day
         else:
             start = _anchor(origin, counts, step, day, per, right) + _counted(shift, per)
-        # Closed on the left a bin holds [edge, edge + step), and closed on the
-        # right (edge, edge + step], which is the ceiling less one.
-        codes = -((start - counts) // step) - 1 if right else (counts - start) // step
+        if self._marks is None:
+            # Closed on the left a bin holds [edge, edge + step), and closed on the
+            # right (edge, edge + step], which is the ceiling less one.
+            codes = -((start - counts) // step) - 1 if right else (counts - start) // step
         self._times = times
         self._codes = codes
         self._first = int(codes.min()) if len(codes) else 0
         self._count = int(codes.max()) - self._first + 1 if len(codes) else 0
-        if days and len(codes):
+        if self._marks is not None:
+            self._count = len(self._marks) - 1
+        elif days and len(codes):
             # pandas 3 lays day bins from one step before midnight of the first
             # day when they close on the right, and up to midnight of the last
             # day plus a step, so either end can hold a bin with nothing in it.
@@ -335,7 +403,7 @@ class Resampler:
         """The bins, handed to a resampler over a part of the same rows."""
         return (self._times, self._codes, self._first, self._count, self._origin, self._step,
                 self._time_unit, self._right_label, self._name, self._dropped,
-                self._right_closed, self._chosen, self._rule)  # fmt: skip
+                self._right_closed, self._chosen, self._rule, self._marks)  # fmt: skip
 
     # ------------------------------------------------------------------
     # Selection
@@ -388,9 +456,10 @@ class Resampler:
         """The edges of the bins, one more than there are bins."""
         from ._frame import Index
 
-        return Index(self._stamps(range(self._first, self._first + self._count + 1), 0)).rename(
-            self._name
-        )
+        edges = Index(self._stamps(range(self._first, self._first + self._count + 1), 0))
+        edges = edges.rename(self._name)
+        edges.freq = self._rule
+        return edges
 
     @property
     def groups(self) -> dict[Any, int]:
@@ -440,7 +509,10 @@ class Resampler:
         from ._pandas import to_datetime
 
         extra = (1 if self._right_label else 0) if shift is None else shift
-        counts = [self._origin + (code + extra) * self._step for code in codes]
+        if self._marks is not None:
+            counts = [self._marks[code - self._first + extra] for code in codes]
+        else:
+            counts = [self._origin + (code + extra) * self._step for code in codes]
         return to_datetime(Series(counts, dtype="int64"), unit=self._time_unit)
 
     def _edges(self, shift: int | None = None) -> Index:
@@ -630,31 +702,45 @@ class Resampler:
     # ------------------------------------------------------------------
 
     def aggregate(self, func: Any = None, *args: Any, **kwargs: Any) -> Any:
-        """A reduction by name, or one by name for each column.
+        """A reduction by name, a list of them, or either for each column.
+
+        A list names a column for each reduction, under the column it reduces
+        when there is one, as pandas' two levels of column labels do.
 
         Raises:
-            NotImplementedError: For a function, or for a list of names, which
-                pandas answers with two levels of column labels.
+            NotImplementedError: For a function, which is Python run once a bin.
         """
         from ._frame import DataFrame
 
         if isinstance(func, str):
             return self._by_name(func)(*args, **kwargs)
-        if isinstance(func, dict) and isinstance(self._obj, DataFrame):
-            parts = {name: self[name].aggregate(how) for name, how in func.items()}
-            if any(not isinstance(how, str) for how in func.values()):
+        named = isinstance(func, list) and all(isinstance(how, str) for how in func)
+        if named and not isinstance(self._obj, DataFrame):
+            parts = {how: self._by_name(how)() for how in func}
+        elif named:
+            parts = {(name, how): self[name]._by_name(how)() for name in self._obj for how in func}
+        elif isinstance(func, dict) and isinstance(self._obj, DataFrame):
+            if any(not isinstance(how, str | list) for how in func.values()):
                 raise NotImplementedError(
-                    "aggregate: a list of names for a column answers with two levels of"
-                    " column labels, which firepanda does not have"
+                    "aggregate: a function for a column is Python run once a bin, which is"
+                    " not supported yet"
                 )
-            first = next(iter(parts.values()))
-            out = DataFrame({name: part.reset_index(drop=True) for name, part in parts.items()})
-            return out.set_axis(first.index)
-        raise NotImplementedError(
-            "aggregate takes a reduction by name, or a mapping of columns to names, for"
-            " now, because a function is Python run once a bin and a list answers with"
-            " two levels of column labels"
-        )
+            if all(isinstance(how, str) for how in func.values()):
+                parts = {name: self[name].aggregate(how) for name, how in func.items()}
+            else:
+                parts = {
+                    (name, how): self[name]._by_name(how)()
+                    for name, hows in func.items()
+                    for how in ([hows] if isinstance(hows, str) else hows)
+                }
+        else:
+            raise NotImplementedError(
+                "aggregate takes a reduction by name, a list of them, or a mapping of columns"
+                " to them, for now, because a function is Python run once a bin"
+            )
+        first = next(iter(parts.values()))
+        out = DataFrame({name: part.reset_index(drop=True) for name, part in parts.items()})
+        return out.set_axis(first.index)
 
     agg = aggregate
 
@@ -740,8 +826,14 @@ class Resampler:
                 "upsampling rows with a missing timestamp is not supported yet, because"
                 " pandas reindexes them with the missing label still among the rows"
             )
+        from ._attrs import hold_freq
+        from ._frequency import _offset_of
+
         edges = self._edges(1 if self._right_closed else 0)
-        return self._obj.reindex(edges, method=method, limit=limit, fill_value=fill_value)
+        out = self._obj.reindex(edges, method=method, limit=limit, fill_value=fill_value)
+        # The rows step by the rule, which pandas' answer carries on its index.
+        hold_freq(out, _offset_of(self._rule))
+        return out
 
     def _filled(self, method: str, limit: int | None) -> DataFrame | Series:
         """`ffill` or `bfill`, upsampled, or within each bin after a column is picked.

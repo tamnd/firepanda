@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: resample on weeks, months, quarters and years
+
+`resample` takes a calendar offset such as `ME`, `MS`, `W-MON`, `QE` or `YS`, as text or as an offset, and lays its bins the way pandas does: from the first day rolled back onto the offset, or a step before it when the bins close on the right, to a step past the last day. An offset that lands on the end of a period closes and names its bins on the right, and a bin closed on the right holds every moment of its end day. `agg` on a resampler takes a list of reductions, and a mapping of columns to lists, answering with pandas' columns, and an upsampled answer keeps the rule as the freq of its index.
+
 ### Added: set_index takes labels as well as column names
 
 `set_index` now takes an index, a column, an array, an iterator or a list as the new row labels, read by position as pandas reads them, alone or beside the names of columns and with `append`. A lone index becomes the row labels whole, so `df.set_index(pd.date_range(...))` keeps its step and can be resampled or rolled by time. Labels of another length are refused with pandas' sentence, and a range is looked up among the columns as pandas does.

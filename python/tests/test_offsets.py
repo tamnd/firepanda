@@ -499,10 +499,12 @@ def test_an_offset_pandas_does_not_read_raises_its_error(firepanda: ModuleType, 
     assert str(mine.value) == str(theirs.value)
 
 
-def test_a_calendar_offset_as_a_rule_is_refused(firepanda: ModuleType) -> None:
-    """Bins of a calendar offset are not all one length, which resample does not do yet."""
-    with pytest.raises(NotImplementedError):
-        hourly(firepanda).resample(firepanda.offsets.MonthEnd())
+def test_a_calendar_offset_as_a_rule_bins_as_pandas(firepanda: ModuleType) -> None:
+    """Bins of a calendar offset are not all one length, and are laid as pandas lays them."""
+    import pandas as pd
+
+    mine = hourly(firepanda).resample(firepanda.offsets.MonthEnd()).sum()
+    assert repr(mine) == repr(hourly(pd).resample(pd.offsets.MonthEnd()).sum())
 
 
 @needs_pandas
