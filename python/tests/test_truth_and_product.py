@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -177,13 +178,42 @@ def test_the_whole_frame_fold_lands_where_pandas_lands(firepanda: ModuleType, na
     assert mine == theirs
 
 
-@pytest.mark.parametrize("name", ["mean", "median", "std", "var", "sem", "skew"])
-def test_the_folds_that_cannot_be_built_out_of_column_answers_say_so(
-    firepanda: ModuleType, name: str
-) -> None:
-    """A mean of means is not a mean, so this refuses instead of being nearly right."""
-    with pytest.raises(NotImplementedError, match="axis=None"):
-        getattr(firepanda.DataFrame(MIXED), name)(axis=None)
+@needs_pandas
+@pytest.mark.parametrize("name", ["mean", "median", "std", "var", "sem", "skew", "kurt"])
+def test_the_folds_that_read_every_cell_are_pandas(firepanda: ModuleType, name: str) -> None:
+    """A mean of means is not a mean, so these put every cell in one column first."""
+    import pandas as pd
+
+    mine = getattr(firepanda.DataFrame(MIXED), name)(axis=None)
+    theirs = getattr(pd.DataFrame(MIXED), name)(axis=None)
+    assert mine == pytest.approx(float(theirs), rel=1e-12, nan_ok=True)
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda frame: frame.mean(axis=None, skipna=False),
+        lambda frame: frame.median(axis=None),
+        lambda frame: frame.std(axis=None, ddof=0),
+        lambda frame: frame.var(axis=None),
+        lambda frame: frame[["a", "c"]].sem(axis=None),
+    ],
+)
+def test_a_fold_over_gaps_and_flags_is_pandas(firepanda: ModuleType, call: Any) -> None:
+    """Gaps are skipped unless `skipna=False`, and a flag is a number."""
+    import pandas as pd
+
+    cells = {"a": [1.0, None, 4.0], "b": [4, 3, 2], "c": [True, False, True]}
+    mine, theirs = call(firepanda.DataFrame(cells)), call(pd.DataFrame(cells))
+    assert mine == pytest.approx(float(theirs), rel=1e-12, nan_ok=True)
+
+
+def test_a_fold_over_text_is_refused(firepanda: ModuleType) -> None:
+    frame = firepanda.DataFrame({"a": [1.0, 2.0], "s": ["x", "y"]})
+    with pytest.raises(TypeError):
+        frame.mean(axis=None)
+    assert frame.mean(axis=None, numeric_only=True) == 1.5
 
 
 @needs_pandas

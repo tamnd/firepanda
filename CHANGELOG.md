@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: mean, median and the spreads over a whole frame
+
+`mean`, `median`, `std`, `var`, `sem`, `skew` and `kurt` on a frame take `axis=None` as pandas does and answer one number read from every cell, gaps skipped unless `skipna=False` and flags counted as numbers. A column of text raises `TypeError`, unless `numeric_only=True` leaves it out.
+
 ### Added: rename of the row labels
 
 `DataFrame.rename(index=...)`, its positional form and the mapping or function form of `Series.rename` rename the row labels as pandas does, keeping a label the mapping has no key for. On a MultiIndex every level is renamed, or only the one `level` names, `errors="raise"` refuses a key that is not a label, and both axes can be renamed in one call. A date index renamed this way no longer keeps its old frequency.

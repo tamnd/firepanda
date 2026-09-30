@@ -3174,6 +3174,14 @@ have, so that is the message given back here rather than a refusal of this
 library's own."""
 
 
+_WHOLE_FRAME = frozenset({"mean", "median", "std", "var", "sem", "skew", "kurt"})
+"""The frame reductions whose `axis=None` form reads every cell at once.
+
+A mean of means is not a mean, so these cannot be folded out of their per
+column answers the way a total is, and `DataFrame._whole` puts every cell in
+one column instead."""
+
+
 def _refuses_a_fold(axis: Any, kind: str) -> None:
     """Refuses `axis=None` for the frame reductions that cannot answer it.
 
@@ -14357,7 +14365,8 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import Series
 
-        _refuses_a_fold(axis, "kurt")
+        if axis is None:
+            return self._whole("kurt", 0.0, skipna, numeric_only)
         across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         skipna = _flag("skipna", skipna)
         read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
@@ -14438,6 +14447,8 @@ class DataFrameMixin(_Carries):
         reduction that has no such form and `_refuses_a_fold` says which of the
         two refusals it gets.
         """
+        if axis is None and kind in _WHOLE_FRAME:
+            return self._whole(kind, param, skipna, numeric_only)
         _refuses_a_fold(axis, kind)
         across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         skipna = _flag("skipna", skipna)
@@ -14458,6 +14469,39 @@ class DataFrameMixin(_Carries):
             totals = [read[name].sum(skipna=skipna, min_count=min_count) for name in names]
             return Series(totals, index=names, dtype=object)
         return read._voided(read._per_column(kind, param), skipna, min_count)
+
+    def _whole(self, kind: str, param: float, skipna: bool, numeric_only: bool) -> Any:
+        """One reduction over every cell of the frame, which is `axis=None`.
+
+        pandas reads the frame as one block of numbers, so the cells are put in
+        one column and reduced there. A frame with a column that is not numbers
+        or flags gets the refusal the reduction down each column gives, or this
+        library's own when that answers.
+
+        Raises:
+            TypeError: For a column of text, in pandas' words.
+            NotImplementedError: For a column of another type.
+        """
+        from ._frame import Series
+
+        skipna = _flag("skipna", skipna)
+        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        numbers = ("int", "uint", "float", "bool")
+        if not all(_word(dtype).startswith(numbers) for dtype in read._inner.dtypes()):
+            if kind == "kurt":
+                read.kurt(axis=0, skipna=skipna)
+            else:
+                read._reduce(kind, param, 0, skipna, False, 0)
+            _refuses_a_fold(None, kind)
+        cells = [
+            None if _missing(value) else float(value)
+            for _, column in read.items()
+            for value in column.tolist()
+        ]
+        flat = Series(cells, dtype="float64")
+        if kind in ("std", "var", "sem"):
+            return getattr(flat, kind)(ddof=int(param), skipna=skipna)
+        return getattr(flat, kind)(skipna=skipna)
 
     def _voided(self, answer: Series, skipna: bool, min_count: int) -> Series:
         """The per column answers with NaN for each column a rule says has none.
