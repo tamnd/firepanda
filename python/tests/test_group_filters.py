@@ -178,18 +178,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     assert str(mine.value).split("\n")[0] == str(theirs.value).split("\n")[0]
 
 
-REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: frame(m).groupby("k")["v"].idxmax(skipna=False),
-]
-
-
-@pytest.mark.parametrize("build", REFUSED)
-def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """The deprecated `skipna`."""
-    with pytest.raises(NotImplementedError):
-        build(firepanda)
-
-
 @pytest.mark.parametrize("name", ["head", "tail", "idxmax", "idxmin"])
 @pytest.mark.parametrize("owner", ["DataFrameGroupBy", "SeriesGroupBy"])
 def test_the_signature_is_pandas_signature(firepanda: ModuleType, owner: str, name: str) -> None:

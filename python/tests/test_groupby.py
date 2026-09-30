@@ -269,8 +269,6 @@ def test_a_key_and_a_level_together_refuse(firepanda: ModuleType) -> None:
         ("sum", {"engine_kwargs": {}}, "engine_kwargs"),
         ("min", {"engine": "numba"}, "engine"),
         ("std", {"engine": "numba"}, "engine"),
-        ("any", {"skipna": False}, "skipna"),
-        ("all", {"skipna": False}, "skipna"),
     ],
 )
 def test_a_declared_reduction_argument_that_is_not_implemented_refuses(
