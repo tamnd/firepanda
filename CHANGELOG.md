@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: A list of reductions over a window of a frame
+
+`agg` with a list on a rolling, expanding or ewm window of a frame, or with a dict that holds a list, answers under two levels of column labels, the column and then the reduction, as pandas does. A window read along a column named by `on` is refused in pandas' words, and a mapping inside the dict raises `SpecificationError`.
+
 ### Added: A zone on one level of a MultiIndex
 
 `tz_localize` and `tz_convert` on a frame or a column take `level=` as pandas does, changing the zone of the dates on that level and leaving the other levels as they were. A level that is not there, or one that does not hold dates, is refused in pandas' words.

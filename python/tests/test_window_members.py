@@ -196,8 +196,6 @@ def test_mistakes_raise_as_pandas_raises(
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: frame(m).rolling(2).agg(["sum", "min"]),
-    lambda m: frame(m).rolling(2).agg({"a": ["sum", "max"]}),
     lambda m: frame(m).rolling(2).corr(),
     lambda m: frame(m).rolling(2).cov(frame(m), pairwise=True),
     lambda m: frame(m).rolling(2).first(numeric_only=True),
