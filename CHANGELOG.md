@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.quantile with method="table"
+
+`DataFrame.quantile(method="table")` sorts the rows by every column at once, missing values last, and answers the whole row at each quantile's place, where it used to be refused. `lower`, `higher` and `nearest` pick between two rows, `nearest` rounding half to even as numpy does, and `linear` and `midpoint` raise pandas' "Invalid interpolation" error. `axis=1`, `numeric_only`, a single quantile and an empty frame answer what pandas answers.
+
 ### Fixed: reset_index on columns that are a MultiIndex
 
 `DataFrame.reset_index` on a frame whose columns are a `MultiIndex` used to leave a flat mix of the label's name and tuples, and refused `col_level` and `col_fill`. It now names each new column by a tuple the way pandas does: the label's name at `col_level`, a level number or name, and `col_fill` at every other level, or the name at every level when `col_fill` is None. On columns of one level both arguments are passed over, as pandas passes them over.

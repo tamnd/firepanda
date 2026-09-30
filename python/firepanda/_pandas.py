@@ -15133,6 +15133,46 @@ class DataFrameMixin(_Carries):
         except Exception as error:
             raise translate(error) from None
 
+    def _quantile_table(
+        self, wanted: list[float], alone: bool, axis: Any, numeric_only: bool, interpolation: str
+    ) -> Any:
+        """`quantile(method="table")`, whole rows picked from the frame sorted by every column.
+
+        pandas sorts the rows by the first column, then by the next on a tie
+        and so on with missing values last, and takes the row at each
+        quantile's place, so every value in one answer comes from one row. A
+        place between two rows goes to the lower, the higher or the nearer of
+        them, the nearer rounding half to even as numpy does, and `linear` is
+        refused because it would blend two rows into one no row holds.
+        """
+        from ._frame import DataFrame, Index
+
+        if interpolation not in ("nearest", "lower", "higher"):
+            raise InvalidArgumentError(
+                f"Invalid interpolation: {interpolation}. Interpolation must be in"
+                " {'higher', 'lower', 'nearest'}"
+            )
+        data = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
+        labels = list(data.index if across else data.columns)
+        for at, label in enumerate(labels):
+            if label in labels[:at]:
+                raise InvalidArgumentError(f"The column label '{label}' is not unique.")
+        data = data.T if across else data
+        places = Index([float(p) for p in wanted])
+        count = len(data)
+        if not count:
+            blank = {f"c{n}": [math.nan] * len(wanted) for n in range(len(labels))}
+            made = DataFrame(blank, index=places).set_axis(data.columns, axis=1)
+        else:
+            marks = [f"c{n}" for n in range(len(labels))]
+            ranked = data.set_axis(marks, axis=1).reset_index(drop=True)
+            order = ranked.sort_values(marks, kind="stable", na_position="last").index.tolist()
+            spot = {"nearest": round, "lower": math.floor, "higher": math.ceil}[interpolation]
+            rows = [order[int(spot(p * (count - 1)))] for p in wanted]
+            made = data.iloc[rows].set_axis(places, axis=0)
+        return made.iloc[0].rename(wanted[0]) if alone else made
+
     def _quantile(
         self, q: Any, axis: Any, numeric_only: bool, interpolation: str, method: str
     ) -> Series:
@@ -15142,14 +15182,9 @@ class DataFrameMixin(_Carries):
             ("single", "table"),
             f"Invalid method: {method}. Method must be in {{'table', 'single'}}.",
         )
-        _held_at(
-            "method",
-            method,
-            "single",
-            "computing one quantile over the whole frame at once rather than"
-            " over each column is a different reduction",
-        )
         wanted, alone = _quantiles_asked(q)
+        if method == "table":
+            return self._quantile_table(wanted, alone, axis, numeric_only, interpolation)
         _interpolation_written(interpolation)
         if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
             # pandas takes a quantile across each row as one down the frame turned on its side.
