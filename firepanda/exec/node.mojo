@@ -202,6 +202,8 @@ from firepanda.kernel.temporal import (
     TRUNC_CODES,
     TemporalField,
     field_dtype,
+    instant_strings,
+    is_rendered_instant,
     temporal_as_timestamp,
     temporal_field,
     temporal_truncate,
@@ -4472,9 +4474,17 @@ struct Cast(Movable):
                 + " columns"
             )
         chunk.materialize(self.on, spread)
-        var made = cast_any(
-            chunk.columns[self.on], self.to, self.strict, self.nearest
-        )
+        var made: AnyArray
+        if self.to.kind == TypeKind.STRING and is_rendered_instant(
+            chunk.columns[self.on].type
+        ):
+            # By value rather than by layout, which for an instant would write
+            # the count it is stored as.
+            made = instant_strings(chunk.columns[self.on])
+        else:
+            made = cast_any(
+                chunk.columns[self.on], self.to, self.strict, self.nearest
+            )
         if self.appends:
             chunk.append(made^, True)
         else:
