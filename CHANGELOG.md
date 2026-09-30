@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: apply with raw and result_type, and transform with lists
+
+`DataFrame.apply` now takes `raw=True`, which hands the function numpy arrays of the frame's values, and `result_type` as `expand`, `broadcast` or `reduce`, and it accepts `engine="python"` and checks `by_row` with pandas' words. `transform` and `agg` across rows go through the transpose as in pandas, a column's `transform` takes a list or a dict of functions and answers a frame, and a frame's `transform` takes a dict of one function per column. A name such as `"sqrt"` that a column has no method for is looked up in numpy, as pandas does. A frame's `transform` or `agg` with a list of functions that answer columns is still refused, since pandas labels that answer with two levels of column names.
+
 ### Changed: Reductions take a positional axis with pandas' warning
 
 pandas 3 declares the reductions keyword-only but still binds positional arguments in order, with a `Pandas4Warning` saying pandas 4 will stop, so `df.sum(1)` sums across rows. firepanda now does the same for sum, prod, product, mean, max, min, median, var, std, sem, skew, kurt and all, and leaves `any` refusing them as pandas does.

@@ -80,6 +80,24 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: numbers(m).T,
     lambda m: whole(m).transpose(),
     lambda m: m.DataFrame({"f": [True, False]}, index=["p", "q"]).T,
+    lambda m: numbers(m).apply(lambda c: c.sum(), raw=True),
+    lambda m: numbers(m).apply(lambda r: r * 2, axis=1, raw=True),
+    lambda m: numbers(m).apply(lambda c, k: c.max() + k, raw=True, args=(1,)),
+    lambda m: numbers(m).apply(lambda r: [r["a"], r["b"] * 2], axis=1, result_type="expand"),
+    lambda m: numbers(m).apply(lambda r: r["a"], axis=1, result_type="expand"),
+    lambda m: numbers(m).apply(lambda r: [r["a"], 9], axis=1, result_type="broadcast"),
+    lambda m: numbers(m).apply(lambda r: r["a"], axis=1, result_type="broadcast"),
+    lambda m: numbers(m).apply(lambda c: c.sum(), result_type="broadcast"),
+    lambda m: numbers(m).apply(lambda r: r * 2, axis=1, result_type="reduce"),
+    lambda m: numbers(m).apply(lambda c: c * 2, engine="python", by_row=False),
+    lambda m: numbers(m).transform(lambda r: r * 2, axis=1),
+    lambda m: numbers(m).transform({"a": "abs"}),
+    lambda m: numbers(m).agg(["sum", "max"], axis=1),
+    lambda m: numbers(m).agg({"x": "sum", "z": "max"}, axis=1),
+    lambda m: numbers(m)["a"].transform(["sqrt", "abs"]),
+    lambda m: numbers(m)["a"].transform({"p": "abs", "q": lambda v: v + 1}),
+    lambda m: numbers(m)["a"].agg([lambda v: v * 2, "sqrt"]),
+    lambda m: numbers(m)["a"].agg("sqrt"),
 ]
 
 
@@ -97,6 +115,13 @@ MISTAKES: list[Callable[[Any], Any]] = [
     lambda m: numbers(m).agg("nope"),
     lambda m: numbers(m)["a"].agg("nope"),
     lambda m: numbers(m).apply(sum, axis=2),
+    lambda m: numbers(m).apply(sum, result_type="wide"),
+    lambda m: numbers(m).apply(sum, engine="fast"),
+    lambda m: numbers(m).apply(sum, by_row="rows"),
+    lambda m: numbers(m).apply(lambda r: [1, 2, 3], axis=1, result_type="broadcast"),
+    lambda m: numbers(m).transform([]),
+    lambda m: numbers(m).transform({"nope": "abs"}),
+    lambda m: numbers(m)["a"].agg(["sum", "sqrt"]),
 ]
 
 
