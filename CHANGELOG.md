@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Correlate instants, spans and categories
+
+`corr`, `corrwith`, `autocorr` and `Series.cov` now read an instant or a span as a count of its unit and a column of categories by its values, where they used to refuse. A frame reads NaT as missing, while a column read against a column counts a NaT with no zone as the smallest int64, as pandas hands numpy the raw count. `DataFrame.cov` refuses instants and spans with pandas' TypeError, and text categories refuse as text does.
+
 ### Added: Interpolate zoned instants and describe intervals
 
 `interpolate` now fills a column of zoned instants by drawing the line through its UTC instants and handing the answer back in the column's zone, with `limit`, `limit_direction` and `limit_area` counted as before. An interval column with no gaps passes through untouched, and one with gaps or a period column is refused with pandas' own sentence. `describe` counts an interval column the way it counts text, answering count, unique, top and freq.
