@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: sort_index with a direction per level
+
+`sort_index(ascending=[...])` sorts the labels of a MultiIndex on each level in the direction given for it, and with `level=` on those levels alone, leaving the rest in the order they came in, as pandas does. On labels of one level the list is read as pandas reads it: left as they are when every flag agrees with their order, and otherwise sorted upward unless the list is empty.
+
 ### Added: group nth with a slice
 
 `GroupBy.nth` takes a slice, or a list or tuple mixing slices and places, as in `g.nth[1:]`, `g.nth[-2:]` or `g.nth[0, 2:4]`, keeping the rows pandas' own mask keeps, a step counted from the start. A backwards step and a place of another type are refused in pandas' words.
