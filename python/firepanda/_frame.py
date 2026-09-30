@@ -2984,7 +2984,7 @@ class DataFrame(DataFrameMixin):
     ) -> DataFrame:
         """The fractional change between each row and the one that many rows before it."""
         try:
-            return self._pct_change(periods, fill_method, freq)
+            return self._pct_change(periods, fill_method, freq, **kwargs)
         except Exception as error:
             raise translate(error) from None
 
@@ -4039,7 +4039,7 @@ class Series(SeriesMixin):
     ) -> Series:
         """The fractional change between each row and the one that many rows before it."""
         try:
-            return self._pct_change(periods, fill_method, freq)
+            return self._pct_change(periods, fill_method, freq, **kwargs)
         except Exception as error:
             raise translate(error) from None
 
