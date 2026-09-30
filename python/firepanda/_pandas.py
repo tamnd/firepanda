@@ -5356,7 +5356,12 @@ def _broadcast_widened(frame: Any, series: Any, op: str) -> Any:
     inner = series._inner
     if op not in ARITHMETIC or not inner.dtype().startswith(("int", "uint")):
         return inner
-    if set(frame._inner.names()) <= {str(label) for label in series.index.to_list()}:
+    from ._multi import MultiIndex
+
+    labels = series.index.to_list()
+    if set(frame._inner.names()) <= {str(label) for label in labels}:
+        return inner
+    if isinstance(frame.columns, MultiIndex) and set(frame.columns.to_list()) <= set(labels):
         return inner
     return inner.cast("float64", True)
 

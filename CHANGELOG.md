@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: whole numbers kept when a Series covers every column of a MultiIndex
+
+A frame with MultiIndex columns times a Series of integers that has a label for every column now keeps int64, as pandas does. The check for whether the Series covers the columns compared tuples against the flattened column names, so it never matched and the answer was always widened to float64.
+
 ### Added: arithmetic on one level of a MultiIndex
 
 The arithmetic and comparison methods of a Series and a frame take `level=` when one side has a MultiIndex and the other flat labels, as pandas does: the flat side is read out once for every row by its label on that level, NaN where it has none or `fill_value` when one is given. Two MultiIndexes, or two frames, on one level are still refused.

@@ -53,6 +53,15 @@ BUILDS = {
     "eq": lambda lib: series(lib).eq(outer(lib), level="o"),
     "frame rows": lambda lib: frame(lib).mul(outer(lib), axis=0, level=0),
     "frame rows inner": lambda lib: frame(lib).add(inner(lib), axis=0, level="i"),
+    "whole numbers kept": lambda lib: (
+        wide(lib).astype("int64").mul(lib.Series([10, 100], index=["A", "B"]), axis=1, level=0)
+    ),
+    "every column": lambda lib: (
+        wide(lib).astype("int64") * lib.Series([10, 10, 100], index=wide(lib).columns)
+    ),
+    "a column short": lambda lib: (
+        wide(lib).astype("int64") * lib.Series([10, 10], index=wide(lib).columns[:2])
+    ),
     "frame columns": lambda lib: wide(lib).mul(
         lib.Series([10.0, 100.0], index=["A", "B"]), axis=1, level=0
     ),
