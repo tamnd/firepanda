@@ -139,9 +139,11 @@ def test_true_is_not_a_number_here_and_is_not_one_in_pandas_either(firepanda):
         holed(firepanda).fillna({"i": True})
 
 
-def test_a_number_is_not_a_truth_value(firepanda):
-    with pytest.raises(TypeError, match="for dtype 'bool'"):
-        firepanda.Series([True, None]).fillna(1)
+def test_a_number_fills_flags_held_as_objects(firepanda):
+    """pandas holds flags beside a gap as objects, so a number fills the gap as it is."""
+    filled = firepanda.Series([True, None]).fillna(1)
+    assert filled.tolist() == [True, 1]
+    assert str(filled.dtype) == "object"
 
 
 def test_text_does_not_go_into_a_column_of_numbers(firepanda):

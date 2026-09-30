@@ -34,6 +34,7 @@ import math
 import zoneinfo
 from typing import Any, cast
 
+from . import _firepanda
 from ._frame import Index, Series
 from ._frequency import _conforming, _hold, _offset_of
 from ._held_freq import HeldFreq
@@ -233,7 +234,7 @@ class DatetimeIndex(HeldFreq, Index):
             if not part.null_count() or str(answer.dtype) not in {*_SIGNED, "bool"}:
                 return answer
             # An index's inner column casts nothing, so a gap goes through a column.
-            column = Series(_held_values(part))._inner
+            column = _firepanda.Series(_held_values(part), None)
             return Index(Series._wrap(_gap_part(column)).tolist())
         except Exception as error:
             raise translate(error) from None

@@ -4841,10 +4841,29 @@ def _flags(inner: Any) -> Any:
             column of ones and zeros here, which is worth knowing because it is
             the obvious thing to write and every other library takes it.
     """
+    held = _flag_objects(inner)
+    if held is not None:
+        return held
     printed = inner.dtype()
     if printed != "bool":
         raise DTypeError(f"Boolean array expected for the condition, not {printed}")
     return inner
+
+
+def _flag_objects(inner: Any) -> Any:
+    """An object column of nothing but flags and gaps as a flag column with gaps, or None.
+
+    pandas holds flags beside a gap as objects, since numpy has no flag that can be
+    missing, and reads such a column as flags wherever it asks for them.
+    """
+    from ._frame import Series
+
+    if not _objects.is_object(inner):
+        return None
+    values = _values_of(inner)
+    if not all(isinstance(value, bool) or _levels_gap(value) for value in values):
+        return None
+    return _masked.plain(_masked.as_masked(Series._wrap(inner), "boolean"))._inner
 
 
 COMPARISON_ON_A_GAP = {"eq": False, "ne": True, "lt": False, "le": False, "gt": False, "ge": False}
@@ -8548,6 +8567,9 @@ def _converted(
         if not masked.startswith("Float"):
             return column
         column = _masked.plain(column)
+    flagged = _flag_objects(column._inner)
+    if flagged is not None and len(column) and not bool(column.isna().all()):
+        return _masked.as_masked(column, "boolean") if flags else column
     printed = _word(column.dtype)
     if printed == "string" and not _objects.is_object(column._inner):
         return _masked.as_masked(column, "string") if text else column
@@ -10139,6 +10161,28 @@ class DataFrameMixin(_Carries):
         return DataFrameMixin._across(data)
 
     @staticmethod
+    def _gapped_flags(built: Any, data: Any) -> Any:
+        """`built` with each list of flags beside a gap held as objects, as pandas holds it."""
+        from ._frame import DataFrame, Series
+
+        if not isinstance(data, dict):
+            return built
+        gapped = [
+            name
+            for name, values in data.items()
+            if isinstance(values, (list, tuple))
+            and built.column(name).dtype() == "bool"
+            and built.column(name).null_count()
+        ]
+        if not gapped:
+            return built
+        out = DataFrame._wrap(built)
+        for name in gapped:
+            held = _firepanda.Series(_objects.cells(list(data[name])), name)
+            out = out._assigned(name, Series._wrap(held))
+        return out._inner
+
+    @staticmethod
     def _across(data: Any) -> Any:
         """A mapping of column name to values handed to the extension.
 
@@ -10152,7 +10196,7 @@ class DataFrameMixin(_Carries):
             # A name that is not text is written into text, as `_names` explains.
             data = {_names.held(name): values for name, values in data.items()}
         try:
-            return _firepanda.DataFrame(data)
+            return DataFrameMixin._gapped_flags(_firepanda.DataFrame(data), data)
         except Exception as error:
             if data:
                 temporal = {}
@@ -15657,7 +15701,7 @@ class SeriesMixin(_Carries):
         source = data._inner if isinstance(data, SeriesMixin) else data
         label = _names.held(name)
         try:
-            return _firepanda.Series(source, label)
+            made = _firepanda.Series(source, label)
         except Exception:
             made = _temporal_series(source, label)
             if made is not None:
@@ -15682,6 +15726,11 @@ class SeriesMixin(_Carries):
                     ordinals = _period.period_ordinals(source, kind)
                     return _firepanda.Series(_objects.period_cells(ordinals, kind), label)
                 return _firepanda.Series(_objects.cells(source), label)
+        if isinstance(source, (list, tuple)) and made.dtype() == "bool" and made.null_count():
+            # numpy has no flag that can be missing, so pandas holds flags beside a gap as
+            # objects, and a masked flag column is only ever asked for by name.
+            return _firepanda.Series(_objects.cells(source), label)
+        return made
 
     def __getitem__(self, key: Any) -> Any:
         """Reads by label, except for a slice of numbers, which is by position.
