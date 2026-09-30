@@ -171,6 +171,31 @@ def _object_kind(inner: Any) -> Any:
     return ArrowDtype(arrow)
 
 
+def _word(dtype: Any) -> str:
+    """A type as the core spells it, which reads pandas' `str` for text as `string`.
+
+    Everything under the surface was written against the core's words, so a
+    public dtype is read back through this before it is compared with them.
+    """
+    text = str(dtype)
+    return "string" if text == "str" else text
+
+
+def _spelt(kind: Any) -> Any:
+    """A type as pandas names it, which is `str` for plain text and the type itself otherwise.
+
+    The core calls a column of text `string`, which is Arrow's word, and pandas 3
+    calls the same column `str`, the `StringDtype` with NaN for a gap. That dtype is
+    handed back rather than the bare word because it also equals `string`, so a
+    caller comparing against either spelling is still right.
+    """
+    if type(kind) is str and kind == "string":
+        from ._dtypes import StringDtype
+
+        return StringDtype(na_value=math.nan)
+    return kind
+
+
 def _sparse_side(column: Any, other: Any) -> bool:
     """Whether a series, or the series it meets, is sparse."""
     if isinstance(column, SeriesMixin) and _sparse.sparse_of(column) is not None:
@@ -747,7 +772,7 @@ def _temporal_operand(owner: Any, other: Any) -> Any:
         other = _elapsed(other)
     if not isinstance(other, (datetime.datetime, datetime.timedelta)):
         return other
-    if other is NaT and str(owner.dtype).startswith("timedelta64"):
+    if other is NaT and _word(owner.dtype).startswith("timedelta64"):
         # pandas reads `NaT` beside a span as a missing span, so the answer stays a span.
         return owner.where(Series([False] * len(owner), index=owner.index))
     return Series([other] * len(owner), index=owner.index, name=owner.name)
@@ -755,13 +780,13 @@ def _temporal_operand(owner: Any, other: Any) -> Any:
 
 def _is_spans(value: Any) -> bool:
     """Whether a value is a series of spans."""
-    return isinstance(value, SeriesMixin) and str(value.dtype).startswith("timedelta64")
+    return isinstance(value, SeriesMixin) and _word(value.dtype).startswith("timedelta64")
 
 
 def _is_numbers(value: Any) -> bool:
     """Whether a value is a number, or a series of numbers, that scales a span."""
     if isinstance(value, SeriesMixin):
-        return str(value.dtype).lower().startswith(("int", "uint", "float"))
+        return _word(value.dtype).lower().startswith(("int", "uint", "float"))
     return isinstance(value, numbers.Real) and type(value).__name__ not in ("bool", "bool_")
 
 
@@ -793,7 +818,7 @@ def _span_rounded(spans: Any, kind: str, freq: Any) -> Any:
     offset = _offset_of(freq)
     if not isinstance(offset, (Tick, Day)):
         raise InvalidArgumentError(f"{offset!r} is a non-fixed frequency")
-    unit = _unit_of(str(spans.dtype))
+    unit = _unit_of(_word(spans.dtype))
     step = _elapsed(offset)._nanos / _UNIT_NANOS[unit]
     if step <= 1:
         return spans.copy()
@@ -863,7 +888,7 @@ def _span_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
     if _is_spans(left) and _is_spans(right):
         if op not in ("truediv", "floordiv", "mod"):
             return None
-        unit = max(_unit_of(str(left.dtype)), _unit_of(str(right.dtype)), key=_SPAN_UNITS.index)
+        unit = max(_unit_of(_word(left.dtype)), _unit_of(_word(right.dtype)), key=_SPAN_UNITS.index)
         mine, theirs = _span_counts(left, unit), _span_counts(right, unit)
         if op == "truediv":
             return _nan_filled(mine / theirs)
@@ -882,7 +907,7 @@ def _span_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
         return None
     if op not in ("mul", "truediv", "floordiv"):
         return None
-    unit = _unit_of(str(spans.dtype))
+    unit = _unit_of(_word(spans.dtype))
     counts = _span_counts(spans, unit)
     got = counts * scale if op == "mul" else counts / scale
     return _counts_as_spans(_truncated(got), unit)
@@ -890,7 +915,7 @@ def _span_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
 
 def _is_text(value: Any) -> bool:
     """Whether a value is a series of text."""
-    return isinstance(value, SeriesMixin) and str(value.dtype) in ("string", "str")
+    return isinstance(value, SeriesMixin) and _word(value.dtype) in ("string", "str")
 
 
 def _text_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
@@ -935,7 +960,7 @@ def _text_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
 def _text_repeated(text: Any, counts: Any) -> Any:
     """Every row of text repeated by a whole number or by a column of them."""
     if isinstance(counts, SeriesMixin):
-        if not str(counts.dtype).lower().startswith(("int", "uint")):
+        if not _word(counts.dtype).lower().startswith(("int", "uint")):
             return None
         name = text.name if text.name == counts.name else None
         if not text.index.equals(counts.index):
@@ -1036,14 +1061,14 @@ def _numpy_values(array: Any, owner: str) -> tuple[list[Any], str | None]:
         )
     kind = array.dtype.kind
     if kind in "biuf":
-        return array.tolist(), str(array.dtype)
+        return array.tolist(), _word(array.dtype)
     if kind == "M":
-        unit = str(array.dtype)[len("datetime64[") : -1]
+        unit = _word(array.dtype)[len("datetime64[") : -1]
         if unit not in ("s", "ms", "us", "ns"):
             array = array.astype("datetime64[s]")
         counts = array.view("int64").tolist()
         floor = -(2**63)
-        return [None if count == floor else count for count in counts], str(array.dtype)
+        return [None if count == floor else count for count in counts], _word(array.dtype)
     if kind == "m":
         raise UnsupportedError(
             f"{owner}(array) of {array.dtype}, because a column of spans is not built from"
@@ -1981,7 +2006,7 @@ def _reindex_by_position(
     labels = _reindex_target(owner, target)
     own = owner.index.tolist()
     places = _reindex_positions(
-        own, labels.tolist(), method, limit, tolerance, str(owner.index.dtype)
+        own, labels.tolist(), method, limit, tolerance, _word(owner.index.dtype)
     )
     count = len(own)
     counted = owner.reset_index(drop=True)._inner
@@ -2000,9 +2025,9 @@ def _reindex_here(owner: Any, target: Any, method: str | None) -> bool:
     """Whether a reindex has to find its rows here rather than in the core."""
     if method is not None:
         return True
-    kinds = [str(owner.index.dtype)]
+    kinds = [_word(owner.index.dtype)]
     if isinstance(target, IndexMixin):
-        kinds.append(str(target.dtype))
+        kinds.append(_word(target.dtype))
     elif _list_like(target):
         first = next((one for one in _sequence(target) if not _missing(one)), None)
         if isinstance(first, (datetime.datetime, datetime.timedelta)):
@@ -6130,8 +6155,8 @@ class _Selection:
                 continue
             column = _gaps(owner, part) if name in fresh else owner[name]
             answer = _written(column, where, part, not labelled)
-            if full and name not in fresh and str(answer.dtype) != str(column.dtype):
-                raise _refused(str(column.dtype), _shown(part))
+            if full and name not in fresh and _word(answer.dtype) != _word(column.dtype):
+                raise _refused(_word(column.dtype), _shown(part))
             written.append((name, answer))
         owner._inner = _rebuilt(written)
 
@@ -6357,7 +6382,7 @@ def _interpolation_limits(
     """
     if method in ("spline", "polynomial") and kwargs.get("order") is None:
         raise InvalidArgumentError("You must specify the order of the spline or polynomial.")
-    if method == "time" and not str(index.dtype).startswith(("datetime64", "timedelta64")):
+    if method == "time" and not _word(index.dtype).startswith(("datetime64", "timedelta64")):
         raise InvalidArgumentError(
             "time-weighted interpolation only works on Series or DataFrames with a"
             " DatetimeIndex"
@@ -6405,7 +6430,7 @@ def _interpolation_points(column: Series, method: str, index: Any) -> Series:
     if method == "linear":
         every = column.isna() | column.notna()
         return every.astype("float64").cumsum() - 1.0
-    kind = str(index.dtype)
+    kind = _word(index.dtype)
     counted = kind.startswith(("datetime64", "timedelta64"))
     if kind in ("string", "str", "object"):
         raise TypeError(
@@ -6489,7 +6514,7 @@ def _lined_up_by_label(index: Any) -> bool:
     which the extension hands out as counts it then cannot find among them, and
     then the columns are worked on by position and given their labels back.
     """
-    return bool(index.is_unique) and not str(index.dtype).startswith(
+    return bool(index.is_unique) and not _word(index.dtype).startswith(
         ("datetime64", "timedelta64")
     )
 
@@ -6516,7 +6541,7 @@ def _interpolated(
         NotImplementedError: For a category, as pandas refuses it, and for a
             date, which is not written yet.
     """
-    kind = str(column.dtype)
+    kind = _word(column.dtype)
     gaps = int(column.isna().sum())
     if kind in _SIGNED or kind in _UNSIGNED or kind == "bool":
         if gaps == 0:
@@ -6524,7 +6549,7 @@ def _interpolated(
         if kind == "bool":
             raise TypeError(f"{owner} cannot interpolate with object dtype.")
         values = column.astype("float64")
-    elif kind == "string":
+    elif kind in ("string", "str"):
         raise TypeError("Cannot interpolate with str dtype")
     elif kind == "category":
         raise NotImplementedError("Categorical does not implement interpolate")
@@ -7009,7 +7034,7 @@ def _written_column(printed: str, value: Any, marks: Any) -> str:
     """
     from ._frame import Series
 
-    given = str(value.dtype)
+    given = _word(value.dtype)
     going = Series._wrap(value._inner.filter_rows(marks))
     gaps = bool(going.isna().any())
     if printed in _WHOLE_RANGES:
@@ -7112,14 +7137,14 @@ def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool 
     """
     from ._frame import DataFrame, Series
 
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     marks = _write_marks(column, where)
     kept = marks.unary("invert")
     if isinstance(value, SeriesMixin) and not by_position:
         lined = _lined_up(value, column)
         target = _written_column(printed, lined, marks)
         base = column if target == printed else column.astype(target)
-        if str(lined.dtype) != target:
+        if _word(lined.dtype) != target:
             # The rows that are not written may be gaps the labels left, which a
             # column of whole numbers cannot be cast with, and they are never read.
             lined = (lined.fillna(0) if target in _WHOLE_RANGES else lined).astype(target)
@@ -7132,7 +7157,7 @@ def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool 
             raise InvalidArgumentError("setting an array element with a sequence.")
         kind = value.dtype.kind if _is_numpy(value) else None
         if isinstance(value, SeriesMixin):
-            kind = _ARRAY_KINDS.get(str(value.dtype), "O")
+            kind = _ARRAY_KINDS.get(_word(value.dtype), "O")
         values = value.tolist() if _is_numpy(value) or kind else list(value)
         height = column._inner.length()
         if where[0] in ("mask", "every"):
@@ -7234,7 +7259,7 @@ def _category_values(column: Any) -> Any:
     levels = column.cat.categories
     kept = levels.tolist()
     values = [kept[code] if code >= 0 else None for code in column.cat.codes.tolist()]
-    kind = str(levels.dtype)
+    kind = _word(levels.dtype)
     if kind.startswith("interval"):
         # A gap among intervals makes their ends floats, which the values decide.
         return Series(values, index=column.index, name=column.name)
@@ -7255,7 +7280,7 @@ def _number_categories(column: Series, widen: bool = True) -> Series:
 
     values = _held_values(column._inner)
     gaps = any(_objects.is_gap(value) for value in values)
-    if widen and gaps and str(column.dtype).startswith(("int", "uint")):
+    if widen and gaps and _word(column.dtype).startswith(("int", "uint")):
         values = [value if _objects.is_gap(value) else float(value) for value in values]
     kept = sorted({value for value in values if not _objects.is_gap(value)})
     kind = _objects.interval_name_of(column._inner)
@@ -7278,7 +7303,7 @@ def _number_category_cast(column: Series, wanted: Any) -> bool:
     """Whether a cast makes or reads number categories, which the column does on its own."""
     if _written_category(column._inner):
         return True
-    return str(wanted) == "category" and _written_categories(str(column.dtype))
+    return str(wanted) == "category" and _written_categories(_word(column.dtype))
 
 
 def _category_of(printed: str, wanted: Any) -> None:
@@ -7312,7 +7337,7 @@ def _lined_up(value: Any, column: Any) -> Any:
     try:
         return value.reindex(column.index)
     except DTypeError:
-        kind = str(value.dtype)
+        kind = _word(value.dtype)
         kind = "float64" if kind in _WHOLE_RANGES or kind == "bool" else kind
         return Series([None] * len(column), index=column.index, dtype=kind)
 
@@ -7325,7 +7350,7 @@ def _enlarged(column: Any, label: Any, value: Any) -> Any:
     """
     from ._frame import Series
 
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     if _missing(value) or value is None:
         kind = "float64" if printed in _WHOLE_RANGES or printed == "bool" else printed
         row = Series([None], index=[label], dtype=kind, name=column.name)
@@ -7428,7 +7453,7 @@ def _gaps(owner: Any, value: Any) -> Any:
     from ._frame import Series
 
     if isinstance(value, SeriesMixin):
-        printed = str(value.dtype)
+        printed = _word(value.dtype)
         sample: Any = (
             "" if printed in ("str", "string") else 0.0 if printed in _ARRAY_KINDS else True
         )
@@ -7467,7 +7492,7 @@ def _row_added(owner: Any, label: Any, given: dict[str, Any], fresh: list[str], 
     for name in every:
         part = given.get(name)
         column = _gaps(owner, part) if name in fresh else owner[name]
-        printed = str(column.dtype)
+        printed = _word(column.dtype)
         if some and printed in _WHOLE_RANGES:
             column, printed = column.astype("float64"), "float64"
         if some and printed == "bool":
@@ -7512,7 +7537,7 @@ def _piped(owner: Any, func: Any, args: tuple[Any, ...], kwargs: dict[str, Any])
 
 def _same_values(left: Any, right: Any) -> bool:
     """Whether two columns hold the same type and values, a missing row equal to a missing row."""
-    if len(left) != len(right) or str(left.dtype) != str(right.dtype):
+    if len(left) != len(right) or _word(left.dtype) != _word(right.dtype):
         return False
     if len(left) == 0:
         return True
@@ -7552,7 +7577,7 @@ def _time_rows(owner: Any, axis: Any, pick: Callable[[Any], list[int]]) -> Any:
     kind = type(owner).__name__
     number = _axis_number(axis, kind, 0, (0,) if kind == "Series" else (0, 1))
     labels = owner.index if number == 0 else Index(_shown_names(owner))
-    if not str(labels.dtype).startswith("datetime64"):
+    if not _word(labels.dtype).startswith("datetime64"):
         raise TypeError("Index must be DatetimeIndex")
     return owner.take(pick(DatetimeIndex._wrap(labels._inner)), axis=number)
 
@@ -7637,7 +7662,7 @@ def _asof(owner: Any, where: Any, subset: Any) -> Any:
         found = owner.index.asof_locs(targets, [not gap for gap in nulls])
     except TypeError:
         raise TypeError(
-            f"Invalid comparison between dtype={str(targets.dtype).replace('string', 'str')}"
+            f"Invalid comparison between dtype={_word(targets.dtype).replace('string', 'str')}"
             f" and {type(labels[0]).__name__}"
         ) from None
     if not column and not several:
@@ -7646,7 +7671,7 @@ def _asof(owner: Any, where: Any, subset: Any) -> Any:
         return owner.take(found).set_axis(targets)
 
     def picked(values: Any) -> list[Any]:
-        widened = str(values.dtype).startswith(("int", "uint"))
+        widened = _word(values.dtype).startswith(("int", "uint"))
         held = values.tolist()
         return [None if at == -1 else float(held[at]) if widened else held[at] for at in found]
 
@@ -7663,7 +7688,7 @@ holds a missing number as a float and a missing text as NaN in its text type."""
 def _python_values(column: Any) -> list[Any]:
     """A column as Python values, with a missing value spelled the way pandas spells it."""
     values = column.tolist()
-    if str(column.dtype).startswith(_NAN_WHEN_MISSING):
+    if _word(column.dtype).startswith(_NAN_WHEN_MISSING):
         return [float("nan") if value is None else value for value in values]
     return values
 
@@ -7804,7 +7829,7 @@ def _combined(this: Series, that: Series, kind: str) -> Series:
     `kind` is the type pandas gives the answer.
     """
     answer = this.reset_index(drop=True).fillna(that.reset_index(drop=True))
-    if str(answer.dtype) != kind and not (kind.startswith("int") and answer.isna().any()):
+    if _word(answer.dtype) != kind and not (kind.startswith("int") and answer.isna().any()):
         answer = answer.astype(kind)
     return answer
 
@@ -7818,14 +7843,14 @@ def _all_missing(rows: int, beside: Series) -> Series:
     """
     from ._frame import Series
 
-    if str(beside.dtype) in ("string", "str"):
+    if _word(beside.dtype) in ("string", "str"):
         return Series([None] * rows, dtype=beside.dtype)
     return Series([math.nan] * rows, dtype="float64")
 
 
 def _cast_to(column: Series, kind: str) -> Series:
     """The column in `kind`, left alone when it is already that type."""
-    return column if str(column.dtype) == kind else column.astype(kind)
+    return column if _word(column.dtype) == kind else column.astype(kind)
 
 
 def _combine_cast(answer: Any, kind: str) -> Any:
@@ -7838,7 +7863,7 @@ def _combine_cast(answer: Any, kind: str) -> Any:
         AttributeError: When `func` answered something that is not a column,
             with the words pandas raises for it.
     """
-    found = str(answer.dtype)
+    found = _word(answer.dtype)
     if found.startswith(("int", "uint")) and bool(answer.isna().any()):
         return answer.astype("float64")
     if (
@@ -7917,7 +7942,7 @@ def _converted(
         if not masked.startswith("Float"):
             return column
         column = _masked.plain(column)
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     if printed.startswith(("int", "uint")):
         return _masked.as_masked(column, _masked.masked_for(printed)) if whole else column
     if printed == "bool":
@@ -7952,7 +7977,7 @@ def _arrow_converted(
 
     if _arrowtyped.arrow_type_of(column) is not None:
         return column
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     if printed.lower().startswith(("int", "uint")):
         moved = whole
     elif printed.lower().startswith("float"):
@@ -8034,7 +8059,7 @@ def _asfreq(owner: Any, freq: Any, method: Any, normalize: Any, fill_value: Any)
     from ._datetime import DatetimeIndex
 
     labels = owner.index
-    kind = str(labels.dtype)
+    kind = _word(labels.dtype)
     if not len(labels):
         if not kind.startswith("datetime64"):
             raise DTypeError(f"{type(labels)}")
@@ -8104,7 +8129,7 @@ def _zoned_axis(
     labels = owner.index
     if level is not None and level not in (0, labels.name):
         raise ValueError(f"The level {level} is not valid")
-    if not str(labels.dtype).startswith("datetime64"):
+    if not _word(labels.dtype).startswith("datetime64"):
         if len(labels):
             raise TypeError("index is not a valid DatetimeIndex or PeriodIndex")
         # An empty axis of any kind becomes an empty one of instants. The label
@@ -8615,7 +8640,7 @@ def _label_texts(index: Any) -> list[str]:
     its missing marker, `NaT` for instants and spans and `nan` for the rest,
     and that text can itself hold what is looked for.
     """
-    printed = str(index.dtype)
+    printed = _word(index.dtype)
     word = "NaT" if printed.startswith(("datetime", "timedelta")) else "nan"
     return [word if label is None or label != label else str(label) for label in index.tolist()]
 
@@ -8775,7 +8800,7 @@ def _numeric_kind(printed: str) -> str | None:
 def _replacement_type(value: Any) -> str:
     """The type pandas reads a `case_when` replacement as, the way it infers one."""
     if hasattr(value, "dtype"):
-        printed = str(value.dtype)
+        printed = _word(value.dtype)
     elif isinstance(value, bool):
         printed = "bool"
     elif isinstance(value, int):
@@ -8834,7 +8859,7 @@ def _mapper(func: Any) -> Callable[[Any], Any]:
 
             raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
         table = dict(zip(labels, func.tolist(), strict=True))
-        return _hinted(table.get, str(func.dtype))
+        return _hinted(table.get, _word(func.dtype))
     if isinstance(func, dict) and hasattr(type(func), "__missing__"):
         return func.__getitem__
     if hasattr(func, "get") and hasattr(func, "keys"):
@@ -8885,7 +8910,7 @@ def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
         raise InvalidArgumentError(
             f"na_action must either be 'ignore' or None, {na_action} was passed"
         )
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     if printed == "category":
         raise NotImplementedError(
             "map on a category column maps the categories and keeps the column a category,"
@@ -9117,7 +9142,7 @@ def _column_to_numpy(column: Any, dtype: Any, na_value: Any) -> Any:
     value, which is what pandas gives for text and categories.
     """
     np = _numpy()
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     if (printed == "object" or printed.startswith("period[")) and dtype is None:
         values = column.tolist()
         if na_value is not NO_DEFAULT:
@@ -9190,7 +9215,7 @@ def _values_array(column: Any) -> Any:
     """
     from ._array import FirepandaArray
 
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     if printed == "category":
         from ._categorical import Categorical
 
@@ -9771,7 +9796,7 @@ class DataFrameMixin(_Carries):
 
         names = self._inner.names()
         kinds = [
-            _object_kind(self._inner.column(name)) or kind
+            _spelt(_object_kind(self._inner.column(name)) or kind)
             for name, kind in zip(names, self._inner.dtypes(), strict=True)
         ]
         made = _labelled(names, kinds)
@@ -10375,7 +10400,7 @@ class DataFrameMixin(_Carries):
 
         labels = self.index.tolist()
         names = _shown_names(self)
-        types = {str(self[name].dtype) for name in names}
+        types = {_word(self[name].dtype) for name in names}
         columns = [self[name].tolist() for name in names]
         rows = list(zip(*columns, strict=True)) if columns else [() for _ in labels]
         if names and _row_type(sorted(types)) == "object":
@@ -10549,7 +10574,7 @@ class DataFrameMixin(_Carries):
             cells[key, head] = value
         rows = sorted(set(keys))
         names = _pivot_names(sorted(set(heads)), "pivot")
-        printed = str(self[values].dtype)
+        printed = _word(self[values].dtype)
         return _pivoted(rows, names, cells, printed, row_name=row_name)
 
     def pivot_table(
@@ -10626,7 +10651,7 @@ class DataFrameMixin(_Carries):
             rows, order = sorted(rows), sorted(order)
         names = _pivot_names(order, "pivot_table")
         cells: dict[Any, Any] = {}
-        printed = str(self[measured].dtype)
+        printed = _word(self[measured].dtype)
         for name in names:
             chosen = self[self[across] == name]
             if callable(aggfunc):
@@ -10635,7 +10660,7 @@ class DataFrameMixin(_Carries):
                 answer = chosen.groupby(down, sort=sort, dropna=dropna)[measured].agg(
                     aggfunc, **kwargs
                 )
-            printed = str(answer.dtype)
+            printed = _word(answer.dtype)
             for key, value in zip(answer.index.tolist(), answer.tolist(), strict=True):
                 cells[key, name] = value
         if dropna:
@@ -11503,7 +11528,7 @@ class DataFrameMixin(_Carries):
             self._inner = self.mask(key, value)._inner
             return
         marks = isinstance(key, list) and bool(key) and all(isinstance(k, bool) for k in key)
-        if marks or (isinstance(key, Series) and str(key.dtype) == "bool"):
+        if marks or (isinstance(key, Series) and _word(key.dtype) == "bool"):
             self._inner = self._marked_rows(key, value)._inner
             return
         if callable(value) and not isinstance(value, (Series, DataFrame)):
@@ -13359,7 +13384,7 @@ class DataFrameMixin(_Carries):
             elif name not in _shown_names(other):
                 columns[name] = this[name].reset_index(drop=True)
             else:
-                kind = _combined_type(str(frame[name].dtype), str(other[name].dtype))
+                kind = _combined_type(_word(frame[name].dtype), _word(other[name].dtype))
                 columns[name] = _combined(this[name], that[name], kind)
         index = frame.index if labels is None else labels
         answer = DataFrame(columns) if columns else this.reset_index(drop=True)
@@ -13402,13 +13427,13 @@ class DataFrameMixin(_Carries):
             if fill_value is not None:
                 left, right = left.fillna(fill_value), right.fillna(fill_value)
             if name not in mine:
-                kind = str(right.dtype)
+                kind = _word(right.dtype)
                 if not bool(left.isna().any()):
                     with contextlib.suppress(Exception):
                         left = left.astype(kind)
             else:
                 try:
-                    kind = _combined_type(str(left.dtype), str(right.dtype))
+                    kind = _combined_type(_word(left.dtype), _word(right.dtype))
                 except NotImplementedError:
                     kind = ""
                 if kind:
@@ -14586,7 +14611,7 @@ class DataFrameMixin(_Carries):
             name: wanted
             for name, wanted in asked.items()
             if _decided_categories(wanted)
-            or _counts_target(str(self[name].dtype), wanted)
+            or _counts_target(_word(self[name].dtype), wanted)
             or _number_category_cast(self[name], wanted)
             or _masked.masked_name(wanted) is not None
             or _masked.masked_of(self[name]) is not None
@@ -14606,13 +14631,13 @@ class DataFrameMixin(_Carries):
         units = {
             name: unit
             for name, wanted in asked.items()
-            if (unit := _unit_change(str(self[name].dtype), wanted))
+            if (unit := _unit_change(_word(self[name].dtype), wanted))
         }
         names = [name for name in asked if name not in units]
         dtypes = [_named_dtype(asked[name]) for name in names]
         for name, wanted in zip(names, dtypes, strict=True):
-            _category_of(str(self[name].dtype), wanted)
-            refused = _temporal_cast_refused(str(self[name].dtype), wanted)
+            _category_of(_word(self[name].dtype), wanted)
+            refused = _temporal_cast_refused(_word(self[name].dtype), wanted)
             if refused and strictly:
                 raise TypeError(refused)
             if refused:
@@ -14761,7 +14786,7 @@ class SeriesMixin(_Carries):
             try:
                 if arrow:
                     self._inner = made.astype(dtype)._inner
-                elif wanted == "category" and _written_categories(str(made.dtype)):
+                elif wanted == "category" and _written_categories(_word(made.dtype)):
                     self._inner = _number_categories(made)._inner
                 else:
                     self._inner = self._inner.cast(wanted, True)
@@ -14949,7 +14974,7 @@ class SeriesMixin(_Carries):
         column of one, because that is what pandas does and a caller who wanted
         the other shape has `to_frame().dtypes`.
         """
-        return self._inner.dtype()
+        return self.dtype
 
     def memory_usage(self, index: Any = True, deep: Any = False) -> int:
         """How many bytes the column weighs, one number rather than a column.
@@ -15161,7 +15186,7 @@ class SeriesMixin(_Carries):
         level_names = [index.names[n] for n in kept]
         row_name = level_names[0] if len(kept) == 1 else level_names
         return _pivoted(
-            order, names, cells, str(self.dtype), row_name=row_name, fill_value=fill_value
+            order, names, cells, _word(self.dtype), row_name=row_name, fill_value=fill_value
         )
 
     @classmethod
@@ -15374,7 +15399,7 @@ class SeriesMixin(_Carries):
         values = [old if _missing(value) else value for value, old in pairs]
         try:
             answer = type(self)(values, index=self.index, name=self.name)
-            if str(answer.dtype) != str(self.dtype):
+            if _word(answer.dtype) != _word(self.dtype):
                 kept = answer.astype(self.dtype)
                 if kept.tolist() != answer.tolist():
                     raise TypeError
@@ -15538,7 +15563,7 @@ class SeriesMixin(_Carries):
         if not keep_equal and not all(differs):
             sides = [side.where(Series(differs, index=self.index)) for side in sides]
             for place, side in enumerate(sides):
-                printed = str(side.dtype)
+                printed = _word(side.dtype)
                 if printed == "bool":
                     raise NotImplementedError(
                         "compare: pandas answers true and false values with a gap as"
@@ -15587,7 +15612,7 @@ class SeriesMixin(_Carries):
         kind = self._inner.dtype()
         if kind == "string":
             kind = _object_kind(self._inner) or kind
-        return CategoricalDtype._of(self) if kind == "category" else kind
+        return CategoricalDtype._of(self) if kind == "category" else _spelt(kind)
 
     def groupby(
         self,
@@ -17122,9 +17147,13 @@ class SeriesMixin(_Carries):
         if missing:
             labels.append(None)
             counts.append(missing)
-        kind = str(self.cat.categories.dtype) if self.cat._written() else "string"
+        kind = _word(self.cat.categories.dtype) if self.cat._written() else "string"
         index = Series(labels, dtype=kind)
-        index = _number_categories(index, False) if kind != "string" else index.astype("category")
+        index = (
+            _number_categories(index, False)
+            if kind not in ("string", "str")
+            else index.astype("category")
+        )
         index = index.cat.set_categories(categories, ordered=self.cat.ordered)
         table = DataFrame({"label": index, "count": Series(counts, dtype="int64")})
         return table.set_index("label")["count"]
@@ -17317,12 +17346,12 @@ class SeriesMixin(_Carries):
         _kurt_refusal(self.dtype)
         if not skipna and self.hasnans:
             return math.nan
-        if str(self.dtype) in _FLOATING:
+        if _word(self.dtype) in _FLOATING:
             answer = _kurtosis_in_numpy_order(self)
             if answer is not None:
                 return answer
         values = self.dropna()
-        if str(values.dtype) in _SIGNED and len(values):
+        if _word(values.dtype) in _SIGNED and len(values):
             # A kurtosis does not move when a constant is added, so whole numbers
             # are measured from their least as whole numbers, which is exact, and
             # only the difference is cast. Near two to the sixty two the cast
@@ -17382,7 +17411,7 @@ class SeriesMixin(_Carries):
 
         values = [value for value in self.tolist() if not _objects.is_gap(value)]
         counts: dict[Any, int] = {}
-        if str(self.dtype) == "category":
+        if _word(self.dtype) == "category":
             counts = dict.fromkeys(self.cat.categories.tolist(), 0)
         for value in values:
             counts[value] = counts.get(value, 0) + 1
@@ -17475,7 +17504,7 @@ class SeriesMixin(_Carries):
         labels = _combining_labels(column.index, other.index)
         this = column if labels is None else column.reindex(labels)
         that = other if labels is None else other.reindex(labels)
-        kind = _combined_type(str(column.dtype), str(other.dtype))
+        kind = _combined_type(_word(column.dtype), _word(other.dtype))
         index = column.index if labels is None else labels
         answer = _combined(this, that, kind).rename(column.name)
         return _with_row_labels(answer, index.tolist()).rename_axis(index.name)
@@ -17705,25 +17734,25 @@ class SeriesMixin(_Carries):
             return _category_values(self)._astype(dtype, copy, errors)
         if _decided_categories(dtype):
             return _as_decided(self._astype("category", copy, errors), dtype)
-        unit = _unit_change(str(self.dtype), dtype)
+        unit = _unit_change(_word(self.dtype), dtype)
         if unit:
             return self.dt.as_unit(unit)
-        target = _counts_target(str(self.dtype), dtype)
+        target = _counts_target(_word(self.dtype), dtype)
         if target:
             unit = _unit_of(target)
             if target.startswith("timedelta"):
                 return to_timedelta(self, unit=unit).dt.as_unit(unit)
-            if str(self.dtype).startswith("float"):
+            if _word(self.dtype).startswith("float"):
                 return _counts_as_instants(_truncated(self.astype("float64")), unit)
             return to_datetime(self, unit=unit).dt.as_unit(unit)
         wanted = _named_dtype(dtype)
         texts = _temporal_texts(self) if wanted == "string" else None
         if texts is not None:
             return Series(texts, dtype="str", index=self.index, name=self.name)
-        if wanted == "category" and _written_categories(str(self.dtype)):
+        if wanted == "category" and _written_categories(_word(self.dtype)):
             return _number_categories(self)
-        _category_of(str(self.dtype), wanted)
-        refused = _temporal_cast_refused(str(self.dtype), wanted)
+        _category_of(_word(self.dtype), wanted)
+        refused = _temporal_cast_refused(_word(self.dtype), wanted)
         if refused:
             if strictly:
                 raise TypeError(refused)
@@ -17999,7 +18028,7 @@ class DatetimeMixin:
         from ._frame import Series
 
         series = self._series
-        if not str(series.dtype).startswith("datetime64"):
+        if not _word(series.dtype).startswith("datetime64"):
             raise AttributeError("'TimedeltaProperties' object has no attribute 'to_period'")
         found = DatetimeIndex(series.tolist()).to_period(freq)
         return Series(found, index=series.index, name=series.name)
@@ -18020,7 +18049,7 @@ class DatetimeMixin:
 
     def _spans(self, name: str) -> list[tuple[int, ...] | None]:
         """The components of every span, refusing a column of instants as pandas does."""
-        if not str(self._series.dtype).startswith("timedelta"):
+        if not _word(self._series.dtype).startswith("timedelta"):
             raise AttributeError(f"'DatetimeProperties' object has no attribute '{name}'")
         return _span_parts(_held_values(self._series._inner))
 
@@ -18064,7 +18093,7 @@ class DatetimeMixin:
         from ._frame import Series
 
         column = self._series
-        if not str(column.dtype).startswith("datetime64"):
+        if not _word(column.dtype).startswith("datetime64"):
             raise AttributeError("'TimedeltaProperties' object has no attribute 'time'")
         times = [
             None if _objects.is_gap(value) else (value.timetz() if zoned else value.time())
@@ -18092,7 +18121,7 @@ class DatetimeMixin:
         pandas answers a numpy array of objects, and a list is the convention
         document 41 set for what firepanda answers position by position.
         """
-        if not str(self._series.dtype).startswith("timedelta64"):
+        if not _word(self._series.dtype).startswith("timedelta64"):
             raise AttributeError("'DatetimeProperties' object has no attribute 'to_pytimedelta'")
         return [NaT if one is NaT else one.to_pytimedelta() for one in self._series.tolist()]
 
@@ -18105,7 +18134,7 @@ class DatetimeMixin:
         from ._frame import Series
 
         column = self._series
-        if not str(column.dtype).startswith("datetime64"):
+        if not _word(column.dtype).startswith("datetime64"):
             raise AttributeError("'TimedeltaProperties' object has no attribute 'to_pydatetime'")
         moments = [
             None if _objects.is_gap(value) else value.to_pydatetime()
@@ -18125,7 +18154,7 @@ class DatetimeMixin:
         asked for only when one of the two is not the default, since asking is a
         boundary crossing and the default changes no answer either way.
         """
-        if str(self._series.dtype).startswith("timedelta64"):
+        if _word(self._series.dtype).startswith("timedelta64"):
             return _span_rounded(self._series, kind, freq)
         if not isinstance(freq, str):
             raise NotImplementedError(
@@ -18995,12 +19024,12 @@ def _filled(answer: Any, before: Any, fill: Any) -> Any:
         return column.fillna(value).astype(kind)
 
     if isinstance(answer, SeriesMixin):
-        return one(answer, str(before.dtype), fill)
+        return one(answer, _word(before.dtype), fill)
     if not isinstance(fill, dict):
         fill = dict.fromkeys(_shown_names(answer), fill)
     return answer.assign(
         **{
-            str(name): one(answer[name], str(before[name].dtype), fill.get(name))
+            str(name): one(answer[name], _word(before[name].dtype), fill.get(name))
             for name in _shown_names(answer)
         }
     )
@@ -19054,7 +19083,7 @@ def _as_categories(codes: Any, categories: list[str], ordered: bool) -> Any:
     """A column of codes as the category column they point into."""
     from ._frame import Series
 
-    if str(codes.dtype) == "category":
+    if _word(codes.dtype) == "category":
         return codes
     if categories and not all(isinstance(label, str) for label in categories):
         # Number categories are written cells, so the column is built from its values.
@@ -19063,7 +19092,7 @@ def _as_categories(codes: Any, categories: list[str], ordered: bool) -> Any:
         values = [categories[int(c)] if c == c and c is not None else None for c in codes.tolist()]
         intervals = isinstance(categories[0], _interval.Interval)
         levels = _interval.IntervalIndex(categories) if intervals else Index(categories)
-        kind = str(levels.dtype)
+        kind = _word(levels.dtype)
         plain = Series(values, dtype=kind, index=codes.index, name=codes.name)
         built = _number_categories(plain, False)
         return built.cat.set_categories(categories, ordered=ordered)
@@ -19166,7 +19195,7 @@ class _ReadingMixin:
         """A column's values as floats with None for a gap, or pandas' refusal."""
         from ._frame import DataFrame
 
-        dtype = str(column.dtype)
+        dtype = _word(column.dtype)
         if not dtype.startswith(("int", "uint", "float", "bool")):
             if isinstance(self._data, DataFrame):
                 shown = "str" if dtype in ("str", "string") else dtype
@@ -20195,7 +20224,7 @@ def _time_window(rolling: Any, axis: Any) -> None:
     """
     import numpy
 
-    kind = str(axis.dtype)
+    kind = _word(axis.dtype)
     where = rolling._on if rolling._on is not None else "index"
     if not kind.startswith(("datetime64", "timedelta64")) and len(axis):
         raise InvalidArgumentError("window must be an integer 0 or greater")
@@ -22894,7 +22923,7 @@ class GroupByMixin[Answer]:
         frame = DataFrame._wrap(source)
         names = [name for name in _shown_names(frame) if name not in self._by]
         for name in names:
-            dtype = str(frame[name].dtype)
+            dtype = _word(frame[name].dtype)
             if dtype.startswith(("datetime64", "timedelta64")):
                 raise TypeError(f"{dtype.split('[')[0]} type does not support operation 'kurt'")
             if not _text_numeric(dtype):
@@ -23577,10 +23606,10 @@ class GroupByMixin[Answer]:
                 gap = within - within.iloc[source].reset_index(drop=True)
                 gone = gone | (gap > limit)
             taken = plain[name].iloc[source].reset_index(drop=True)
-            if str(taken.dtype) in _SIGNED | _UNSIGNED and bool(gone.any()):
+            if _word(taken.dtype) in _SIGNED | _UNSIGNED and bool(gone.any()):
                 # pandas holds a missing integer as NaN, so the column widens.
                 taken = taken.astype("float64")
-            if str(taken.dtype) in _FLOATING:
+            if _word(taken.dtype) in _FLOATING:
                 # pandas marks a float it could not fill with NaN, not a null.
                 taken = taken.mask(gone, float("nan"))
             else:
@@ -24425,7 +24454,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         _refuse("include", include, "only the columns of numbers are described for now")
         _refuse("exclude", exclude, "only the columns of numbers are described for now")
         columns = self._value_columns()
-        numeric = [name for name in columns if _text_numeric(str(self._frame[name].dtype))]
+        numeric = [name for name in columns if _text_numeric(_word(self._frame[name].dtype))]
         return self._levelled(
             {name: self._column_group(name).describe(percentiles) for name in numeric or columns}
         )
@@ -24600,7 +24629,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
                 " firepanda frame names each column once, with text"
             )
         joined = concat(answers, ignore_index=True)
-        kind = str(joined.dtype)
+        kind = _word(joined.dtype)
         values = joined.tolist()
         width = len(labels)
         return self._on_groups(
@@ -24780,7 +24809,7 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         """
         from ._frame import DataFrame
 
-        if not _text_numeric(str(self._frame[self._column].dtype)):
+        if not _text_numeric(_word(self._frame[self._column].dtype)):
             raise DataError("No numeric types to aggregate")
         source = self._frame._inner.select([*self._by, self._column])
         named = (("first", "open"), ("max", "high"), ("min", "low"), ("last", "close"))
@@ -25163,7 +25192,7 @@ def _labels_resolution(values: Any) -> int:
     """
     if values.dt.tz is not None:
         values = values.dt.tz_localize(None)
-    unit = str(values.dtype)[len("datetime64[") :].split(",")[0].rstrip("]")
+    unit = _word(values.dtype)[len("datetime64[") :].split(",")[0].rstrip("]")
     counts = values.dropna().astype("int64")
     for rank, nanos in _RESOLUTIONS:
         if nanos < _UNIT_NANOS[unit]:
@@ -25195,7 +25224,7 @@ def _temporal_key(values: Any, key: Any) -> Any:
     if isinstance(key, bool):
         return None
     try:
-        if str(values.dtype).startswith("timedelta64"):
+        if _word(values.dtype).startswith("timedelta64"):
             if isinstance(key, (str, datetime.timedelta)):
                 return Timedelta(key)
             return None
@@ -25222,7 +25251,7 @@ def _temporal_bounds(values: Any, key: Any, sliced: bool) -> tuple[Any, Any, boo
     """
     from ._scalars import Timedelta
 
-    if isinstance(key, str) and str(values.dtype).startswith("datetime64"):
+    if isinstance(key, str) and _word(values.dtype).startswith("datetime64"):
         period = _text_period(key)
         if period is not None and (sliced or period[2] > _labels_resolution(values)):
             zone = values.dt.tz
@@ -25300,7 +25329,7 @@ class IndexStrings:
             return answer if name.startswith("extract") else MultiIndex.from_frame(answer)
         if not isinstance(answer, Series):
             return answer
-        if str(answer.dtype) in ("bool", "boolean"):
+        if _word(answer.dtype) in ("bool", "boolean"):
             return answer.to_numpy()
         return Index(answer.rename(self._index.name))
 
@@ -25320,7 +25349,7 @@ def _temporal_insert(index: Any, loc: int, item: Any) -> Any:
     """
     import datetime
 
-    spans = str(index.dtype).startswith("timedelta64")
+    spans = _word(index.dtype).startswith("timedelta64")
     kinds: tuple[type, ...] = (datetime.timedelta,) if spans else (datetime.datetime,)
     if not (item is None or item is NaT or isinstance(item, (str, *kinds))):
         # pandas falls back to an index of objects, which firepanda does not hold.
@@ -25404,7 +25433,7 @@ class IndexMixin:
                     from ._datetime import DatetimeIndex
                     from ._timedelta import TimedeltaIndex
 
-                    spans = str(data.dtype).startswith("timedelta64")
+                    spans = _word(data.dtype).startswith("timedelta64")
                     self.__class__ = TimedeltaIndex if spans else DatetimeIndex
                     _keep_freq(data, self)
             elif isinstance(data, SeriesMixin):
@@ -25788,7 +25817,7 @@ class IndexMixin:
         from ._categorical import CategoricalDtype
 
         kind = self._inner.dtype()
-        return CategoricalDtype._of(self.to_series()) if kind == "category" else kind
+        return CategoricalDtype._of(self.to_series()) if kind == "category" else _spelt(kind)
 
     @classmethod
     def _class_of(cls, inner: Any) -> Any:
@@ -25818,7 +25847,7 @@ class IndexMixin:
     @property
     def _temporal(self) -> bool:
         """Whether the labels are instants or spans."""
-        return str(self.dtype).startswith(("datetime64", "timedelta64"))
+        return _word(self.dtype).startswith(("datetime64", "timedelta64"))
 
     def _temporal_loc(self, key: Any) -> Any:
         """`get_loc` on labels of instants or spans, which the core cannot compare with.
@@ -25871,7 +25900,7 @@ class IndexMixin:
         _refuse("method", method, "filling a missing label from a neighbour is not written")
         _refuse("limit", limit, "there is no filling for it to limit")
         _refuse("tolerance", tolerance, "there is no filling for it to bound")
-        if str(self.dtype).startswith(("datetime64", "timedelta64")):
+        if _word(self.dtype).startswith(("datetime64", "timedelta64")):
             if not self.is_unique:
                 from .errors import InvalidIndexError
 
@@ -25911,7 +25940,7 @@ class IndexMixin:
 
         if isinstance(target, IndexMixin):
             wanted = target.tolist()
-        elif str(self.dtype).startswith(("datetime64", "timedelta64")):
+        elif _word(self.dtype).startswith(("datetime64", "timedelta64")):
             wanted = [self._as_label(value) for value in target]
         else:
             wanted = list(Index(target))
@@ -25980,8 +26009,8 @@ class IndexMixin:
 
         if not len(self) or not len(other):
             return self._joined_empty(other, how, sort)
-        if str(self.dtype) != str(other.dtype):
-            common = _join_type(str(self.dtype), str(other.dtype))
+        if _word(self.dtype) != _word(other.dtype):
+            common = _join_type(_word(self.dtype), _word(other.dtype))
             return self.astype(common)._joined(other.astype(common), how, how == "outer")
         mine, theirs = self.tolist(), other.tolist()
         if increasing(mine) and increasing(theirs) and (unique(mine) or unique(theirs)):
@@ -26036,7 +26065,7 @@ class IndexMixin:
         """A join where a label repeats, which pairs every row of each label."""
         from ._index_join import merged
 
-        numeric = str(self.dtype).lower().startswith(("int", "uint", "float", "bool"))
+        numeric = _word(self.dtype).lower().startswith(("int", "uint", "float", "bool"))
         lidx, ridx = merged(self.tolist(), other.tolist(), how, sort, numeric)
         name = other.name if how == "right" else self.name
         return self._picked(other, lidx, ridx).rename(name), lidx, ridx
@@ -26078,7 +26107,7 @@ class IndexMixin:
         `take` and `append` answer a plain `Index`, which holds the same labels
         but not the members an index of instants has.
         """
-        if type(index) is type(self) or not str(self.dtype).startswith(
+        if type(index) is type(self) or not _word(self.dtype).startswith(
             ("datetime64", "timedelta64")
         ):
             return index
@@ -26172,7 +26201,7 @@ class IndexMixin:
 
             raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
         if at == 0:
-            return None if str(self.dtype).startswith(("datetime64", "timedelta64")) else math.nan
+            return None if _word(self.dtype).startswith(("datetime64", "timedelta64")) else math.nan
         return values[at - 1]
 
     def _as_label(self, value: Any) -> Any:
@@ -26180,9 +26209,9 @@ class IndexMixin:
         if isinstance(value, str):
             from ._scalars import Timedelta, Timestamp
 
-            if str(self.dtype).startswith("datetime64"):
+            if _word(self.dtype).startswith("datetime64"):
                 return Timestamp(value)
-            if str(self.dtype).startswith("timedelta64"):
+            if _word(self.dtype).startswith("timedelta64"):
                 return Timedelta(value)
         return value
 
@@ -27880,7 +27909,7 @@ def _melt(
             f"melt: the answer would have two columns called {var_name!r} or {value_name!r},"
             " and a firepanda frame's column names are distinct"
         )
-    flags = [str(frame[name].dtype) == "bool" for name in values]
+    flags = [_word(frame[name].dtype) == "bool" for name in values]
     if any(flags) and not all(flags):
         # pandas stacks the columns as arrays, where a flag beside a number is
         # an object column, rather than as frames, where it is a number.
@@ -28271,7 +28300,7 @@ def _unit_change(printed: str, dtype: Any) -> str:
 
 def _concat_index_units(frames: list[DataFrame]) -> list[DataFrame]:
     """The frames with instant or span labels moved to the finest unit among them."""
-    kinds = {str(frame.index.dtype) for frame in frames}
+    kinds = {_word(frame.index.dtype) for frame in frames}
     wanted = _temporal_unit_type(kinds) if len(kinds) > 1 else None
     if wanted is None:
         return frames
@@ -28298,7 +28327,7 @@ def _concat_rows(
         names = sorted(names)
     wanted: dict[str, str] = {}
     for name in names:
-        types = [str(frame[name].dtype) for frame in frames if name in _shown_names(frame)]
+        types = [_word(frame[name].dtype) for frame in frames if name in _shown_names(frame)]
         gap = any(name not in _shown_names(frame) for frame in frames)
         if set(types) == {"category"} and not _concat_categories(frames, name):
             types = ["string"]
@@ -28307,7 +28336,7 @@ def _concat_rows(
         frames = _concat_index_units(frames)
     parts = []
     for frame in frames:
-        mine = [n for n in names if n in _shown_names(frame) and str(frame[n].dtype) != wanted[n]]
+        mine = [n for n in names if n in _shown_names(frame) and _word(frame[n].dtype) != wanted[n]]
         # An object column is written in Python rather than cast underneath.
         written = {n: _objectified(frame[n]) for n in mine if wanted[n] == "object"}
         if written:
@@ -28327,7 +28356,7 @@ def _concat_rows(
                 raise translate(error) from None
         parts.append(inner)
     if not ignore_index:
-        kinds = {str(frame.index.dtype) for frame in frames}
+        kinds = {_word(frame.index.dtype) for frame in frames}
         if len(kinds) > 1:
             raise UnsupportedError(
                 f"concat of row labels as {' and '.join(sorted(kinds))} gives pandas' object"
@@ -28395,7 +28424,7 @@ def _asof_dtype(dtype: Any) -> str:
 def _asof_keys(frame: Any, key: Any, labels: bool) -> tuple[list[Any], str]:
     """The values of one side's asof key and its type, instants and spans as counts."""
     values = frame.index if labels else frame[key]
-    dtype = str(values.dtype)
+    dtype = _word(values.dtype)
     raw = values.tolist()
     if dtype.startswith(("datetime64", "timedelta64")):
         raw = [None if v is None else v.value for v in raw]
@@ -28571,7 +28600,8 @@ def merge_asof(
     if len(left_by) != len(right_by):
         raise MergeError("left_by and right_by must be the same length")
     pairs = [
-        (str(left[a].dtype), str(right[b].dtype)) for a, b in zip(left_by, right_by, strict=True)
+        (_word(left[a].dtype), _word(right[b].dtype))
+        for a, b in zip(left_by, right_by, strict=True)
     ]
     for position, (a, b) in enumerate([*pairs, (ltype, rtype)]):
         if a != b:
@@ -29387,7 +29417,7 @@ def crosstab(
     lined = _crosstab_lined_up(pieces, labelled)
     printed = None
     if values is not None:
-        printed = str(values.dtype) if hasattr(values, "dtype") else str(Series(lined[2]).dtype)
+        printed = _word(values.dtype) if hasattr(values, "dtype") else str(Series(lined[2]).dtype)
     measured = lined[2] if values is not None else [0] * len(lined[0])
     cells: dict[tuple[Any, Any], list[Any]] = {}
     for key, head, value in zip(lined[0], lined[1], measured, strict=True):
@@ -29483,7 +29513,7 @@ def from_dummies(data: Any, sep: Any = None, default_category: Any = None) -> An
             raise ValueError(f"Dummy DataFrame contains NA value in column: '{name}'")
     flags: dict[str, list[bool]] = {}
     for name in _shown_names(data):
-        printed = str(data[name].dtype)
+        printed = _word(data[name].dtype)
         found = data[name].tolist()
         if printed != "bool" and (
             _numeric_kind(printed) is None or any(value not in (0, 1) for value in found)
@@ -29630,7 +29660,7 @@ def _cut_values(x: Any, caller: str) -> tuple[Any, Any]:
     numpy = _numpy()
     column = x if isinstance(x, Series) else None
     if isinstance(x, Series | Index):
-        printed = str(x.dtype)
+        printed = _word(x.dtype)
         if printed.startswith(("datetime", "timedelta")):
             raise NotImplementedError(
                 f"{caller}: bins of instants or spans are not supported yet, because the"
@@ -29751,7 +29781,7 @@ def _binned(
         answer: Any = codes
         if column is not None:
             found = [math.nan if gap else int(code) for code, gap in zip(codes, gaps, strict=True)]
-            answer = Series(found, dtype=str(codes.dtype), index=column.index, name=column.name)
+            answer = Series(found, dtype=_word(codes.dtype), index=column.index, name=column.name)
         return answer, edges
     if labels is None:
         if column is None:
@@ -29760,7 +29790,7 @@ def _binned(
                 " which firepanda does not have, so pass a Series"
             )
         bins = _bin_labels(edges, kw.get("precision", 3), right, kw.get("include_lowest"))
-        kind = str(bins.dtype)
+        kind = _word(bins.dtype)
         cells = _objects.interval_cells(_interval.interval_pairs(bins.tolist(), kind), kind)
         found = [None if gap else cells[place - 1] for place, gap in zip(places, gaps, strict=True)]
         text = Series(found, dtype="str", index=column.index, name=column.name)
@@ -29811,7 +29841,7 @@ def _cut_by_intervals(values: Any, column: Any, bins: Any) -> Any:
             " firepanda does not have, so pass a Series"
         )
     numpy = _numpy()
-    kind, closed = str(bins.dtype), bins.closed
+    kind, closed = _word(bins.dtype), bins.closed
     cells = _objects.interval_cells(_interval.interval_pairs(bins.tolist(), kind), kind)
     lefts = numpy.asarray(bins.left.tolist(), dtype="float64")
     rights = numpy.asarray(bins.right.tolist(), dtype="float64")
@@ -29982,7 +30012,7 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
         answer = read(arg, True)
         return NaT if answer is None else answer
     column = arg if isinstance(arg, Series) else None
-    if column is not None and str(column.dtype).startswith("timedelta"):
+    if column is not None and _word(column.dtype).startswith("timedelta"):
         return column
     values = column.tolist() if column is not None else list(arg)
     spans = [read(value, False) for value in values]
@@ -29991,7 +30021,7 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     counts = any(isinstance(value, numbers.Real) for value in present)
     if all(span is None for span in spans):
         # Nothing read as a span, which pandas holds in seconds unless the column was floats.
-        target = "ns" if column is not None and str(column.dtype).startswith("float") else "s"
+        target = "ns" if column is not None and _word(column.dtype).startswith("float") else "s"
     elif any(isinstance(value, float) for value in present):
         target = "ns"
     else:
@@ -30059,7 +30089,7 @@ def to_numeric(
     numpy = _numpy()
     coerce = errors == "coerce"
     if isinstance(arg, Series | Index):
-        printed = str(arg.dtype)
+        printed = _word(arg.dtype)
         if printed.startswith(("datetime", "timedelta")):
             values = arg.astype("int64").to_numpy()
         elif _numeric_kind(printed) is not None or printed == "bool":
@@ -30073,10 +30103,10 @@ def to_numeric(
                 "to_numeric: pandas answers uint64 for whole numbers past int64, and a"
                 " firepanda column cannot be built from them yet"
             )
-        column = Series(values.tolist(), dtype=str(values.dtype))
+        column = Series(values.tolist(), dtype=_word(values.dtype))
         if isinstance(arg, Index):
             return Index(column, name=arg.name)
-        return Series(column.tolist(), dtype=str(values.dtype), index=arg.index, name=arg.name)
+        return Series(column.tolist(), dtype=_word(values.dtype), index=arg.index, name=arg.name)
     if isinstance(arg, list | tuple) or hasattr(arg, "__array__"):
         values = numpy.asarray(arg)
         if values.dtype.kind not in "biuf":
@@ -30196,7 +30226,7 @@ def _instants(
 
     if isinstance(arg, SeriesMixin):
         column = arg
-        if str(arg.dtype) == "float64" and len(arg) and bool(arg.isna().all()):
+        if _word(arg.dtype) == "float64" and len(arg) and bool(arg.isna().all()):
             # A column of nothing but gaps is floats here and objects in pandas,
             # and pandas reads it as instants at seconds, as it does a list.
             column = Series([None] * len(arg), index=arg.index, name=arg.name, dtype="str")
@@ -30388,7 +30418,7 @@ def _temporal_texts(column: Any) -> list[Any] | None:
     The core casts them to the count of units since the epoch, and pandas
     writes them the way it prints them, which is what `to_csv` writes too.
     """
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     if printed.startswith("datetime"):
         return _instant_texts(column.tolist(), None)
     if printed.startswith("timedelta"):
@@ -30439,7 +30469,7 @@ def _csv_cells(column: Any, float_format: Any, date_format: Any, **kw: Any) -> l
     so it leaves them bare the way pandas does.
     """
     numpy = _numpy()
-    printed = str(column.dtype)
+    printed = _word(column.dtype)
     values = column.tolist()
     na_rep, decimal, bare = kw["na_rep"], kw["decimal"], kw["bare"]
     if printed.startswith("datetime"):
@@ -30795,10 +30825,10 @@ def _text_values(
     as `na_rep` for text and as `<NA>` for integers and booleans, which is how
     pandas writes a gap in its nullable integer and boolean columns.
     """
-    dtype = str(column.dtype)
+    dtype = _word(column.dtype)
     if _sparse.sparse_of(column) is not None:
         column = _sparse.plain(column)
-        dtype = str(column.dtype)
+        dtype = _word(column.dtype)
     if _masked.masked_of(column):
         # Each value prints as the lower case column prints it, and a gap as `<NA>`.
         lower = _masked.plain(column)
@@ -30823,13 +30853,13 @@ def _text_values(
         # Each row prints as its category does in a column of the categories' own type.
         levels = column.cat.categories.to_series()
         codes = column.cat.codes.tolist()
-        if str(levels.dtype).startswith("interval[int") and -1 in codes:
+        if _word(levels.dtype).startswith("interval[int") and -1 in codes:
             # pandas takes the rows out of the intervals, and a gap makes their ends floats.
             from ._frame import Series
 
             levels = Series([*levels.tolist(), None]).iloc[:-1]
         shown = _text_values(levels, formatter, float_format, na_rep, decimal, leading)
-        word = "NaT" if str(levels.dtype).startswith("period[") and na_rep == "NaN" else na_rep
+        word = "NaT" if _word(levels.dtype).startswith("period[") and na_rep == "NaN" else na_rep
         gap = f" {word}" if leading else word
         return [shown[code] if code >= 0 else gap for code in codes]
     values = _held_values(column._inner)
@@ -30925,7 +30955,7 @@ def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> l
         values = index.get_level_values(number)
         texts = _text_labels(values, named, widest)
         above = 1 if named else 0
-        if str(values.dtype) in ("string", "str"):
+        if _word(values.dtype) in ("string", "str"):
             # pandas prints a gap in a level of text as nan, and NaN everywhere else.
             for row, code in enumerate(codes[number]):
                 if code < 0:
@@ -30953,7 +30983,7 @@ def _text_labels(index: Any, named: bool, widest: int | None, between: int = 1) 
     header = []
     if named:
         header.append("" if index.name is None else _text_plain(index.name))
-    dtype = str(index.dtype)
+    dtype = _word(index.dtype)
     if dtype in ("string", "str", "object"):
         texts = [" NaN" if _missing(v) else " " + _text_plain(v) for v in index.tolist()]
     else:
@@ -30976,7 +31006,7 @@ def _text_heads(frame: Any, labels: list[Any]) -> list[str]:
         index = frame.columns
     except NotImplementedError:
         return [_text_head(label) for label in labels]
-    if str(index.dtype).startswith(("datetime", "timedelta")):
+    if _word(index.dtype).startswith(("datetime", "timedelta")):
         return [text.strip() for text in _text_labels(index, False, None)]
     return [_text_head(label) for label in labels]
 
@@ -31237,7 +31267,11 @@ def _text_table(
         written = _text_heads(frame, labels)
         heads = [
             [
-                (" " if picked(p, c) is None and _text_numeric(str(frame.iloc[:, p].dtype)) else "")
+                (
+                    " "
+                    if picked(p, c) is None and _text_numeric(_word(frame.iloc[:, p].dtype))
+                    else ""
+                )
                 + written[p]
             ]
             for p, c in enumerate(labels)
@@ -31338,7 +31372,7 @@ def _text_categories(column: Any) -> str:
     kind = "str"
     texts = [repr(c) for c in categories]
     if _written_category(column._inner):
-        kind = str(levels.dtype)
+        kind = _word(levels.dtype)
         texts = [text.strip() for text in _text_values(levels.to_series(), leading=False)]
     if len(texts) > 8:
         texts = [*texts[:4], "...", *texts[-4:]]
@@ -31383,11 +31417,11 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
     if length is True or (length == "truncate" and dots is not None):
         parts.append(f"Length: {rows}")
     if kw["dtype"]:
-        dtype = str(column.dtype)
+        dtype = _word(column.dtype)
         dtype = "interval" if dtype.startswith("interval[") else dtype
         parts.append(f"dtype: {'str' if dtype == 'string' else dtype}")
     footer = ", ".join(parts)
-    if str(column.dtype) == "category":
+    if _word(column.dtype) == "category":
         footer += ("\n" if footer else "") + _text_categories(column)
     if not rows:
         return f"Series([], {footer})"
@@ -31454,7 +31488,7 @@ def _index_text(index: Any) -> str:
         step = index[1] - index[0] if height > 1 else 1
         name = "" if index.name is None else f", name={_pprinted(index.name)}"
         return f"RangeIndex(start={start}, stop={start + height * step}, step={step}{name})"
-    dtype = str(index.dtype)
+    dtype = _word(index.dtype)
     if dtype.startswith("datetime64"):
         klass = "DatetimeIndex"
     elif dtype.startswith("timedelta64"):

@@ -206,7 +206,7 @@ def test_a_question_about_a_missing_row_answers_false(firepanda: ModuleType) -> 
 def test_a_question_answers_a_column_of_bools(firepanda: ModuleType) -> None:
     """The shape of the answer, which is what picks the door these three come through."""
     assert str(made(firepanda, ["a"]).str.isupper().dtype) == "bool"
-    assert str(made(firepanda, ["a"]).str.upper().dtype) == "string"
+    assert str(made(firepanda, ["a"]).str.upper().dtype) == "str"
 
 
 def test_the_accessor_refuses_a_column_that_is_not_text(firepanda: ModuleType) -> None:
