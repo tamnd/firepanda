@@ -195,7 +195,9 @@ def plain(column: Series) -> Series:
         # Flags beside a gap are objects in pandas, so the gaps go back after.
         filled = [False if value is None else value for value in values]
         answer = Series(filled, index=column.index, name=column.name)
-        answer = _gaps_at(answer, Series([value is not None for value in values]))
+        answer = _gaps_at(
+            answer, Series([value is not None for value in values], index=column.index)
+        )
     else:
         answer = Series(values, index=column.index, name=column.name)
     if str(answer._inner.dtype()) != lower:

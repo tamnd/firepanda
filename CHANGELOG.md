@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.mode along the rows
+
+`DataFrame.mode(axis=1)` answers the most common values of each row, as pandas does, where it used to refuse. On the way, a column of flags that can be missing now picks rows with `[]` and `loc`, a missing flag counting as false, `Series.mode` works on the `string` type, a transposed frame of text keeps `str` rather than turning into `string`, and `fillna` on such flags keeps working under labels that are not a range.
+
 ### Added: Series.compare with align_axis=0
 
 `Series.compare(align_axis=0)` answers a series with the two sides taking turns down the rows, labelled by the label and the side, as pandas does. An empty answer keeps its two levels, since setting no labels of several levels on a column now keeps them as text.
