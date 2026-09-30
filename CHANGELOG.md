@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Index classes show pandas' signatures
+
+`inspect.signature(Index)` used to answer `(data, *args, **kwargs)`, because `inspect` reads `__new__` before `__init__` and the index's `__new__` takes anything so it can answer a list of tuples with a `MultiIndex`. Each index class that keeps that `__new__` now shows the parameters of its own `__init__`, so `Index` reads `(data, dtype, copy, name, tupleize_cols)` as pandas' does, and a class with its own `__new__` is read as before.
+
 ### Added: Cross sections across columns of several levels
 
 `xs(key, axis=1, level=...)` now crosses the column labels the way it crosses row labels, keeping the columns that hold the key on the given levels and dropping those levels unless `drop_level` is False. Flat columns refuse with pandas' TypeError. `df.loc[rows, key]` with a label of the first column level now names the columns under it, as `df[key]` does, and both keep the names of the levels that stay.

@@ -29042,6 +29042,16 @@ class IndexMixin:
             return _interval.IntervalIndex(data, name=name)
         return object.__new__(cls)
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # `inspect` reads `__new__` before `__init__`, and the `__new__` above takes
+        # anything, so a class that keeps it shows the parameters of its own `__init__`.
+        super().__init_subclass__(**kwargs)
+        if cls.__new__ is IndexMixin.__new__:
+            shown = list(inspect.signature(cls.__init__).parameters.values())[1:]
+            cls.__signature__ = inspect.Signature(shown)
+        else:
+            cls.__signature__ = None
+
     if TYPE_CHECKING:
 
         @property
