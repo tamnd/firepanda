@@ -221,8 +221,6 @@ def test_a_quantile_over_flags_raises_what_numpy_raises(
 @pytest.mark.parametrize(
     ("call", "arguments", "expected"),
     [
-        ("mean", {"numeric_only": True}, "numeric_only"),
-        ("std", {"numeric_only": True}, "numeric_only"),
         ("quantile", {"interpolation": "hazen"}, "interpolation"),
     ],
 )

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: numeric_only on series reductions and group by folds
+
+A series reduction and `Series.kurt` take `numeric_only=True` and read the column anyway, refusing only a column of Python objects with pandas' "Series.X does not allow numeric_only=True with non-numeric dtypes." A group by's `cumsum`, `cumprod`, `cummax`, `cummin`, `idxmax`, `idxmin` and `quantile` with a list of quantiles or a picking rule keep only the number and flag columns under `numeric_only=True`, and a group by over one column folds it whatever the flag says, as in pandas.
+
 ### Fixed: the join refusal no longer names POSITIONAL, which runs
 
 The `join-form` refusal, and the README table generated from it, said POSITIONAL joins were not run. They are, and so are ASOF joins. The refusal now names only what it refuses: NEAREST, and the mark, single, right_semi and right_anti types JOIN BY can name. The module notes in `firepanda/sql/plan.mojo` also said a recursive CTE was refused by name. It lowers to the fixed point it asks for, and only a `WITH` inside one or a union by name as its body is refused.
