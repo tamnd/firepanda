@@ -13,7 +13,7 @@ below were measured against pandas 3.0.
 A list of intervals of numbers that share `closed` is an interval column,
 held as written cells the way document 102 describes, and `IntervalDtype` and
 `IntervalIndex` are pandas' names for its type and for an index of intervals,
-and `interval_range` builds one of evenly spaced numbers. Intervals of instants
+and `interval_range` builds one of evenly spaced breaks. Intervals of instants
 or spans are held the same way, their type naming the unit, and the zone of
 the instants when they have one.
 """
@@ -767,6 +767,33 @@ def _moment(value: Any) -> bool:
     return isinstance(value, kinds) or type(value).__name__ in ("datetime64", "timedelta64")
 
 
+def _moment_range(
+    start: Any, end: Any, periods: Any, freq: Any, name: Any, closed: str
+) -> IntervalIndex:
+    """Intervals between instants or spans evenly spaced, as `date_range` spaces them.
+
+    Raises:
+        InvalidArgumentError: For other than three of the four, with pandas' words.
+        TypeError: For ends of two kinds.
+    """
+    from ._date_range import date_range
+    from ._timedelta import timedelta_range
+
+    if sum(value is not None for value in (start, end, periods, freq)) != 3:
+        raise InvalidArgumentError(
+            "Of the four parameters: start, end, periods, and freq, exactly three must be specified"
+        )
+    ends = [_plain(value) for value in (start, end) if value is not None]
+    spans = [isinstance(value, datetime.timedelta) for value in ends]
+    if not all(_moment(value) for value in ends) or len(set(spans)) > 1:
+        raise TypeError("start, end, freq need to be type compatible")
+    if periods is not None:
+        periods += 1
+    build = timedelta_range if spans[0] else date_range
+    breaks = build(start=start, end=end, periods=periods, freq=freq)
+    return IntervalIndex.from_breaks(breaks, closed=closed, name=name)
+
+
 def interval_range(
     start: Any = None,
     end: Any = None,
@@ -775,27 +802,27 @@ def interval_range(
     name: Any = None,
     closed: str = "right",
 ) -> IntervalIndex:
-    """Evenly spaced intervals of numbers, which is `pandas.interval_range`.
+    """Evenly spaced intervals of numbers, instants or spans, which is `pandas.interval_range`.
 
     Three of `start`, `end`, `periods` and `freq` decide the fourth, and `freq`
-    is one when only two of the others are given. The breaks are whole numbers
-    when every one of the three given is, as pandas makes them.
+    is one when only two of the others are given, or a day for instants and
+    spans, whose breaks `date_range` and `timedelta_range` make. The breaks are
+    whole numbers when every one of the three given is, as pandas makes them.
 
     Raises:
         InvalidArgumentError: For other than three of the four, and an end that
             is not a number, with pandas' words.
-        TypeError: For a count that is not whole and a `freq` that is not a number.
-        NotImplementedError: For instants and spans, which range over dates.
+        TypeError: For a count that is not whole, a `freq` that is not a number,
+            and ends of two kinds.
     """
     import numpy
 
     endpoint = start if start is not None else end
-    if _moment(start) or _moment(end):
-        raise NotImplementedError(
-            "interval_range: intervals of instants or spans are not supported yet"
-        )
+    moment = _moment(start) or _moment(end)
     if freq is None and None in (periods, start, end):
-        freq = 1
+        freq = "D" if moment else 1
+    if moment:
+        return _moment_range(start, end, periods, freq, name, closed)
     if sum(value is not None for value in (start, end, periods, freq)) != 3:
         raise InvalidArgumentError(
             "Of the four parameters: start, end, periods, and freq, exactly three must be specified"

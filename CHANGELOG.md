@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: interval_range of instants and spans
+
+`interval_range` now builds intervals between instants or spans as pandas does, with breaks from `date_range` or `timedelta_range`, a day as the step when none is given, the zone kept, and ends of two kinds refused with pandas' words.
+
 ### Added: cut and qcut of instants and spans
 
 `cut` and `qcut` now bin a column of instants or spans the way pandas does, by counts of their unit, and answer intervals of instants or spans that keep the unit and the zone, with `retbins` handing back a `DatetimeIndex` or `TimedeltaIndex`. `IntervalIndex.from_breaks` and interval columns take instants and spans as ends, a list, an array or an index binned by `cut` or `qcut` answers a `Categorical` as pandas does, and a category label longer than `display.max_colwidth` is cut with dots under a column.
