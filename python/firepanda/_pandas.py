@@ -1320,6 +1320,9 @@ def _core_labels(labels: Any, source: Any = None) -> Any:
     if _is_object_index(source):
         if _is_object_index(labels):
             labels = labels.tolist()
+        masked = _objects.masked_name_of(source._inner)
+        if masked is not None:
+            return [_masked_label(source, label) for label in labels]
         spelling = _objects.spelling_of(source._inner) or ""
         return _objects.cells(list(labels), spelling)
     if isinstance(labels, IndexMixin):
@@ -1361,10 +1364,20 @@ def _label_values(owner: Any) -> list[Any]:
     return _values_of(owner._inner.labels())
 
 
+def _masked_label(index: Any, label: Any) -> Any:
+    """A label as the cell a masked index holds it as, or itself when it cannot be one."""
+    if _levels_gap(label):
+        return None
+    cells = index._cells(label)
+    return cells[0] if cells else label
+
+
 def _is_object_index(index: Any) -> bool:
-    """Whether an index is one of objects, its labels cells that are not periods."""
+    """Whether an index is one of objects or of a masked type, its labels cells that are kept."""
     inner = getattr(index, "_inner", None)
-    return isinstance(index, IndexMixin) and inner is not None and _object_kind(inner) == "object"
+    if not isinstance(index, IndexMixin) or inner is None:
+        return False
+    return _object_kind(inner) == "object" or _objects.masked_name_of(inner) is not None
 
 
 def _labels_of(index: Any) -> tuple[list[Any], Any]:
@@ -26759,19 +26772,9 @@ class IndexMixin:
         The labels are read the way a series with the same `dtype` reads them,
         so text parsed as instants, a category and a cast refused all answer as
         a series does, and the index is then made out of that series.
-
-        Raises:
-            NotImplementedError: For a masked type, since nothing yet holds
-                those as labels.
         """
         from ._frame import Index, Series
-        from ._masked import masked_name
 
-        if masked_name(dtype) is not None:
-            raise NotImplementedError(
-                f"dtype={dtype!r} is not supported yet on an index, because row labels"
-                " hold one plain type and not a masked type"
-            )
         if isinstance(data, (IndexMixin, SeriesMixin)):
             typed = Series(data).astype(dtype)
         else:
@@ -27177,6 +27180,10 @@ class IndexMixin:
             from ._object_index import ObjectIndex
 
             return ObjectIndex
+        if kind == "string" and _objects.masked_name_of(inner) is not None:
+            from ._masked_index import MaskedIndex
+
+            return MaskedIndex
         return cls
 
     @property
@@ -32621,7 +32628,9 @@ def _text_labels(index: Any, named: bool, widest: int | None, between: int = 1) 
     if named:
         header.append("" if index.name is None else _text_plain(index.name))
     dtype = _word(index.dtype)
-    if dtype in ("string", "str", "object"):
+    if _objects.masked_name_of(index._inner) is not None:
+        texts = [" <NA>" if _missing(v) else " " + _text_plain(v) for v in index.tolist()]
+    elif dtype in ("string", "str", "object"):
         gap = " NaN"
         if dtype == "object" and (held := _objects.gap_of(index._inner)) is not math.nan:
             gap = " " + str(held)
@@ -32762,6 +32771,11 @@ def _text_float_format(float_format: Any) -> Any:
             raise ValueError(f"Invalid new-style format string {float_format!r}") from error
         return float_format.format
     raise ValueError("float_format must be a string or callable")
+
+
+def _head_numeric(dtype: str) -> bool:
+    """Whether a column's name prints a space ahead, which pandas gives any type of numbers."""
+    return _text_numeric(dtype) or dtype.startswith(("Int", "UInt", "Float", "boolean"))
 
 
 def _text_numeric(dtype: str) -> bool:
@@ -32909,7 +32923,7 @@ def _text_table(
             [
                 (
                     " "
-                    if picked(p, c) is None and _text_numeric(_word(frame.iloc[:, p].dtype))
+                    if picked(p, c) is None and _head_numeric(_word(frame.iloc[:, p].dtype))
                     else ""
                 )
                 + written[p]
@@ -33130,6 +33144,23 @@ def _index_text(index: Any) -> str:
         name = "" if index.name is None else f", name={_pprinted(index.name)}"
         return f"RangeIndex(start={start}, stop={start + height * step}, step={step}{name})"
     dtype = _word(index.dtype)
+    masked = _objects.masked_name_of(index._inner)
+    if masked is not None:
+        values = index.tolist()
+        summary = _summary(
+            values,
+            lambda v: "<NA>" if _missing(v) else _pprinted(v),
+            masked != "string",
+            "Index",
+            get_option("display.width") or 80,
+            get_option("display.max_seq_items") or len(values),
+        )
+        attrs = [f"dtype='{masked}'"]
+        if index.name is not None:
+            attrs.append(f"name={_pprinted(index.name)}")
+        if len(values) > (get_option("display.max_seq_items") or len(values)):
+            attrs.append(f"length={len(values)}")
+        return f"Index({summary}{', '.join(attrs)})"
     if dtype.startswith("datetime64"):
         klass = "DatetimeIndex"
     elif dtype.startswith("timedelta64"):

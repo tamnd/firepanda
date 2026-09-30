@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: An index of a masked type
+
+`Index(data, dtype="Int64")`, and the same with `Float64`, `boolean` or `string`, now make pandas' masked index rather than refusing, and an index made from a masked column keeps its type instead of reading as text. The repr and dtype name the masked type and print a gap as `<NA>`. `get_loc` and `in` find a label by its value, `==` and `isin` answer a `BooleanArray`, and sorting goes by value. A series or frame keeps the labels through `index=`, `set_index`, `sort_index`, `reindex` and `reset_index`. A frame now prints a space ahead of the name of a masked column of numbers, as pandas does for any column of numbers.
+
 ### Added: An index of objects
 
 `Index(["a", 1, None])` and `Index(data, dtype=object)` now make pandas' index of objects rather than refusing or reading the labels as text. Each label keeps the value it was written with, the repr and the dtype read `object`, `get_loc`, `in`, `==` and `isin` find a label by its value, so 1 finds 1.0, and sorting goes the way Python sorts, raising pandas' TypeError on a mix it cannot order. A series or frame keeps these labels through `index=`, `set_axis`, `sort_index` and `reindex`, `concat` of parts whose labels are of two kinds gives the object index pandas gives, and `Series(values, dtype=object)` keeps each value as written, so an integer stays an integer.
