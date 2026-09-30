@@ -303,15 +303,6 @@ def test_a_frame_decays_a_column_at_a_time(firepanda: ModuleType, kind: str) -> 
         assert same(mine[name], them[name])
 
 
-def test_a_frame_is_not_asked_to_drop_the_columns_it_cannot_read(
-    firepanda: ModuleType,
-) -> None:
-    """Which columns come back is a decision, and this library does not make it."""
-    frame = firepanda.DataFrame({"a": ROWS, "b": [str(v) for v in ROWS]})
-    with pytest.raises(NotImplementedError, match="numeric_only"):
-        frame.ewm(span=5).mean(numeric_only=True)
-
-
 def test_a_text_column_has_nothing_to_decay(firepanda: ModuleType) -> None:
     """The same refusal the rolling window gives, pandas' `DataError`."""
     with pytest.raises(firepanda.errors.DataError, match="No numeric types to aggregate"):

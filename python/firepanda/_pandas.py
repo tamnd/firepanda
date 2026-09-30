@@ -10793,11 +10793,9 @@ class DataFrameMixin(_Carries):
     ) -> None:
         """Builds a frame from a mapping of column name to values.
 
-        The signature is the pandas one in full and two of the five parameters
-        are implemented. The other three are refused by name, which is a stronger
-        statement than leaving them out: the signature parity test compares five
-        parameters against pandas instead of one, and a caller who passes one of
-        them is told what is missing rather than that the keyword is unexpected.
+        The signature is the pandas one in full. `copy=` is accepted at any
+        value, since a frame never shares memory with the values it was built
+        from, which is what pandas promises with True and only allows with False.
 
         `dtype=` is inference followed by a cast, which is what it is in pandas
         too. Building the frame first and converting it after is one pass more
@@ -10805,7 +10803,6 @@ class DataFrameMixin(_Carries):
         is the reading that decides what a value means, so the two agree on every
         answer and differ only in how much work they do.
         """
-        _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         index = _written_index(index)
         _no_repeated_columns(columns)
         listed = set()
@@ -16691,7 +16688,7 @@ class SeriesMixin(_Carries):
     ) -> None:
         """Builds a series from a sequence of values, or copies another one.
 
-        Same shape as the frame constructor and refusing the same way, with the
+        Same shape as the frame constructor, `copy=` accepted the same way, with the
         one difference that `name` is honoured, since a series carries its name
         and there is nothing to implement. `name=None` is no name rather than a
         name that is empty, and the two are different states because pandas
@@ -16715,7 +16712,6 @@ class SeriesMixin(_Carries):
         missing value. An empty mapping is the empty series.
         """
         keyed = isinstance(data, collections.abc.Mapping) and len(data) > 0
-        _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         if _is_object_dtype(dtype):
             held = _object_cells(data)
             if held is not None:
@@ -21619,17 +21615,15 @@ class _ReadingMixin:
             for value in column.tolist()
         ]
 
-    def _only_numbers(self, numeric_only: bool) -> None:
-        """Holds `numeric_only` at False over a frame, as `WindowMixin._reduce` does."""
-        if self._over_frame():
-            _held_at(
-                "numeric_only",
-                numeric_only,
-                False,
-                "dropping the columns it cannot read is a decision about which"
-                " columns come back, and firepanda reads the ones it was given or"
-                " says which one it could not",
-            )
+    def _numbers_only(self, numeric_only: bool) -> Any:
+        """The same window over the number columns of its frame, or None to go on as it is.
+
+        pandas drops the columns that are not numbers, flags and spans
+        included, when a window over a frame is asked for `numeric_only`.
+        """
+        if not (_flag("numeric_only", numeric_only) and self._over_frame()):
+            return None
+        return self._over(_window_numbers(self._data))
 
     def aggregate(self, func: Any = None, *args: Any, **kwargs: Any) -> Series | DataFrame:
         """One reduction by name or function, or several in a list or a dict.
@@ -21723,7 +21717,9 @@ class _ReadingMixin:
         """
         from ._frame import DataFrame, Series
 
-        self._only_numbers(numeric_only)
+        narrowed = self._numbers_only(numeric_only)
+        if narrowed is not None:
+            return narrowed._paired(other, pairwise, False, *settings)
         data = self._data
         if other is None:
             other = data
@@ -22040,10 +22036,9 @@ class WindowMixin(_ReadingMixin):
         answer on each. On a column it says to refuse a column that is not a
         number, and every reduction here already refuses one, so both values
         agree everywhere this library has an answer and both are accepted. On a
-        frame it says to drop the columns that cannot be reduced rather than
-        refuse them, which is a decision about which columns come back, so it is
-        held at False and True is refused. That is the rule the group by path
-        already follows and the sentence there is the same sentence.
+        frame it says to drop the columns that are not numbers, flags and spans
+        included, which is what pandas' `select_dtypes` picks, and the same
+        window is then run over what is left.
 
         `engine` is the numba path and is refused, since there is no second
         implementation for it to pick. `cython` is the default path spelled out
@@ -22051,8 +22046,8 @@ class WindowMixin(_ReadingMixin):
 
         Args:
             kind: The reduction, as pandas spells the method.
-            numeric_only: Held at False over a frame, and accepted at both
-                values over a column, for the reason above.
+            numeric_only: Over a frame, whether to read only the number
+                columns, and accepted at both values over a column.
             engine: Declared and refused, except at `cython`.
             engine_kwargs: Declared and refused. Last of the positional ones, so
                 that `settings` can sit after it and the eight reductions that
@@ -22067,20 +22062,13 @@ class WindowMixin(_ReadingMixin):
             read unless a step made it shorter.
 
         Raises:
-            NotImplementedError: If a numba engine was asked for, or if a frame
-                was asked to drop the columns it cannot reduce.
+            NotImplementedError: If a numba engine was asked for.
         """
         from ._frame import DataFrame, Series
 
-        if isinstance(self._data, DataFrame):
-            _held_at(
-                "numeric_only",
-                numeric_only,
-                False,
-                "dropping the columns a window cannot read is a decision about"
-                " which columns come back, and firepanda windows the ones it was"
-                " given or says which one it could not",
-            )
+        if isinstance(self._data, DataFrame) and _flag("numeric_only", numeric_only):
+            narrowed = self._over(_window_numbers(self._data))
+            return narrowed._reduce(kind, False, engine, engine_kwargs, settings)
         if engine is not None and engine != "cython":
             raise NotImplementedError(
                 f"engine={engine!r} is not supported yet, because there is one"
@@ -22375,7 +22363,9 @@ class WindowMixin(_ReadingMixin):
 
     def first(self, numeric_only: bool = False) -> Series | DataFrame:
         """The first value in every window, skipping gaps."""
-        self._only_numbers(numeric_only)
+        narrowed = self._numbers_only(numeric_only)
+        if narrowed is not None:
+            return narrowed.first()
         return self._per_window(
             lambda column, values, start, stop: next(
                 (value for value in values[start:stop] if value is not None), math.nan
@@ -22384,7 +22374,9 @@ class WindowMixin(_ReadingMixin):
 
     def last(self, numeric_only: bool = False) -> Series | DataFrame:
         """The last value in every window, skipping gaps."""
-        self._only_numbers(numeric_only)
+        narrowed = self._numbers_only(numeric_only)
+        if narrowed is not None:
+            return narrowed.last()
         return self._per_window(
             lambda column, values, start, stop: next(
                 (value for value in reversed(values[start:stop]) if value is not None), math.nan
@@ -22393,7 +22385,9 @@ class WindowMixin(_ReadingMixin):
 
     def nunique(self, numeric_only: bool = False) -> Series | DataFrame:
         """How many distinct values every window holds, not counting gaps."""
-        self._only_numbers(numeric_only)
+        narrowed = self._numbers_only(numeric_only)
+        if narrowed is not None:
+            return narrowed.nunique()
         return self._per_window(
             lambda column, values, start, stop: float(
                 len({value for value in values[start:stop] if value is not None})
@@ -23038,8 +23032,8 @@ class EwmMixin(_ReadingMixin):
 
         Args:
             kind: The reduction, as pandas spells the method.
-            numeric_only: Held at False over a frame and accepted at both values
-                over a column.
+            numeric_only: Over a frame, whether to read only the number
+                columns, and accepted at both values over a column.
             engine: Declared and refused, except at `cython`.
             engine_kwargs: Declared and refused.
             settings: The parameters the reduction reads and the decay does not,
@@ -23051,21 +23045,14 @@ class EwmMixin(_ReadingMixin):
             read.
 
         Raises:
-            NotImplementedError: If a numba engine was asked for, if a frame was
-                asked to drop the columns it cannot reduce, or if a total was
+            NotImplementedError: If a numba engine was asked for, or if a total was
                 asked for with `adjust` off, which pandas also refuses.
         """
         from ._frame import DataFrame, Series
 
-        if isinstance(self._data, DataFrame):
-            _held_at(
-                "numeric_only",
-                numeric_only,
-                False,
-                "dropping the columns a decay cannot read is a decision about"
-                " which columns come back, and firepanda decays the ones it was"
-                " given or says which one it could not",
-            )
+        if isinstance(self._data, DataFrame) and _flag("numeric_only", numeric_only):
+            narrowed = self._over(_window_numbers(self._data))
+            return narrowed._reduce(kind, False, engine, engine_kwargs, settings)
         if engine is not None and engine != "cython":
             raise NotImplementedError(
                 f"engine={engine!r} is not supported yet, because there is one"
@@ -23344,41 +23331,33 @@ def _resample(
     """Builds the object `s.resample(...)` and `df.resample(...)` hand back.
 
     Written rather than generated for the reason `_rolling` gives. `convention`
-    only means something for a period index, which firepanda does not have, and
-    `group_keys` only for `apply`, so both are declared and held at pandas'
-    defaults.
+    only means something for a period index, which firepanda does not have, so
+    it is checked and set aside as pandas sets it aside for timestamps, and
+    `group_keys` puts the bins in front of what `apply` answers.
 
     Args:
         data: The column or the frame.
         rule: The step, read from text such as `6h` or `D`.
         closed: Which end of a bin is inside it.
         label: Which end of a bin names it.
-        convention: Declared and held at `start`.
+        convention: `start`, `end`, `s` or `e`, and nothing else.
         on: The column that holds the timestamps, rather than the row labels.
         level: The level of the row labels, which can only be the one there is.
         origin: Where the bins are measured from.
         offset: Declared and refused.
-        group_keys: Declared and held at False.
+        group_keys: Whether `apply` puts the bins in front of the rows it answers.
 
     Returns:
         A `Resampler`.
+
+    Raises:
+        InvalidArgumentError: For a `convention` pandas does not know.
     """
     from ._resample import Resampler
 
-    _held_at(
-        "convention",
-        convention,
-        "start",
-        "it places the bins of a period index, and firepanda has no period index",
-    )
-    _held_at(
-        "group_keys",
-        group_keys,
-        False,
-        "it adds the bins to the labels of what apply answers, and apply with a"
-        " function is not written for a resample",
-    )
-    return Resampler(data, rule, closed, label, on, level, origin, offset)
+    if convention not in ("start", "end", "s", "e"):
+        raise InvalidArgumentError(f"Unsupported value {convention} for `convention`")
+    return Resampler(data, rule, closed, label, on, level, origin, offset, group_keys=group_keys)
 
 
 def _needs_an_engine(pat: Any, regex: bool) -> bool:
@@ -25136,14 +25115,12 @@ class _NthSelector:
 
         Args:
             n: A place, counted from the back when negative, or a list of them.
-            dropna: Refused, as pandas deprecated it.
+            dropna: `any` or `all`, to count only the rows without a gap, or
+                without every value a gap.
         """
-        _refuse(
-            "dropna",
-            dropna,
-            "it drops a group's missing rows before counting, which pandas has deprecated",
-        )
-        return self._owner._nth(n)
+        if dropna is None:
+            return self._owner._nth(n)
+        return self._owner._nth_present(n, dropna)
 
     def __getitem__(self, n: Any) -> Any:
         """The rows at the places `n` names in each group."""
@@ -25160,6 +25137,11 @@ def _group_key(value: Any) -> Any:
         return _GROUP_NAN if _missing(value) else value
     except (TypeError, ValueError):
         return value
+
+
+def _window_numbers(frame: DataFrame) -> DataFrame:
+    """The columns of a frame a window reads with `numeric_only`, as pandas picks them."""
+    return frame.select_dtypes(include=["number"], exclude=["timedelta"])
 
 
 class _GroupedWindow:
@@ -26334,7 +26316,9 @@ class GroupByMixin[Answer]:
 
         Overridden by `SeriesGroupBy`, which answers the one column.
         """
-        return self._frame.loc[mask]
+        rows = self._frame.loc[mask]
+        picked = getattr(self, "_selection", None)
+        return rows if picked is None else rows[picked]
 
     def _value_columns(self) -> list[str]:
         """The columns a transform answers, which are the ones that are not keys.
@@ -26854,20 +26838,13 @@ class GroupByMixin[Answer]:
         `func` runs once a group in Python, on the group's rows with their own
         labels, which is what pandas hands it, so this is as fast as the
         function is. A row whose key is missing is in no group and is left
-        out. `dropna=False`, which keeps every row and blanks the ones left
-        out, is refused.
+        out. `dropna=False` keeps every row and blanks the ones left out, keys
+        and all, as pandas' `where` does.
         """
         from ._frame import DataFrameGroupBy
 
         if not callable(func):
             raise TypeError(f"'{type(func).__name__}' object is not callable")
-        _held_at(
-            "dropna",
-            dropna,
-            True,
-            "keeping the rows a group loses as missing values widens every column"
-            " and blanks the keys, which is a different answer to build",
-        )
         numbers = DataFrameGroupBy(self._frame, self._by, True, self._sort, self._dropna).ngroup()
         rows: dict[int, list[int]] = {}
         for place, number in enumerate(numbers.tolist()):
@@ -26876,9 +26853,12 @@ class GroupByMixin[Answer]:
         kept = [
             number
             for number, places in rows.items()
-            if self._keeps(func(self._as_answer(self._frame.iloc[places]), *args, **kwargs))
+            if self._keeps(func(self._group(places), *args, **kwargs))
         ]
-        return self._kept(numbers.isin(kept))
+        mask = numbers.isin(kept)
+        if _flag("dropna", dropna):
+            return self._kept(mask)
+        return self._kept(mask | True).where(mask, axis=0)
 
     def sample(
         self,
@@ -27020,6 +27000,37 @@ class GroupByMixin[Answer]:
             for a, b in zip(front.tolist(), behind, strict=True)
         ]
         return self._kept(Series(keep, index=front.index))
+
+    def _nth_present(self, n: Any, dropna: Any) -> Any:
+        """The row at place `n` of each group, counting only the rows `dropna` keeps.
+
+        Raises:
+            InvalidArgumentError: For a place that is not one whole number, or
+                a `dropna` other than `any` or `all`, in pandas' words.
+        """
+        from ._frame import DataFrame, DataFrameGroupBy, Series
+
+        if not isinstance(n, int) or isinstance(n, bool):
+            raise InvalidArgumentError("dropna option only supported for an integer argument")
+        if dropna not in ("any", "all"):
+            raise InvalidArgumentError(
+                "For a DataFrame or Series groupby.nth, dropna must be either None, 'any' or"
+                f" 'all', (was passed {dropna})."
+            )
+        numbers = DataFrameGroupBy(self._frame, self._by, True, self._sort, self._dropna).ngroup()
+        shown = self._kept(numbers.isna() | True)
+        gaps = shown.isna()
+        if isinstance(gaps, DataFrame):
+            gaps = gaps.any(axis=1) if dropna == "any" else gaps.all(axis=1)
+        counted: dict[int, list[int]] = {}
+        for place, (number, gap) in enumerate(zip(numbers.tolist(), gaps.tolist(), strict=True)):
+            if not gap and number is not None and number == number:
+                counted.setdefault(int(number), []).append(place)
+        keep = [False] * len(numbers)
+        for places in counted.values():
+            if -len(places) <= n < len(places):
+                keep[places[n]] = True
+        return self._kept(Series(keep, index=numbers.index))
 
     def _picked(self, how: str, column: str, skipna: bool) -> Series:
         """The label of the row holding each group's largest or smallest value.
@@ -35071,8 +35082,18 @@ def _index_text(index: Any) -> str:
     values = index.tolist() if shown else _held_values(index._inner)
     present = [v for v in values if not _missing(v)]
     if klass == "DatetimeIndex":
-        dates = "," not in dtype and all(
-            v.hour == v.minute == v.second == v.microsecond == v.nanosecond == 0 for v in present
+        from . import offsets
+
+        held = getattr(index, "_freq", None)
+        # A step shorter than a day shows the time even when every label is at midnight.
+        daily = not isinstance(held, offsets.Tick) or held.nanos % 86_400_000_000_000 == 0
+        dates = (
+            daily
+            and "," not in dtype
+            and all(
+                v.hour == v.minute == v.second == v.microsecond == v.nanosecond == 0
+                for v in present
+            )
         )
 
         def formatter(v: Any) -> str:

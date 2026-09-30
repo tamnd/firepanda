@@ -1039,23 +1039,20 @@ def test_a_frame_with_a_column_that_is_not_numbers_is_refused_as_pandas(
 
 
 @needs_pandas
-def test_dropping_the_columns_a_window_cannot_read_is_refused(
+def test_a_window_over_a_frame_drops_the_columns_it_cannot_read(
     firepanda: ModuleType,
 ) -> None:
     """`numeric_only` is one name asking two questions.
 
     On a column both values agree everywhere there is an answer, so both are
     accepted, which the test above this section checks. On a frame True says to
-    drop the columns rather than refuse them, which decides which columns come
-    back, so it is refused the way the group by path refuses it.
+    drop the columns that are not numbers, as pandas does.
     """
     import pandas as pd
 
     mine = firepanda.DataFrame({"a": [1.0, 2.0], "t": ["x", "y"]})
     them = pd.DataFrame({"a": [1.0, 2.0], "t": ["x", "y"]})
-    with pytest.raises(NotImplementedError, match="numeric_only"):
-        mine.rolling(2).sum(numeric_only=True)
-    assert list(them.rolling(2).sum(numeric_only=True).columns) == ["a"]
+    assert matching(mine.rolling(2).sum(numeric_only=True), them.rolling(2).sum(numeric_only=True))
     assert matching(
         framed(firepanda).rolling(2).sum(numeric_only=False),
         their_frame().rolling(2).sum(numeric_only=False),

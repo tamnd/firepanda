@@ -183,7 +183,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame({"a": [1]}, columns=["a", "b"]),
     lambda m: m.Series(np().array([1], dtype="timedelta64[s]")),
-    lambda m: m.DataFrame({"a": [1]}, copy=True),
 ]
 
 

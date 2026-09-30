@@ -195,20 +195,6 @@ def test_mistakes_raise_as_pandas_raises(
         build(firepanda)
 
 
-REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: frame(m).rolling(2).first(numeric_only=True),
-]
-
-
-@pytest.mark.parametrize("build", REFUSED)
-def test_answers_with_two_levels_of_labels_are_refused(
-    firepanda: ModuleType, build: Callable[[Any], Any]
-) -> None:
-    """pandas answers these with two levels of labels, which is not here yet."""
-    with pytest.raises(NotImplementedError):
-        build(firepanda)
-
-
 def test_a_window_without_an_answer_is_a_nan_and_not_a_gap(firepanda: ModuleType) -> None:
     """pandas answers NaN there, and so do the kernel reductions, so a null would stand out."""
     s = column(firepanda)

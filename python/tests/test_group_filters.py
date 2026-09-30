@@ -179,14 +179,13 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: frame(m).groupby("k").nth(0, dropna="any"),
     lambda m: frame(m).groupby("k")["v"].idxmax(skipna=False),
 ]
 
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """The deprecated `dropna` and `skipna`."""
+    """The deprecated `skipna`."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 

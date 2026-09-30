@@ -298,9 +298,11 @@ class Resampler:
         offset: Any = None,
         *,
         _bins: tuple[Any, ...] | None = None,
+        group_keys: bool = False,
     ) -> None:
         self._obj = obj
         self._picked = False
+        self._keyed = bool(group_keys)
         if _bins is not None:
             (self._times, self._codes, self._first, self._count, self._origin, self._step,
              self._time_unit, self._right_label, self._name, self._dropped,
@@ -438,7 +440,7 @@ class Resampler:
 
         if isinstance(self._obj, Series):
             raise KeyError(key)
-        picked = Resampler(self._obj[key], None, _bins=self._state())
+        picked = Resampler(self._obj[key], None, _bins=self._state(), group_keys=self._keyed)
         picked._picked = True
         return picked
 
@@ -820,7 +822,8 @@ class Resampler:
         rows = self._rows()
         if isinstance(self._obj, Series):
             answers = [func(self._obj.iloc[at], *args, **kwargs) for at in rows]
-            return self._gathered({_VALUE: answers})
+            keyed = self._keyed_pieces(rows, answers)
+            return self._gathered({_VALUE: answers}) if keyed is None else keyed
         try:
             columns = {
                 name: [func(self._obj[name].iloc[at], *args, **kwargs) for at in rows]
@@ -831,12 +834,41 @@ class Resampler:
         if columns:
             return self._gathered(columns)
         answers = [func(self._obj.iloc[at], *args, **kwargs) for at in rows]
+        keyed = self._keyed_pieces(rows, answers)
+        if keyed is not None:
+            return keyed
         if answers and all(isinstance(answer, Series) for answer in answers):
             labels = answers[0].index.tolist()
             table = {label: [answer[label] for answer in answers] for label in labels}
             return self._labelled(DataFrame(table), None)
         out = self._gathered({_VALUE: answers})
         return out[_VALUE].rename(None) if isinstance(out, DataFrame) else out
+
+    def _keyed_pieces(self, rows: list[list[int]], answers: list[Any]) -> Any:
+        """Pieces indexed as their bins are, under the bins, when `group_keys=True`.
+
+        pandas puts the label of each bin in front of the labels of what a
+        function answers only when it answers the rows it was handed, so this is
+        None for anything else and the pieces are put end to end as before.
+        """
+        from ._frame import DataFrame, Series
+        from ._pandas import concat
+
+        if not self._keyed:
+            return None
+        kept = [(bin_at, at) for bin_at, at in enumerate(rows) if at]
+        if not kept:
+            return None
+        for bin_at, at in kept:
+            answer = answers[bin_at]
+            if not isinstance(answer, Series | DataFrame):
+                return None
+            if answer.index.tolist() != self._obj.index[at].tolist():
+                return None
+        edges = self._edges().tolist()
+        return concat(
+            [answers[bin_at] for bin_at, _ in kept], keys=[edges[bin_at] for bin_at, _ in kept]
+        )
 
     def _gathered(self, columns: dict[Any, list[Any]]) -> Any:
         """Answers of a function a bin, labelled by the bins, or put end to end."""
@@ -847,7 +879,12 @@ class Resampler:
             isinstance(answer, Series | DataFrame) for part in columns.values() for answer in part
         ):
             pieces = [answer for part in columns.values() for answer in part]
-            return concat(pieces)
+            out = concat(pieces)
+            edges = self._edges()
+            if len(out) == len(edges) and out.index.tolist() == edges.tolist():
+                # One row a bin, under the bin's own label, is labelled as the bins are.
+                return out.set_axis(edges)
+            return out
         return self._labelled(
             DataFrame({name: Series(part) for name, part in columns.items()}), None
         )
