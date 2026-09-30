@@ -39,6 +39,7 @@ import sys
 from . import (
     _attrs,
     _firepanda,
+    _pandas,
     api,
     arrays,
     compat,
@@ -278,6 +279,7 @@ wheel was assembled out of two different builds, and `python/tests` is where
 that gets caught.
 """
 
+_pandas._allow_positional(DataFrame, Series)
 _attrs.install()
 # Last, because it wraps the classes and the functions imported above so that
 # what they answer keeps `attrs` and `flags` the way pandas' answers do.
