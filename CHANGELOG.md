@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Reductions across rows, and sort keys
+
+A frame reduced with `axis=1` now answers one value per row for sum, prod, max, min, mean, median, var, std, sem, skew, kurt, count, nunique, any and all, with the types, gaps and `min_count` handling pandas gives, and a frame of text joins for a sum and compares for a max. `sort_index` takes `key`, `na_position` and `sort_remaining`, and `sort_values` on a frame or a series takes `key`. A row that mixes flags with numbers is still refused, since pandas answers it as object.
+
 ### Added: The masked text type `string`
 
 `Series(..., dtype="string")`, `astype("string")` and `StringDtype()` now give pandas' masked text type rather than the plain `str`. A gap is `NA`, comparisons answer flags with gaps, `+`, `fillna`, `replace`, `where`, sorting and `concat` keep the type, and the `str` accessor answers `string`, `boolean` and `Int64` with `NA` on the rows that were gaps, as pandas does. `convert_dtypes` now honours `convert_string` and turns text into `string`, and `pd.array` of text prints as pandas prints it.

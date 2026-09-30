@@ -182,10 +182,6 @@ def test_the_arguments_that_are_not_implemented_say_so(firepanda: ModuleType) ->
         made(firepanda).reset_index(level=0)
     with pytest.raises(NotImplementedError, match="allow_duplicates"):
         made(firepanda).reset_index(allow_duplicates=True)
-    with pytest.raises(NotImplementedError, match="key"):
-        made(firepanda).sort_index(key=lambda labels: labels)
-    with pytest.raises(NotImplementedError, match="na_position"):
-        made(firepanda).sort_index(na_position="first")
 
 
 @needs_pandas

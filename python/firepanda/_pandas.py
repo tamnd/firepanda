@@ -2515,6 +2515,32 @@ def _on_the_clock[Answer](
     return pick(flags, placed("True"), placed("False"))
 
 
+def _keyed_order(columns: list[Any], key: Any, ascending: Any, na_position: str) -> list[int]:
+    """The row positions `sort_values` puts the rows in when a `key` is given.
+
+    pandas runs `key` over each sort column on its own and sorts on what comes
+    back, so the keyed columns are put in a frame of their own beside the row
+    numbers, that frame is sorted without a key, and the row numbers are read
+    off it.
+    """
+    from ._frame import DataFrame, Series
+
+    work = {}
+    for at, column in enumerate(columns):
+        keyed = key(column)
+        keyed = keyed if isinstance(keyed, SeriesMixin) else Series(list(keyed))
+        if len(keyed) != len(column):
+            raise InvalidArgumentError(
+                "User-provided `key` function must not change the shape of the array."
+            )
+        work[f"k{at}"] = keyed.reset_index(drop=True)
+    work["row"] = Series(range(len(columns[0])), dtype="int64")
+    ordered = DataFrame(work).sort_values(
+        [f"k{at}" for at in range(len(columns))], ascending=ascending, na_position=na_position
+    )
+    return ordered["row"].tolist()
+
+
 def _label_order(
     index: Any, level: Any, ascending: Any, na_first: bool, sort_remaining: bool, key: Any
 ) -> list[int]:
@@ -14527,10 +14553,14 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        _refuse("key", key, "running a function over the values before sorting is not written")
         _axis_number(axis, "DataFrame", 0, (0,))
         inplace = _flag("inplace", inplace)
         keys = _names.held_all(_as_keys(by))
+        if key is not None:
+            order = _keyed_order([self[name] for name in keys], key, ascending, na_position)
+            ordered = self.iloc[order]
+            ordered = _answered(ordered.reset_index(drop=True)) if ignore_index else ordered
+            return _settled(self, ordered, inplace)
         directions = _directions(ascending, len(keys))
         front = [_na_first(na_position)] * len(keys)
         try:
@@ -16386,9 +16416,12 @@ class SeriesMixin(_Carries):
         """
         from ._frame import Series
 
-        _refuse("key", key, "running a function over the values before sorting is not written")
         _axis_number(axis, "Series", 0, (0,))
         inplace = _flag("inplace", inplace)
+        if key is not None:
+            ordered = self.iloc[_keyed_order([self], key, ascending, na_position)]
+            ordered = _answered(ordered.reset_index(drop=True)) if ignore_index else ordered
+            return _settled(self, ordered, inplace)
         if _objects.is_object(self._inner):
             out = _objects_sorted(self, ascending, na_position, ignore_index)
             if inplace:
