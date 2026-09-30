@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: group idxmax and idxmin with as_index=False
+
+`DataFrameGroupBy.idxmax` and `idxmin` with `as_index=False` answer the keys as columns before the labels found, as pandas does, where they used to refuse.
+
 ### Added: from_records with several index columns
 
 `DataFrame.from_records` takes a list of several column names as `index` and labels the rows by a level for each, as pandas does, where it used to refuse.
