@@ -279,6 +279,27 @@ def _label_of(how: Any) -> Any:
     return how if isinstance(how, str) else getattr(how, "__name__", "<lambda>")
 
 
+def _single(answers: list[Any]) -> list[Any] | None:
+    """Answers of one value each, a series of one read as its value, or None.
+
+    pandas reads what a function answers a bin as an aggregate unless it is an
+    array, and a series of one as the value in it, so a longer series or a
+    frame means the function is applied rather than aggregated.
+    """
+    from ._frame import DataFrame, Series
+
+    found = []
+    for answer in answers:
+        if isinstance(answer, DataFrame):
+            return None
+        if isinstance(answer, Series):
+            if len(answer) != 1:
+                return None
+            answer = answer.iloc[0]
+        found.append(answer)
+    return found
+
+
 class Resampler:
     """The bins of a resample, waiting for a reduction.
 
@@ -813,24 +834,34 @@ class Resampler:
     def _called(self, func: Any, args: Any, kwargs: Any) -> Any:
         """A function run on every bin, as pandas' `aggregate` and `apply` run it.
 
-        Over a frame it is run on each column first, and on the whole of every
-        bin when a column refuses it. Values come back one a bin, labelled by
-        the bins; pieces with labels of their own are put end to end.
+        pandas first takes it as an aggregation: an answer of one value, a
+        series of one included, is that value, and the values come back one a
+        bin, labelled by the bins. Over a frame that is tried on each column.
+        An answer that is not one value, a longer series or a frame, makes it
+        an `apply` over the whole of every bin instead, whose pieces are put
+        end to end, under the bins when `group_keys` is set.
         """
         from ._frame import DataFrame, Series
+        from ._pandas import concat
 
         rows = self._rows()
         if isinstance(self._obj, Series):
             answers = [func(self._obj.iloc[at], *args, **kwargs) for at in rows]
+            single = _single(answers)
+            if single is not None:
+                return self._gathered({_VALUE: single})
             keyed = self._keyed_pieces(rows, answers)
             return self._gathered({_VALUE: answers}) if keyed is None else keyed
+        columns: dict[Any, list[Any]] | None = {}
         try:
-            columns = {
-                name: [func(self._obj[name].iloc[at], *args, **kwargs) for at in rows]
-                for name in self._obj
-            }
+            for name in self._obj:
+                single = _single([func(self._obj[name].iloc[at], *args, **kwargs) for at in rows])
+                if single is None:
+                    columns = None
+                    break
+                columns[name] = single  # type: ignore[index]
         except Exception:
-            columns = {}
+            columns = None
         if columns:
             return self._gathered(columns)
         answers = [func(self._obj.iloc[at], *args, **kwargs) for at in rows]
@@ -839,36 +870,31 @@ class Resampler:
             return keyed
         if answers and all(isinstance(answer, Series) for answer in answers):
             labels = answers[0].index.tolist()
-            table = {label: [answer[label] for answer in answers] for label in labels}
-            return self._labelled(DataFrame(table), None)
+            if all(answer.index.tolist() == labels for answer in answers):
+                table = {label: [answer[label] for answer in answers] for label in labels}
+                return self._labelled(DataFrame(table), None)
+        if any(isinstance(answer, Series | DataFrame) for answer in answers):
+            return concat([answer for answer, at in zip(answers, rows, strict=True) if at])
         out = self._gathered({_VALUE: answers})
         return out[_VALUE].rename(None) if isinstance(out, DataFrame) else out
 
     def _keyed_pieces(self, rows: list[list[int]], answers: list[Any]) -> Any:
-        """Pieces indexed as their bins are, under the bins, when `group_keys=True`.
+        """Pieces under the labels of their bins, when `group_keys=True`.
 
-        pandas puts the label of each bin in front of the labels of what a
-        function answers only when it answers the rows it was handed, so this is
-        None for anything else and the pieces are put end to end as before.
+        pandas puts the label of each bin in front of the labels of every piece
+        an `apply` answers, the rows it was handed or any others, so this is
+        None only when some bin answers a value rather than a piece.
         """
         from ._frame import DataFrame, Series
         from ._pandas import concat
 
         if not self._keyed:
             return None
-        kept = [(bin_at, at) for bin_at, at in enumerate(rows) if at]
-        if not kept:
+        kept = [bin_at for bin_at, at in enumerate(rows) if at]
+        if not kept or not all(isinstance(answers[at], Series | DataFrame) for at in kept):
             return None
-        for bin_at, at in kept:
-            answer = answers[bin_at]
-            if not isinstance(answer, Series | DataFrame):
-                return None
-            if answer.index.tolist() != self._obj.index[at].tolist():
-                return None
         edges = self._edges().tolist()
-        return concat(
-            [answers[bin_at] for bin_at, _ in kept], keys=[edges[bin_at] for bin_at, _ in kept]
-        )
+        return concat([answers[at] for at in kept], keys=[edges[at] for at in kept])
 
     def _gathered(self, columns: dict[Any, list[Any]]) -> Any:
         """Answers of a function a bin, labelled by the bins, or put end to end."""
