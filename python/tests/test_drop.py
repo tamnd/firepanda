@@ -8,9 +8,8 @@ since either one quietly doing the other's work would pass a test that only
 counted what came back.
 
 The last part of the file is the three ways of naming the wrong door, the two
-parameters that refuse, and the repeated row label this refuses and pandas does
-not, which document 46 argues is the cost of the row half being `Index.drop` and
-`reindex` composed rather than a kernel of its own.
+parameters that refuse, and a repeated row label, which `reindex` refuses and
+so is dropped by position, every row holding it, as pandas drops them.
 """
 
 from __future__ import annotations
@@ -192,11 +191,11 @@ def test_inplace_settles_on_both_and_answers_nothing(firepanda):
     assert column.tolist() == [4.0, 6.0, 7.0]
 
 
-def test_a_repeated_row_label_is_refused_where_pandas_drops_both(firepanda):
-    """The row half is a reindex, and a reindex cannot answer one row per label."""
+def test_a_repeated_row_label_drops_every_row_holding_it(firepanda):
+    """A reindex cannot answer one row per label, so repeated labels go by position."""
     made = firepanda.DataFrame({"k": [1, 1, 2], "v": [1, 2, 3]}).set_index("k")
-    with pytest.raises(ValueError, match="duplicate labels"):
-        made.drop([1])
+    assert made.drop([1])["v"].tolist() == [3]
+    assert made["v"].drop(1).tolist() == [3]
 
 
 def test_the_original_is_untouched_by_either_half(firepanda):

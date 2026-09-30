@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: repeated row labels and categories handed in whole
+
+`drop` of a row label that repeats now drops every row holding it, as pandas does, where it used to refuse. A transpose whose row labels repeat is refused, since it would need repeated columns, where it used to answer a frame with rows silently missing. `assign` of a `Categorical` or an index of categories, and `Series` of an index of categories, keep the categories rather than their values, and `reset_index` keeps row labels of categories as a category column.
+
 ### Added: clock and type arguments of the temporal indexes
 
 `DatetimeIndex` now takes `tz=`, putting freshly read instants on that clock as `tz_localize` would with `ambiguous=`, keeping labels already on it and refusing another clock or none in pandas' words. `dtype=` names the unit, and the clock too for instants, and `copy=` is read. `TimedeltaIndex` takes `dtype=` and `copy=`, and counts spans read out of nothing in seconds as pandas does.
