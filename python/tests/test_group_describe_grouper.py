@@ -144,8 +144,6 @@ def test_a_mistake_raises_what_pandas_raises(firepanda: ModuleType, name: str) -
     [
         lambda m: data(m).groupby("v")["k"].describe(),
         lambda m: data(m).groupby("k")["t"].describe(),
-        lambda m: data(m).groupby(m.Grouper()).sum(),
-        lambda m: data(m).groupby(m.Grouper(level=0)).sum(),
         lambda m: data(m).groupby([m.Grouper(key="t", freq="D"), "k"]).sum(),
     ],
 )

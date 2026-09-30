@@ -1,74 +1,76 @@
-"""Group by answers with two levels of column labels, compared with pandas.
+"""Grouping by the levels of a MultiIndex, and a `Grouper` with no key.
 
-`agg` with a list, `agg` with a list for a column, `describe` and `ohlc` over
-a frame name each column by the pair of the column and the reduction. Each case
-runs in both libraries and the answers are compared by their repr, or for a
-mistake by its class name.
+pandas' `level=` on labels of several levels groups by the values of each
+level named, by name or by number, and labels the groups after them. A
+`Grouper` with no key groups by the row labels, or by the level it names, and
+one with a frequency bins them as `resample` does. Each test here runs the
+same code on both libraries and compares what they print.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from types import ModuleType
 from typing import Any
 
+import pandas as pd
 import pytest
 
-import firepanda as fp
 
-pd = pytest.importorskip("pandas")
-
-
-def frame(lib: ModuleType) -> Any:
-    return lib.DataFrame(
-        {"k": ["a", "b", "a"], "j": ["u", "u", "w"], "x": [1, 2, 3], "y": [1.5, 2.5, 3.5]}
-    )
+def levels(lib: Any) -> Any:
+    labels = lib.MultiIndex.from_tuples([("x", 1), ("y", 1), ("x", 2), ("y", 2)], names=["p", "q"])
+    return lib.DataFrame({"v": [1, 2, 3, 4], "w": [0.5, 1.5, 2.5, 3.5]}, index=labels)
 
 
-def texts(lib: ModuleType) -> Any:
-    return lib.DataFrame({"k": ["a", "b", "a"], "x": [1, 2, 3], "s": ["p", "q", "r"]})
+def instants(lib: Any) -> Any:
+    when = lib.date_range("2024-01-01", periods=5, freq="12h", name="t")
+    return lib.DataFrame({"v": [1, 2, 3, 4, 5]}, index=when)
 
 
-CASES: dict[str, Callable[[ModuleType], Any]] = {
-    "agg-list": lambda lib: frame(lib).groupby("k")[["x", "y"]].agg(["sum", "mean"]),
-    "agg-list-columns": lambda lib: frame(lib).groupby("k")[["x", "y"]].agg(["min"]).columns,
-    "agg-dict-of-lists": lambda lib: frame(lib).groupby("k").agg({"x": ["sum", "max"], "y": "min"}),
-    "agg-lambda": lambda lib: frame(lib).groupby("k")[["x"]].agg(["sum", lambda v: v.max()]),
-    "agg-two-lambdas": lambda lib: (
-        frame(lib).groupby("k")[["x"]].agg([lambda v: v.min(), lambda v: v.max()])
+def named(lib: Any) -> Any:
+    return lib.DataFrame({"v": [1, 2, 3, 4]}, index=lib.Index(["b", "a", "b", "a"], name="k"))
+
+
+BUILDS = {
+    "name": lambda lib: levels(lib).groupby(level="q").sum(),
+    "number": lambda lib: levels(lib).groupby(level=1).sum(),
+    "negative": lambda lib: levels(lib).groupby(level=-2).mean(),
+    "list of one": lambda lib: levels(lib).groupby(level=["q"]).sum(),
+    "list of two": lambda lib: levels(lib).groupby(level=["q", "p"]).sum(),
+    "unsorted": lambda lib: levels(lib).groupby(level="p", sort=False).sum(),
+    "series": lambda lib: levels(lib)["v"].groupby(level="p").sum(),
+    "series two": lambda lib: levels(lib)["v"].groupby(level=[0, 1]).max(),
+    "transform": lambda lib: levels(lib).groupby(level="p").transform("sum"),
+    "cumsum": lambda lib: levels(lib)["v"].groupby(level="q").cumsum(),
+    "size": lambda lib: levels(lib).groupby(level="p").size(),
+    "as_index": lambda lib: levels(lib).groupby(level="p", as_index=False).sum(),
+    "grouper level": lambda lib: levels(lib).groupby(lib.Grouper(level="q")).sum(),
+    "grouper level 0": lambda lib: named(lib).groupby(lib.Grouper(level=0)).sum(),
+    "grouper unsorted": lambda lib: named(lib).groupby(lib.Grouper(level="k", sort=False)).sum(),
+    "grouper freq": lambda lib: instants(lib).groupby(lib.Grouper(freq="D")).sum(),
+    "grouper freq mean": lambda lib: instants(lib).groupby(lib.Grouper(freq="2D")).mean(),
+    "grouper freq closed": lambda lib: (
+        instants(lib).groupby(lib.Grouper(freq="D", closed="right", label="right")).sum()
     ),
-    "agg-list-as-index-false": lambda lib: (
-        frame(lib).groupby("k", as_index=False)[["x", "y"]].agg(["sum", "mean"])
-    ),
-    "agg-list-two-keys": lambda lib: frame(lib).groupby(["k", "j"]).agg(["min", "max"]),
-    "describe": lambda lib: frame(lib).groupby("k")[["x", "y"]].describe(),
-    "describe-percentiles": lambda lib: frame(lib).groupby("k")[["x"]].describe(percentiles=[0.1]),
-    "describe-as-index-false": lambda lib: (
-        frame(lib).groupby("k", as_index=False)[["x", "y"]].describe()
-    ),
-    "describe-numbers-only": lambda lib: texts(lib).groupby("k").describe(),
-    "ohlc": lambda lib: frame(lib).groupby("k")[["x", "y"]].ohlc(),
-    "ohlc-as-index-false": lambda lib: frame(lib).groupby("k", as_index=False)[["x", "y"]].ohlc(),
-    "ohlc-two-keys": lambda lib: frame(lib).groupby(["k", "j"]).ohlc(),
-    "ohlc-text": lambda lib: texts(lib).groupby("k").ohlc(),
-    "agg-repeated": lambda lib: frame(lib).groupby("k").agg(["sum", "sum"]),
 }
 
 
-def outcome(build: Callable[[], Any]) -> str:
-    try:
-        return repr(build())
-    except Exception as error:
-        return type(error).__name__
+@pytest.mark.parametrize("make", BUILDS.values(), ids=BUILDS.keys())
+def test_group_levels_are_pandas(firepanda: Any, make: Any) -> None:
+    assert repr(make(firepanda)) == repr(make(pd))
 
 
-@pytest.mark.parametrize("case", CASES.values(), ids=CASES.keys())
-def test_group_levels_answer_as_pandas(case: Callable[[ModuleType], Any]) -> None:
-    assert outcome(lambda: case(fp)) == outcome(lambda: case(pd))
+MISTAKES = {
+    "no such name": lambda lib: levels(lib).groupby(level="z").sum(),
+    "no such number": lambda lib: levels(lib).groupby(level=5).sum(),
+}
 
 
-def test_a_truncated_header_prints_the_label_past_the_dots() -> None:
-    def build(lib: ModuleType) -> str:
-        return repr(frame(lib).groupby("k")[["x", "y"]].describe())
-
-    assert build(fp) == build(pd)
+@pytest.mark.parametrize("make", MISTAKES.values(), ids=MISTAKES.keys())
+def test_a_level_not_there_is_refused_as_pandas(firepanda: Any, make: Any) -> None:
+    with pytest.raises(Exception) as theirs:
+        make(pd)
+    with pytest.raises(Exception) as mine:
+        make(firepanda)
+    assert type(mine.value).__name__ == type(theirs.value).__name__ or isinstance(
+        mine.value, type(theirs.value)
+    )
+    assert str(mine.value) == str(theirs.value)

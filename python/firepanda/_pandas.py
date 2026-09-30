@@ -20617,7 +20617,11 @@ def _grouped(
         if by.freq is not None:
             return by._binned_by(frame)
         # A grouper on its own brings its own sort and dropna, as pandas reads it.
-        by, sort, dropna = by._column(frame), by.sort, by.dropna
+        if by.key is None:
+            # With no key it groups by the row labels, or by the level it names.
+            by, level, sort, dropna = None, 0 if by.level is None else by.level, by.sort, by.dropna
+        else:
+            by, sort, dropna = by._column(frame), by.sort, by.dropna
     elif isinstance(by, list) and any(isinstance(key, Grouper) for key in by):
         by = [key._column(frame) if isinstance(key, Grouper) else key for key in by]
     single = not isinstance(by, list) or _values_key(frame, by)
@@ -20841,6 +20845,13 @@ def _outside_keys(frame: DataFrame, by: Any, level: Any) -> tuple[DataFrame, Any
         The frame, the key names for `GroupByMixin._keys`, and each added
         column's name as pandas shows it, which is None for a key with no name.
     """
+    if level is not None and by is None and getattr(frame.index, "nlevels", 1) > 1:
+        # Each level named is a key of its values, read by position and named
+        # after the level, as pandas groups by the levels of a MultiIndex.
+        index = frame.index
+        picked = level if isinstance(level, (list, tuple)) else [level]
+        by = [index.get_level_values(index._level_number(one)) for one in picked]
+        by, level = (by if isinstance(level, (list, tuple)) else by[0]), None
     if level is not None:
         if by is not None:
             raise NotImplementedError(
@@ -24849,7 +24860,7 @@ class Grouper:
         Raises:
             KeyError: If the frame has no such column, in pandas' words.
             NotImplementedError: For a frequency in a list of keys, a level, or
-                no key at all.
+                no key at all, which a grouper on its own takes but a list does not.
         """
         if self.freq is not None:
             raise NotImplementedError(
@@ -24866,12 +24877,12 @@ class Grouper:
         return self.key
 
     def _binned_by(self, frame: DataFrame) -> Any:
-        """The resampler for a grouper with a frequency, which bins its key."""
-        if self.key is None or self.level is not None:
-            raise NotImplementedError(
-                "a Grouper with a frequency and no key bins the row labels, which is"
-                " not supported yet"
-            )
+        """The resampler for a grouper with a frequency, which bins its key.
+
+        With no key it bins the row labels, or the level of them it names.
+        """
+        if self.key is None:
+            return frame.resample(self.freq, level=self.level, **self._binned)
         if self.key not in _shown_names(frame):
             raise KeyError(f"The grouper name {self.key} is not found")
         return frame.resample(self.freq, on=self.key, **self._binned)
