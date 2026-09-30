@@ -347,14 +347,15 @@ def test_a_grouped_truth_asks_a_text_column_whether_it_is_empty(
 @needs_pandas
 def test_a_grouped_product_of_words_is_refused(firepanda: ModuleType) -> None:
     """Because multiplying two strings together is not an operation in pandas
-    either, and the refusal names the column type rather than the reduction."""
+    either, and the refusal is pandas' `TypeError` in pandas' words."""
     import pandas as pd
 
     data = {"k": ["a", "a"], "t": ["oslo", "lima"]}
-    with pytest.raises(Exception, match="string column"):
+    with pytest.raises(TypeError) as ours:
         firepanda.DataFrame(data).groupby("k").prod()
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError) as theirs:
         pd.DataFrame(data).groupby("k").prod()
+    assert str(ours.value) == str(theirs.value)
 
 
 @needs_pandas

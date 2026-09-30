@@ -713,6 +713,62 @@ def _object_texts(column: Any) -> Any:
 
 
 _OBJECT_FOLDS = ("min", "max", "sum", "prod")
+
+# The reductions pandas refuses on text, because none of them has a meaning for words.
+_TEXT_REFUSED = ("mean", "prod", "median", "std", "var", "sem", "skew")
+
+
+def _text_gap(column: Any) -> Any:
+    """The missing value a text column answers, `NA` for `string` and NaN for `str`."""
+    return NA if str(column.dtype) == "string" else math.nan
+
+
+def _is_gap(value: Any) -> bool:
+    """Whether one value read out of a column is missing."""
+    return value is None or value is NA or (isinstance(value, float) and value != value)
+
+
+def _text_total(column: Any, skipna: bool, min_count: int) -> Any:
+    """The rows of a text column joined in order, which is pandas' sum of text.
+
+    Nothing to join is the empty text. A gap under `skipna=False`, or fewer
+    values than `min_count`, answers the column's missing value instead.
+    """
+    present = column.count()
+    if (not skipna and present < len(column)) or present < min_count:
+        return _text_gap(column)
+    return "".join(column.dropna().tolist())
+
+
+def _text_scan(column: Any, kind: str, skipna: bool) -> Any:
+    """A running join, least or greatest down a text column, as pandas scans text.
+
+    A gap stays a gap and is passed over, and under `skipna=False` every row
+    after the first gap is a gap too.
+
+    Raises:
+        TypeError: For `cumprod`, in pandas' words.
+    """
+    from ._frame import Series
+
+    if kind == "cumprod":
+        raise TypeError(f"operation 'cumprod' not supported for dtype '{column.dtype}'")
+    running: Any = None
+    poisoned = False
+    out: list[Any] = []
+    for value in column.tolist():
+        if poisoned or _is_gap(value):
+            poisoned = poisoned or not skipna
+            out.append(None)
+            continue
+        if running is None:
+            running = value
+        elif kind == "cumsum":
+            running += value
+        else:
+            running = min(running, value) if kind == "cummin" else max(running, value)
+        out.append(running)
+    return Series(out, index=column.index, name=column.name, dtype=str(column.dtype))
 """The reductions that read an object column's values, where the others count its cells."""
 
 
@@ -14204,6 +14260,17 @@ class DataFrameMixin(_Carries):
             return _row_reduced(read, kind, param, skipna, min_count)
         if kind == "quantile":
             _no_boolean_quantile(read._inner.dtypes())
+        names = _shown_names(read)
+        texts = [name for name in names if _is_text(read[name])]
+        if texts and kind in _TEXT_REFUSED:
+            raise TypeError(f"Cannot perform reduction '{kind}' with string dtype")
+        if texts and kind == "sum":
+            # pandas sums each column on its own and holds the joined text and
+            # the numbers together in one object answer.
+            from ._frame import Series
+
+            totals = [read[name].sum(skipna=skipna, min_count=min_count) for name in names]
+            return Series(totals, index=names, dtype=object)
         return read._voided(read._per_column(kind, param), skipna, min_count)
 
     def _voided(self, answer: Series, skipna: bool, min_count: int) -> Series:
@@ -18503,6 +18570,11 @@ class SeriesMixin(_Carries):
         skipna = _flag("skipna", skipna)
         if kind in _OBJECT_FOLDS and _objects.is_object(self._inner):
             return _objects_reduced(self, kind, skipna, min_count)
+        if _is_text(self):
+            if kind == "sum":
+                return _text_total(self, skipna, min_count)
+            if kind in _TEXT_REFUSED:
+                raise TypeError(f"Cannot perform reduction '{kind}' with string dtype")
         _held_at(
             "numeric_only",
             numeric_only,
@@ -18918,6 +18990,9 @@ class SeriesMixin(_Carries):
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> Series:
         """Runs one of the four scans over the whole column."""
+        if _is_text(self):
+            _axis_number(axis, "Series", 0, (0,))
+            return _text_scan(self, kind, skipna)
         scanned = self._transformed(kind, 0, axis)
         if skipna or not self._inner.null_count():
             return scanned
@@ -20179,6 +20254,12 @@ def _key_showing(base: type) -> Any:
     return _KEY_SHOWING[base]
 
 
+def _string_words(error: TypeError) -> TypeError:
+    """`error` naming the `string` type, for text that was reduced as its lower case `str`."""
+    text = str(error).replace("dtype 'str'", "dtype 'string'")
+    return TypeError(text.replace(" for str dtype", " for string dtype"))
+
+
 def _showing(method: Callable[..., Any], name: str) -> Callable[..., Any]:
     """`method`, answering with the hidden names shown as pandas shows them."""
     import functools
@@ -20194,6 +20275,10 @@ def _showing(method: Callable[..., Any], name: str) -> Callable[..., Any]:
         self._busy = True
         try:
             answer = method(self, *args, **kwargs)
+        except TypeError as error:
+            if "string" in (getattr(self, "_values", None) or {}).values():
+                raise _string_words(error) from None
+            raise
         finally:
             self._busy = False
         if name == "__iter__":
@@ -24486,7 +24571,14 @@ class GroupByMixin[Answer]:
             "there is nothing to configure while there is nothing to choose",
         )
         grouped = self._numeric_only(kind) if _flag("numeric_only", numeric_only) else self
-        answer = grouped._shape(kind, param)
+        texts = grouped._text_values()
+        if texts and kind in _TEXT_REFUSED:
+            word = str(grouped._frame[texts[0]].dtype)
+            raise TypeError(f"dtype '{word}' does not support operation '{kind}'")
+        if texts and kind == "sum":
+            answer = grouped._text_summed(texts, param)
+        else:
+            answer = grouped._shape(kind, param)
         if not _flag("skipna", skipna):
             # A first or last that may not skip is the value in the group's first
             # or last row, so the flag of that row says whether it is there.
@@ -24497,7 +24589,64 @@ class GroupByMixin[Answer]:
             )
         if min_count is not None and min_count > 0:
             counts = grouped._shape("count", 0.0)
-            answer = grouped._blanked(answer, counts, lambda count: count >= min_count)
+            # A joined text is blanked too, as a picked value is, which is pandas' rule for sum.
+            answer = grouped._blanked(
+                answer, counts, lambda count: count >= min_count, bool(texts) and kind == "sum"
+            )
+        return answer
+
+    def _text_values(self) -> list[Any]:
+        """The text columns among the ones this group by reduces."""
+        keys = set(self._by)
+        column = getattr(self, "_column", None)
+        if column is not None:
+            names = [column]
+        else:
+            names = getattr(self, "_selection", None) or _shown_names(self._frame)
+        return [name for name in names if name not in keys and _is_text(self._frame[name])]
+
+    def _text_summed(self, texts: list[Any], param: float) -> Any:
+        """The sum over the groups with each text column joined in row order, as pandas sums text.
+
+        The core has no join per group, so each text column is joined here and
+        written back onto every row of its group, and the first row of each
+        group is then the answer. The other columns are summed by the core and
+        put in their places.
+        """
+        from ._frame import Series
+
+        codes = self.ngroup().tolist()
+        placed = [None if _is_gap(code) or code < 0 else int(code) for code in codes]
+        frame = self._frame.copy()
+        for name in texts:
+            parts: list[list[str]] = [[] for _ in range(self.ngroups)]
+            for at, value in zip(placed, frame[name].tolist(), strict=True):
+                if at is not None and not _is_gap(value):
+                    parts[at].append(value)
+            joined = ["".join(part) for part in parts]
+            rows = [None if at is None else joined[at] for at in placed]
+            frame[name] = Series(rows, index=frame.index, dtype=str(frame[name].dtype))
+        over = copy.copy(self)
+        over._frame = frame
+        answer = over._shape("first", 0.0)
+        if getattr(self, "_column", None) is not None:
+            return answer
+        keys = set(self._by)
+        selection = getattr(self, "_selection", None)
+        rest = [
+            name
+            for name in selection or _shown_names(self._frame)
+            if name not in keys and name not in texts
+        ]
+        if not rest:
+            return answer
+        numbers = copy.copy(self)
+        numbers._frame = self._frame[[n for n in _shown_names(self._frame) if n not in texts]]
+        if selection is not None:
+            numbers._selection = rest
+        summed = numbers._shape("sum", param)
+        for name in rest:
+            answer[name] = summed[name]
         return answer
 
     def _numeric_only(self, kind: str) -> Any:
@@ -24757,6 +24906,12 @@ class GroupByMixin[Answer]:
                 f"the extra arguments of {kind} are not taken, because pandas only"
                 " passes them on to numpy and none of them mean anything here"
             )
+        texts = self._text_values()
+        if texts:
+            word = str(self._frame[texts[0]].dtype)
+            if kind in ("cummin", "cummax"):
+                raise TypeError(f"{kind} is not supported for {word} dtype")
+            raise TypeError(f"dtype '{word}' does not support operation '{kind}'")
         return self._shape_rows(kind, 1)
 
     def _counted(self, kind: str, ascending: bool) -> Series:
@@ -34624,7 +34779,12 @@ def _masked_through(method: Any, how: str) -> Any:
             return _masked.reduced(method(lower, *args, **kwargs))
         # An answer put back in place goes into this column, not the lower case one.
         inplace = bool(kwargs.pop("inplace", False))
-        answer = method(lower, *args, **kwargs)
+        try:
+            answer = method(lower, *args, **kwargs)
+        except TypeError as error:
+            if name == "string":
+                raise _string_words(error) from None
+            raise
         if chosen == "raw":
             return answer
         keep = chosen == "own" or (chosen == "whole" and name[0] in "IU")
