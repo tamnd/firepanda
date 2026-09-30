@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: include and exclude on a group by's describe
+
+A group by's `describe` now takes `include` and `exclude`, where it used to refuse them. It picks the columns the way `DataFrame.describe` does, and when the picked columns answer different statistics each takes them all, with the ones it has no answer for missing, as pandas lays them out. `SeriesGroupBy.describe` now describes a column of text, flags, moments or spans group by group, as `Series.describe` does, where it used to refuse it.
+
 ### Added: pct_change with a freq
 
 `Series.pct_change`, `DataFrame.pct_change` and a group by's `pct_change` now take `freq`, where they used to refuse it. As in pandas, each value is worked out over the one `freq` earlier by label and read back onto the labels it started with, and a group by does that group by group, putting the rows back in their first order.
