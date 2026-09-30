@@ -35,6 +35,15 @@ CASES: dict[str, Callable[[ModuleType], Any]] = {
     "series-dates": lambda lib: lib.Series(["2026-01-01", None], dtype="datetime64[ns]"),
     "series-dates-ms": lambda lib: lib.Series(["2026-01-01 10:00"], dtype="datetime64[ms]"),
     "series-dates-tz": lambda lib: lib.Series(["2026-01-01"], dtype="datetime64[ns, UTC]"),
+    "series-dates-mixed": lambda lib: lib.Series(
+        ["2026-01-01", None, "2026-01-03 10:00"], dtype="datetime64[ms]"
+    ),
+    "series-dates-words": lambda lib: lib.Series(
+        ["Jan 2 2026", "2026-01-03"], dtype="datetime64[s]"
+    ),
+    "index-dates-mixed": lambda lib: lib.Index(
+        ["2026-01-01", "2026-01-03 10:00"], dtype="datetime64[s]"
+    ),
     "series-spans": lambda lib: lib.Series(["1D", None], dtype="timedelta64[ns]"),
     "series-spans-s": lambda lib: lib.Series(["90s"], dtype="timedelta64[s]"),
     "series-fraction": lambda lib: lib.Series([1.7, 2], dtype="int64"),
