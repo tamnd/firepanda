@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_datetime counts days, hours, minutes and floats, and align fills every gap
+
+`to_datetime` with `unit="D"`, `"h"` or `"m"` reads the counts as seconds and holds the answer at seconds, as pandas does. Floats that are all whole are read as integers are, a float with a fraction makes the column nanoseconds with the fraction cut the way pandas cuts it, and a gap stays a gap. A format that parses nothing under `errors="coerce"` now gives `datetime64[s]` like pandas rather than microseconds. With `utc=True` the counts come back marked as UTC. `Series.align` with a `fill_value` now fills the gaps each side already had as well as the new labels, as pandas does for two columns.
+
 ### Added: seven parameters that used to refuse
 
 `shift` fills the rows it opens with `fill_value` on a series and a frame, keeping a column of whole numbers whole. The four scans take `skipna=False`, where every row after the first gap is a gap, and the frame scans take `numeric_only`. `any` and `all` take `skipna=False`, where a gap counts as true and a masked column answers `NA` when the known values do not settle it, and the frame spelling takes `bool_only`. `fillna` stops after `limit` gaps down each column. `DataFrame.sort_index` sorts the columns with `axis=1` and numbers the rows again with `ignore_index`. `replace` with `regex` rewrites the matched part of every text row, for one pattern and one piece of text. Each answer is checked against pandas.

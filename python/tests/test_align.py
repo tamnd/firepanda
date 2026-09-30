@@ -68,6 +68,9 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: m.Series(["p", "q"]).align(m.Series([3.0], index=[7]), join="left"),
     lambda m: m.Series([1.0, 2.0], index=[0, 9]).align(left(m)),
     lambda m: m.Series([1.0, 2.0], index=[4, 4]).align(m.Series([5.0, 6.0], index=[4, 4])),
+    lambda m: m.Series([None, 2.0]).align(m.Series([1.0, None], index=[1, 5]), fill_value=0.0),
+    lambda m: m.Series([None, 2.0]).align(m.Series([None, 3.0]), fill_value=9.0),
+    lambda m: m.DataFrame({"x": [None, 1.0]}).align(m.DataFrame({"x": [2.0]}), fill_value=0.0),
 ]
 
 
