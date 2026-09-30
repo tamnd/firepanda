@@ -27337,18 +27337,14 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             "dropping the columns a reduction cannot read is a decision about"
             " which columns come back",
         )
-        if not self._as_index:
-            raise NotImplementedError(
-                f"idx{how} with as_index=False is not supported yet, because the"
-                " keys have to come back as columns beside the labels"
-            )
         out: Any = None
         for name in _shown_names(self._frame):
             if name in self._by:
                 continue
             picked = self._picked(how, name, skipna)
             out = picked.to_frame(name) if out is None else out._assigned(name, picked)
-        return out
+        # Without the keys as labels they come back as columns before the labels found.
+        return out if self._as_index else out.reset_index()
 
     def _ranked(self, out: DataFrame) -> DataFrame:
         """The ranks as they are, one column a column that is not a key."""
