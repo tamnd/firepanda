@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: A list of tuples is a MultiIndex where pandas makes one
+
+`Index([("a", 1), ("b", 2)])` is now a `MultiIndex`, as pandas' `Index` reads a list of tuples as levels, and `tupleize_cols=False` keeps them as an index of tuples instead of refusing. A series built from a mapping with tuple keys is labelled by a `MultiIndex` too. A constructor's `index=` holding tuples is an index of tuples, which is what pandas' `ensure_index` gives, and a reindex by tuples is a `MultiIndex` only when the labels it replaces are one.
+
 ### Fixed: astype reads each text on its own when parsing instants
 
 `astype("datetime64[ms]")` on text that mixes a day with a day and a time, or writes a month as a word, now parses each text on its own as pandas does. It used to take one format from the first text and refuse the rest.

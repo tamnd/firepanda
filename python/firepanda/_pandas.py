@@ -1286,24 +1286,59 @@ def _unwrapped(values: Any) -> Any:
     return values
 
 
+def _all_tuples(labels: Any) -> bool:
+    """Whether labels are a plain list of tuples, not all empty, which pandas reads as levels."""
+    return (
+        isinstance(labels, (list, tuple))
+        and len(labels) > 0
+        and all(isinstance(label, tuple) for label in labels)
+        and any(label for label in labels)
+    )
+
+
+def _tuples_index(labels: Any, name: Any) -> Any:
+    """The `MultiIndex` pandas' `Index` answers a list of tuples with.
+
+    Raises:
+        ValueError: For a name that is not list-like, as pandas raises.
+        TypeError: For a name that is a list, which pandas cannot hash.
+    """
+    from ._multi import MultiIndex
+
+    if isinstance(name, list):
+        raise TypeError("Index.name must be a hashable type")
+    if name is not None and not isinstance(name, tuple):
+        raise ValueError("Names should be list-like for a MultiIndex")
+    return MultiIndex.from_tuples(list(labels), names=name)
+
+
+def _is_multi(index: Any) -> bool:
+    """Whether an index is a `MultiIndex`, which is what a reindex by tuples keeps."""
+    from ._multi import MultiIndex
+
+    return isinstance(index, MultiIndex)
+
+
 def _is_scalar(value: Any) -> bool:
     """Whether a value is one value rather than a sequence of them."""
     return isinstance(value, (str, bytes)) or not isinstance(value, collections.abc.Iterable)
 
 
-def _written_index(index: Any) -> Any:
+def _written_index(index: Any, multi: bool = False) -> Any:
     """An `index=` argument, with a `MultiIndex` written as the text labels that hold it.
 
-    A list of tuples is a `MultiIndex` too, as pandas reads one.
+    A list of tuples is an index of tuples, as pandas' `ensure_index` reads the
+    labels a constructor is given, and a `MultiIndex` only when `multi` says the
+    labels it is reindexing are one, which is what a reindex does in pandas.
     """
+    from ._frame import Index
     from ._multi import MultiIndex
 
-    if (
-        isinstance(index, (list, tuple))
-        and len(index) > 0
-        and all(isinstance(label, tuple) for label in index)
-    ):
-        index = MultiIndex.from_tuples(index)
+    if _all_tuples(index):
+        if multi:
+            index = MultiIndex.from_tuples(list(index))
+        else:
+            return Index(list(index), tupleize_cols=False)
     if isinstance(index, MultiIndex):
         from ._levels import labels_of
 
@@ -2195,7 +2230,7 @@ def _reindex_target(owner: Any, target: Any) -> Any:
     """
     from ._frame import Index
 
-    written = _written_index(target)
+    written = _written_index(target, _is_multi(owner.index))
     if written is not target:
         return written
     labels = target if isinstance(target, IndexMixin) else Index(_sequence(target))
@@ -2238,6 +2273,11 @@ def _reindex_by_position(
 def _reindex_here(owner: Any, target: Any, method: str | None) -> bool:
     """Whether a reindex has to find its rows here rather than in the core."""
     if method is not None:
+        return True
+    from ._object_index import ObjectIndex
+
+    if isinstance(target, ObjectIndex) and not isinstance(owner.index, ObjectIndex):
+        # Labels the core cannot hold in a column, such as tuples, are found here.
         return True
     kinds = [_word(owner.index.dtype)]
     if isinstance(target, IndexMixin):
@@ -4593,7 +4633,14 @@ def _keyed_series(data: Any, index: Any, name: Any) -> Any:
     Returns:
         The extension object, unwrapped.
     """
-    made = _labelled(list(data.keys()), list(data.values()))
+    keys = list(data.keys())
+    if _all_tuples(keys):
+        from ._frame import Series
+        from ._multi import MultiIndex
+
+        made = Series(list(data.values()), index=MultiIndex.from_tuples(keys))
+    else:
+        made = _labelled(keys, list(data.values()))
     inner = made._inner.relabel(_names.held(name)).renamed_axis(None)
     if index is None:
         return inner
@@ -15383,7 +15430,7 @@ class DataFrameMixin(_Carries):
                         f" kind, {columns!r} was passed"
                     )
                 inner = inner.reindex_columns(_names.held_all(columns), value)
-            index = _written_index(index)
+            index = _written_index(index, _is_multi(self.index))
             if index is not None and _reindex_here(self, index, method):
                 return _reindex_by_position(
                     DataFrame._wrap(inner), index, method, value, limit, tolerance
@@ -15788,7 +15835,7 @@ class SeriesMixin(_Carries):
             self._inner = _objectified(type(self)(data, index=index, name=name))._inner
             _named_as(self, name)
             return
-        index = _written_index(index)
+        index = _written_index(index, keyed and _all_tuples(list(data.keys())))
         if name is None and isinstance(data, IndexMixin):
             # pandas names a column built from an index after the index.
             name = data.name
@@ -18983,7 +19030,7 @@ class SeriesMixin(_Carries):
             return Series._wrap(self._inner)
 
         value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
-        index = _written_index(index)
+        index = _written_index(index, _is_multi(self.index))
         if _reindex_here(self, index, method):
             return _reindex_by_position(self, index, method, value, limit, tolerance)
         try:
@@ -26872,6 +26919,20 @@ class IndexMixin:
 
     _inner: _firepanda.Index
 
+    def __new__(cls, data: Any = None, *args: Any, **kwargs: Any) -> Any:
+        """A new index, or the `MultiIndex` pandas makes of a caller's list of tuples.
+
+        Only a plain `Index` called from outside firepanda turns tuples into
+        levels, since firepanda's own layer builds indexes of tuples on purpose.
+        """
+        from ._frame import Index
+
+        tupleize = kwargs.get("tupleize_cols", args[3] if len(args) > 3 else True)
+        known = set(kwargs) <= {"dtype", "copy", "name", "tupleize_cols"}
+        if cls is Index and known and tupleize and _all_tuples(data) and _from_outside():
+            return _tuples_index(data, kwargs.get("name", args[2] if len(args) > 2 else None))
+        return object.__new__(cls)
+
     if TYPE_CHECKING:
 
         @property
@@ -26895,8 +26956,8 @@ class IndexMixin:
 
         The pandas signature in full. `dtype` reads the labels as a series of
         that type reads them, and `copy` is taken because the labels are always
-        copied. `tupleize_cols` is taken at its default only, since what turning
-        it off asks for is an index of tuples.
+        copied. `tupleize_cols` is read by `__new__`, which answers a list of
+        tuples with a `MultiIndex` unless it is turned off.
 
         A series and another index are both taken as well as a plain sequence,
         and neither goes through the reader that a sequence goes through. Both
@@ -26910,11 +26971,6 @@ class IndexMixin:
         out of a named series is named after it, and a name written in the call
         wins over one the data was carrying.
         """
-        if not tupleize_cols:
-            raise NotImplementedError(
-                "tupleize_cols=False is not supported yet, because there is no"
-                " MultiIndex for it to turn off"
-            )
         label = _label_of(data) if name is None else str(name)
         if dtype is not None:
             self._typed(data, dtype, label)
