@@ -187,8 +187,10 @@ so a CTE hides a registered frame of the same name. The column alias list is a
 projection over the statement's root, applied as the prefix rule that
 `cte.mojo` and DuckDB both have.
 
-A recursive CTE is refused by name. The fixed point it asks for is a node that
-runs its own input until no new rows come out, and the plan has no such node.
+A recursive CTE lowers to the fixed point it asks for: the anchor is lowered
+first, then the step with the entry's own name bound to a scan of the rows the
+last round kept, and the recursion node runs the step until a round adds no
+rows. A `WITH` inside one and a union by name as its body are refused by name.
 
 ### A star stands for the columns the FROM produces, minus what was hung off it
 

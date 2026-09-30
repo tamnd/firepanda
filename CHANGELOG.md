@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: the join refusal no longer names POSITIONAL, which runs
+
+The `join-form` refusal, and the README table generated from it, said POSITIONAL joins were not run. They are, and so are ASOF joins. The refusal now names only what it refuses: NEAREST, and the mark, single, right_semi and right_anti types JOIN BY can name. The module notes in `firepanda/sql/plan.mojo` also said a recursive CTE was refused by name. It lowers to the fixed point it asks for, and only a `WITH` inside one or a union by name as its body is refused.
+
 ### Added: limit_area on ffill and bfill
 
 `Series.ffill`, `Series.bfill`, `DataFrame.ffill` and `DataFrame.bfill` take `limit_area`. Under "inside" only the gaps with a present value on both sides are filled, under "outside" only the gaps at either end, and any other word reads as "inside", as in pandas. It works with `limit`, `inplace` and `axis=1`.
