@@ -11260,11 +11260,17 @@ class DataFrameMixin(_Carries):
         is given the frame's labels, so the values are placed by position the
         way pandas places them. With no labels given and a series among the
         values, the labels are the ones the series make, and an array has to be
-        as long as they are.
+        as long as they are. An index of intervals is the array of its intervals.
         """
         from ._array import FirepandaArray
         from ._frame import DataFrame, Series
 
+        data = {
+            name: FirepandaArray(Series(values))
+            if isinstance(values, _interval.IntervalIndex)
+            else values
+            for name, values in data.items()
+        }
         if not any(isinstance(values, FirepandaArray) for values in data.values()):
             return data
         if index is None and any(isinstance(values, SeriesMixin) for values in data.values()):
@@ -17379,6 +17385,11 @@ class SeriesMixin(_Carries):
             data = data._column
         source = data._inner if isinstance(data, SeriesMixin) else data
         label = _names.held(name)
+        if isinstance(data, _interval.IntervalIndex):
+            # An index of intervals is an interval column of its own type, document 102.
+            kind = _word(data.dtype)
+            pairs = _interval.interval_pairs(data._values, kind)
+            return _firepanda.Series(_objects.interval_cells(pairs, kind), label)
         try:
             made = _firepanda.Series(source, label)
         except Exception:

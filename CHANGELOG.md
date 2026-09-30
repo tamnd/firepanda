@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a Series or frame column built from an IntervalIndex
+
+`Series(intervals)` and a frame column given an `IntervalIndex` now make an interval column of the index's own type, placed by position as pandas places it, where they used to be refused. `IntervalIndex.to_series` labels the rows with the intervals, as pandas does.
+
 ### Added: interval_range of instants and spans
 
 `interval_range` now builds intervals between instants or spans as pandas does, with breaks from `date_range` or `timedelta_range`, a day as the step when none is given, the zone kept, and ends of two kinds refused with pandas' words.
