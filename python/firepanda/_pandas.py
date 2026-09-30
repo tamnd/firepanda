@@ -11654,18 +11654,19 @@ class DataFrameMixin(_Carries):
         Each row of the answer is a value of `index`, or a row label when it is
         left out, both axes are sorted, and a pair no row holds is missing.
 
+        With `values` left out or given as a list, each value column is pivoted
+        on its own and the answer's columns have two levels, the value column
+        and then the key, as in pandas.
+
         Raises:
             ValueError: When two rows hold the same pair, with pandas' words.
-            NotImplementedError: For `values` left out or given as a list and for
-                several columns keys, which pandas answers with columns of several
-                levels, and for a columns key whose values are not text.
+            NotImplementedError: For several columns keys, for a columns key
+                whose values are not text, and for a list of value columns of
+                several types that pandas holds as objects.
         """
-        if values is NO_DEFAULT or isinstance(values, list | tuple):
-            raise NotImplementedError(
-                "pivot: without one values column pandas labels the columns with a"
-                " MultiIndex, which firepanda does not have"
-            )
         across = _one_key(columns, "columns", "pivot")
+        if values is NO_DEFAULT or isinstance(values, list | tuple):
+            return _pivot_values(self, across, index, values)
         if index is NO_DEFAULT:
             keys = self.index.tolist()
             row_name = self.index.name
@@ -11710,17 +11711,34 @@ class DataFrameMixin(_Carries):
                 values are not text, and for margins beside row keys that are
                 not text or under several of them.
         """
+        levelled = isinstance(aggfunc, list | tuple | dict) or (
+            columns is not None and (values is None or isinstance(values, list | tuple))
+        )
         if margins:
+            if isinstance(aggfunc, list | tuple) and not isinstance(values, list | tuple | None):
+                rest = (fill_value, True, dropna, margins_name, observed, sort)
+                pieces = [
+                    (
+                        (_function_name(func),),
+                        self.pivot_table(values, index, columns, func, *rest, **kwargs),
+                    )
+                    for func in aggfunc
+                ]
+                return _pivot_joined(pieces, False, False)
+            if levelled:
+                raise NotImplementedError(
+                    "pivot_table: totals beside columns of several levels are not"
+                    " supported yet"
+                )
             table = self.pivot_table(
                 values, index, columns, aggfunc, fill_value, False, dropna, margins_name,
                 observed, sort, **kwargs,
             )  # fmt: skip
             wanted = (index, columns, values, aggfunc, margins_name, kwargs)
             return _pivot_margins(self, table, *wanted)
-        if isinstance(aggfunc, list | tuple | dict):
-            raise NotImplementedError(
-                "pivot_table: a list or dict of functions labels the columns with a"
-                " MultiIndex, which firepanda does not have"
+        if levelled:
+            return _pivot_levels(
+                self, values, index, columns, aggfunc, (fill_value, dropna, observed, sort), kwargs
             )
         down = _down_key(index, "pivot_table")
         taken = set(down) if isinstance(down, list) else {down}
@@ -31132,6 +31150,117 @@ def _missing_key(key: Any) -> bool:
     if isinstance(key, tuple):
         return any(_missing(part) for part in key)
     return _missing(key)
+
+
+def _pivot_values(frame: Any, across: Any, index: Any, values: Any) -> Any:
+    """`pivot` of several value columns, one pivot each under the value column's name.
+
+    Named in a list, the values are read as one block, so columns of several
+    number types are all floats, as pandas reads them.
+
+    Raises:
+        NotImplementedError: For a list of values of several kinds, which pandas
+            reads as objects.
+    """
+    if values is NO_DEFAULT:
+        taken = {across}
+        if index is not NO_DEFAULT:
+            down = _down_key(index, "pivot")
+            taken |= set(down) if isinstance(down, list) else {down}
+        names = [name for name in _shown_names(frame) if name not in taken]
+    else:
+        names = list(values)
+        printed = {_word(frame[name].dtype) for name in names}
+        if len(printed) > 1:
+            if not all(_numeric_kind(word) in ("int64", "float64") for word in printed):
+                raise NotImplementedError(
+                    "pivot: value columns of several kinds are read by pandas as one"
+                    " block of objects, and firepanda has no object column"
+                )
+            frame = frame.astype(dict.fromkeys(names, "float64"))
+    pieces = [
+        ((name,), frame.pivot(columns=across, index=index, values=name)) for name in names
+    ]
+    return _pivot_joined(pieces, True, False)
+
+
+def _pivot_levels(
+    frame: Any,
+    values: Any,
+    index: Any,
+    columns: Any,
+    aggfunc: Any,
+    options: tuple[Any, Any, Any, Any],
+    kwargs: dict[str, Any],
+) -> Any:
+    """`pivot_table` whose columns have several levels, joined from one table a piece.
+
+    A list of functions puts each function's table under its name, in the
+    order given. A mapping takes each value column's function or functions,
+    and several value columns take one table each, and then the columns are
+    sorted, as pandas sorts them.
+    """
+    fill_value, dropna, observed, sort = options
+
+    def table(value: Any, func: Any) -> Any:
+        return frame.pivot_table(
+            value, index, columns, func, fill_value, False, dropna, "All", observed, sort,
+            **kwargs,
+        )  # fmt: skip
+
+    if isinstance(aggfunc, list | tuple):
+        pieces = [((_function_name(func),), table(values, func)) for func in aggfunc]
+        return _pivot_joined(pieces, sort, False)
+    if isinstance(aggfunc, dict):
+        several = any(isinstance(funcs, list | tuple) for funcs in aggfunc.values())
+        single = values is not None and not isinstance(values, list | tuple)
+        pieces = []
+        for value, funcs in aggfunc.items():
+            for func in funcs if isinstance(funcs, list | tuple) else [funcs]:
+                prefix = (value, _function_name(func)) if several else (value,)
+                pieces.append((prefix[1:] if single else prefix, table(value, func)))
+        return _pivot_joined(pieces, sort, sort)
+    if values is None:
+        down = _down_key(index, "pivot_table")
+        taken = set(down) if isinstance(down, list) else {down}
+        taken.add(_one_key(columns, "columns", "pivot_table"))
+        values = [name for name in _shown_names(frame) if name not in taken]
+    pieces = [((value,), table(value, aggfunc)) for value in values]
+    return _pivot_joined(pieces, sort, sort)
+
+
+def _pivot_joined(pieces: list[tuple[tuple[Any, ...], Any]], rows: bool, heads: bool) -> Any:
+    """Tables side by side, each column under its piece's labels, with the level names.
+
+    The rows are every piece's rows, sorted when `rows` is set, and a piece
+    without one of them has a gap there. The columns are sorted when `heads`
+    is set, and are in the pieces' order otherwise.
+    """
+    from ._frame import DataFrame
+
+    order = list(dict.fromkeys(label for _, piece in pieces for label in piece.index.tolist()))
+    if rows:
+        with contextlib.suppress(TypeError):
+            order = sorted(order)
+    columns: dict[Any, Any] = {}
+    labels = None
+    names: list[Any] = []
+    for prefix, piece in pieces:
+        if piece.index.tolist() != order:
+            piece = piece.reindex(order)
+        labels = piece.index
+        depth = piece.columns.nlevels
+        inner = piece.columns.names if depth > 1 else _axis_names(piece)
+        names = [None] * len(prefix) + list(inner)
+        for position, head in enumerate(piece.columns):
+            key = (*prefix, *(head if isinstance(head, tuple) else (head,)))
+            columns[key if len(key) > 1 else key[0]] = piece.iloc[:, position]
+    if heads:
+        with contextlib.suppress(TypeError):
+            columns = dict(sorted(columns.items(), key=operator.itemgetter(0)))
+    made = DataFrame(columns, index=labels)
+    _hold_columns(made, names)
+    return made
 
 
 def _pivot_names(labels: list[Any], caller: str) -> list[Any]:

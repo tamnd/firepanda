@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Pivot into columns of several levels
+
+`pivot` with no values or a list of values, and `pivot_table` with a list or a dict of functions, several values or no values, now build columns of several levels as pandas does, with the value or function on the outer level and the key's name on the inner one. Totals beside a single value under a list of functions work too; totals beside several values are still refused.
+
 ### Added: A name for the column axis, as pandas keeps on the columns
 
 A frame now holds the name of its column axis and hands it out on `df.columns`, where pandas keeps it. It is set by `rename_axis(columns=...)` or `axis=1`, which used to raise, by naming `df.columns` or its levels, by columns given as a named index to the constructor or `set_axis`, and by `pivot`, `pivot_table`, `crosstab`, `unstack` and `stack`, which name it after their key. It prints in the corner of the header and in `to_html`, travels through nearly every method as pandas measures it, becomes the row name after a transpose, names the labels of a reduction or a row read across, is the default `var_name` of `melt`, and fills `column_names` in `to_dict("tight")`. `DataFrame.duplicated` now answers an unnamed column rather than one named with an empty string.
