@@ -2778,6 +2778,37 @@ def test_a_cast_to_varchar_writes_the_numbers_out() raises:
     assert_equal(col[3], "40", "and a two digit one")
 
 
+def test_a_cast_to_varchar_writes_an_instant_as_duckdb_does() raises:
+    # A date is a day count underneath and a timestamp a tick count, and the
+    # cast used to write those. DuckDB writes the instant, a fraction without
+    # its trailing zeros, and a year before the first as the year it was.
+    var out = run(
+        (
+            "SELECT CAST(d AS VARCHAR) AS d, CAST(t AS VARCHAR) AS t,"
+            " CAST(z AS VARCHAR) AS z, CAST(e AS VARCHAR) AS e,"
+            " CAST(b AS VARCHAR) AS b FROM (SELECT DATE '2020-01-01' AS d,"
+            " TIMESTAMP '2001-04-20 14:42:11.123' AS t, TIMESTAMP '1970-01-01'"
+            " AS z, DATE '1969-01-01' AS e, DATE '0000-03-01' AS b)"
+        ),
+        session(),
+    )
+
+    assert_true(out.schema[0].dtype == LogicalType.STRING, "text")
+    assert_equal(out.column("d").as_strings()[0], "2020-01-01", "a date")
+    assert_equal(
+        out.column("t").as_strings()[0],
+        "2001-04-20 14:42:11.123",
+        "a fraction without its trailing zeros",
+    )
+    assert_equal(
+        out.column("z").as_strings()[0], "1970-01-01 00:00:00", "midnight"
+    )
+    assert_equal(
+        out.column("e").as_strings()[0], "1969-01-01", "before the epoch"
+    )
+    assert_equal(out.column("b").as_strings()[0], "0001-03-01 (BC)", "BC")
+
+
 def test_a_cast_of_an_expression_converts_what_the_expression_made() raises:
     var out = run(
         "SELECT CAST(qty * price AS DOUBLE) AS total FROM sales", session()

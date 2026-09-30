@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: CAST of a date or a timestamp to VARCHAR writes the instant
+
+`CAST(d AS VARCHAR)` of a date or a timestamp with no time zone now writes the value as DuckDB does, `2020-01-01` and `2020-01-01 10:00:00.5`, with a fraction of a second only when there is one and a year before the first written with `(BC)`, where before it wrote the count of days or ticks the value is stored as.
+
 ### Changed: Instants asked for by dtype are parsed one by one
 
 A series or index built with `dtype="datetime64[unit]"` now parses each value on its own, as pandas does there, so values written in different formats, such as a date and a date with a time, are all read rather than refused for not matching the first.

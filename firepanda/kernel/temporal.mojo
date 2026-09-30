@@ -3536,3 +3536,70 @@ def instant_text(col: AnyArray, i: Int) -> Optional[String]:
         except:
             return None
     return None
+
+
+def is_rendered_instant(type: LogicalType) -> Bool:
+    """Reports whether `instant_strings` renders a column of this type.
+
+    Args:
+        type: The column's type.
+
+    Returns:
+        True for a date and a timestamp with no time zone.
+    """
+    return type.kind == TypeKind.DATE or (
+        type.kind == TypeKind.TIMESTAMP and type.zone.is_naive()
+    )
+
+
+def instant_strings(col: AnyArray) raises -> AnyArray:
+    """A column of dates or naive timestamps as the text SQL's cast writes.
+
+    `cast_any` converts to text by the physical layout, which for a date is the
+    day count and for a timestamp the tick count. This is the conversion a
+    `CAST(... AS VARCHAR)` means instead, spelled the way DuckDB spells it: ISO
+    8601, a fraction of a second only when there is one and without its
+    trailing zeros, and a year before the first as the year it was with `(BC)`
+    after the value rather than the astronomical year with a sign.
+
+    Args:
+        col: The column, a date or a timestamp with no time zone.
+
+    Returns:
+        A text column, null where the input was null.
+
+    Raises:
+        Error: If the column is not one `is_rendered_instant` accepts.
+    """
+    if not is_rendered_instant(col.type):
+        raise Error("instant_strings: the column does not hold instants")
+    var rows = len(col)
+    var builder = StringBuilder(rows)
+    for i in range(rows):
+        if not col.is_valid(i):
+            builder.append_null()
+            continue
+        var found = instant_text(col, i)
+        if not found:
+            raise Error("instant_strings: an instant has no rendering")
+        var text = found.take()
+        var bytes = text.as_bytes()
+        var end = len(bytes)
+        var dot = text.find(".")
+        if dot >= 0:
+            while end > dot + 1 and bytes[end - 1] == UInt8(ord("0")):
+                end -= 1
+            if end == dot + 1:
+                end = dot
+        var body = String(text[byte=0:end])
+        # The astronomical year 0 is 1 BC and -1 is 2 BC, and `temporal_text`
+        # writes the astronomical one.
+        var dash = body.find("-", 1)
+        var year = Int(String(body[byte=0:dash]))
+        if year <= 0:
+            var years = String(1 - year)
+            while years.byte_length() < 4:
+                years = "0" + years
+            body = years + String(body[byte = dash : body.byte_length()]) + " (BC)"
+        builder.append(body.as_bytes())
+    return AnyArray(builder^.finish())
