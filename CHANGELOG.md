@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Pivot table totals beside several values
+
+`pivot_table(margins=True)` now works with several values, no values, a dict of functions, and several values under a list of functions, as pandas lays them out: each value's block ends with its own total column, and integer columns beside a float come out as floats while the totals keep their type. A dict that gives one value several functions, or that lacks a column, fails with pandas' error. A single row key given as a one item list now works with totals too.
+
 ### Added: Pivot into columns of several levels
 
 `pivot` with no values or a list of values, and `pivot_table` with a list or a dict of functions, several values or no values, now build columns of several levels as pandas does, with the value or function on the outer level and the key's name on the inner one. Totals beside a single value under a list of functions work too; totals beside several values are still refused.

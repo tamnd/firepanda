@@ -11715,21 +11715,11 @@ class DataFrameMixin(_Carries):
             columns is not None and (values is None or isinstance(values, list | tuple))
         )
         if margins:
-            if isinstance(aggfunc, list | tuple) and not isinstance(values, list | tuple | None):
-                rest = (fill_value, True, dropna, margins_name, observed, sort)
-                pieces = [
-                    (
-                        (_function_name(func),),
-                        self.pivot_table(values, index, columns, func, *rest, **kwargs),
-                    )
-                    for func in aggfunc
-                ]
-                return _pivot_joined(pieces, False, False)
+            if isinstance(index, list | tuple) and len(index) == 1:
+                index = index[0]
             if levelled:
-                raise NotImplementedError(
-                    "pivot_table: totals beside columns of several levels are not"
-                    " supported yet"
-                )
+                rest = (fill_value, True, dropna, margins_name, observed, sort)
+                return _pivot_totalled(self, values, index, columns, aggfunc, rest, kwargs)
             table = self.pivot_table(
                 values, index, columns, aggfunc, fill_value, False, dropna, margins_name,
                 observed, sort, **kwargs,
@@ -31184,6 +31174,14 @@ def _pivot_values(frame: Any, across: Any, index: Any, values: Any) -> Any:
     return _pivot_joined(pieces, True, False)
 
 
+def _pivot_rest(frame: Any, index: Any, columns: Any) -> list[Any]:
+    """The columns that are neither a row key nor the column key, which `values=None` means."""
+    down = _down_key(index, "pivot_table")
+    taken = set(down) if isinstance(down, list) else {down}
+    taken.add(_one_key(columns, "columns", "pivot_table"))
+    return [name for name in _shown_names(frame) if name not in taken]
+
+
 def _pivot_levels(
     frame: Any,
     values: Any,
@@ -31221,12 +31219,91 @@ def _pivot_levels(
                 pieces.append((prefix[1:] if single else prefix, table(value, func)))
         return _pivot_joined(pieces, sort, sort)
     if values is None:
-        down = _down_key(index, "pivot_table")
-        taken = set(down) if isinstance(down, list) else {down}
-        taken.add(_one_key(columns, "columns", "pivot_table"))
-        values = [name for name in _shown_names(frame) if name not in taken]
+        values = _pivot_rest(frame, index, columns)
     pieces = [((value,), table(value, aggfunc)) for value in values]
     return _pivot_joined(pieces, sort, sort)
+
+
+def _pivot_totalled(
+    frame: Any,
+    values: Any,
+    index: Any,
+    columns: Any,
+    aggfunc: Any,
+    rest: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    """`pivot_table` with totals whose columns have several levels, one totalled table a piece.
+
+    Each function, or each value column, gets its own table with its totals, so
+    the total column sits at the end of its block rather than sorted in among
+    the key's columns, as pandas places it.
+
+    Raises:
+        InvalidArgumentError: For a mapping that gives one value several
+            functions, which pandas refuses with this sentence.
+        NotImplementedError: For totals beside no column key.
+    """
+
+    def table(value: Any, func: Any) -> Any:
+        return frame.pivot_table(value, index, columns, func, *rest, **kwargs)
+
+    if isinstance(aggfunc, list | tuple):
+        pieces = [((_function_name(func),), table(values, func)) for func in aggfunc]
+        return _pivot_joined(pieces, False, False)
+    if columns is None:
+        raise NotImplementedError("pivot_table: totals beside no column key are not supported")
+    if isinstance(aggfunc, dict):
+        if any(isinstance(funcs, list | tuple) for funcs in aggfunc.values()):
+            raise InvalidArgumentError("The name None occurs multiple times, use a level number")
+        if values is not None and not isinstance(values, list | tuple):
+            return table(values, aggfunc[values])
+        # pandas totals every other column with the mapping and fails on one it lacks.
+        for name in values if values is not None else _pivot_rest(frame, index, columns):
+            if name not in aggfunc:
+                raise KeyError(name)
+        chosen = [(value, func) for value, func in aggfunc.items()]
+    else:
+        if values is None:
+            values = _pivot_rest(frame, index, columns)
+        chosen = [(value, aggfunc) for value in values]
+    if rest[-1]:
+        with contextlib.suppress(TypeError):
+            chosen = sorted(chosen, key=operator.itemgetter(0))
+    pieces = [((value,), table(value, func)) for value, func in chosen]
+    return _pivot_joined(_one_block(pieces, rest[3]), False, False)
+
+
+def _one_block(pieces: list[tuple[Any, Any]], total: Any) -> list[tuple[Any, Any]]:
+    """Pieces with integer columns read as floats when a float sits beside them, as pandas has it.
+
+    pandas adds the totals row to a table of several value columns through one
+    block of numbers, so integers beside a float come out as floats. The total
+    column is added on its own and keeps its type. Without totals pandas keeps
+    each column's type.
+    """
+
+    def kind(dtype: Any) -> str:
+        text = str(dtype)
+        return "int" if text.startswith(("int", "uint")) else text[:5]
+
+    kinds = {
+        kind(dtype)
+        for _, piece in pieces
+        for head, dtype in zip(piece.columns, piece.dtypes, strict=True)
+        if head != total
+    }
+    if "int" not in kinds or "float" not in kinds:
+        return pieces
+    cast = []
+    for prefix, piece in pieces:
+        heads = [
+            head
+            for head, dtype in zip(piece.columns, piece.dtypes, strict=True)
+            if head != total and kind(dtype) == "int"
+        ]
+        cast.append((prefix, piece.astype(dict.fromkeys(heads, "float64")) if heads else piece))
+    return cast
 
 
 def _pivot_joined(pieces: list[tuple[tuple[Any, ...], Any]], rows: bool, heads: bool) -> Any:
