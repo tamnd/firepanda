@@ -22,6 +22,10 @@ def ordered(lib: Any) -> Any:
     return lib.CategoricalIndex(["b", "a", "c"], categories=["c", "b", "a"], ordered=True)
 
 
+def gapped(lib: Any) -> Any:
+    return lib.CategoricalIndex(["a", None, "b", None, "a"], name="k")
+
+
 BUILDS = {
     "get_loc": lambda lib: plain(lib).get_loc("b"),
     "get_loc ordered": lambda lib: ordered(lib).get_loc("c"),
@@ -53,6 +57,17 @@ BUILDS = {
     "map": lambda lib: plain(lib).map({"a": "A", "b": "B", "c": "C"}),
     "map function": lambda lib: plain(lib).map(str.upper),
     "map merging": lambda lib: plain(lib).map({"a": "x", "b": "x", "c": "y"}),
+    "gaps unique": lambda lib: gapped(lib).unique(),
+    "gaps duplicated": lambda lib: [bool(x) for x in gapped(lib).duplicated()],
+    "gaps get_indexer": lambda lib: [
+        int(x) for x in gapped(lib).unique().get_indexer(["a", "b", "z"])
+    ],
+    "gaps get_loc": lambda lib: gapped(lib).get_loc("b"),
+    "gaps in": lambda lib: ("b" in gapped(lib), "z" in gapped(lib)),
+    "gaps is_unique": lambda lib: gapped(lib).is_unique,
+    "gaps map function": lambda lib: gapped(lib).map(lambda label: label * 2),
+    "gaps map ignored": lambda lib: gapped(lib).map(lambda label: label * 2, na_action="ignore"),
+    "gaps map mapping": lambda lib: gapped(lib).map({"a": "A", "b": "B"}),
     "class": lambda lib: (type(plain(lib)).__name__, type(plain(lib)[1:]).__name__),
 }
 

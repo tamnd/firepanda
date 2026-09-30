@@ -66,8 +66,13 @@ class CategoricalIndex(Index):
         return CategoricalIndex(values, name=self.name)
 
     def _decoded(self) -> Index:
-        """The labels the codes stand for, as a plain index."""
-        return Index(self.tolist(), name=self.name)
+        """The labels the codes stand for, as a plain index of text with gaps.
+
+        The categories are always text here, and a gap comes back from `tolist`
+        as NaN, which a text column would refuse beside the labels.
+        """
+        labels = [None if label != label else label for label in self.tolist()]
+        return Index(labels, dtype="str", name=self.name)
 
     def _taken(self, positions: list[int]) -> CategoricalIndex:
         return self._of(self._held()[positions])
@@ -163,17 +168,25 @@ class CategoricalIndex(Index):
         """Each category through a function or a mapping.
 
         When the new categories are all different the answer is still a category
-        index, in the same order, as in pandas; otherwise it is a plain index.
+        index, in the same order, as in pandas; otherwise it is a plain index. A
+        function is handed a gap too unless `na_action="ignore"`, and pandas keeps
+        the categories then only when it answers NaN itself, which a function
+        working out a new value never does.
         """
         held = self.categories.tolist()
+        codes = self.codes.tolist()
+        gap: Any = math.nan
         if callable(mapper):
             renamed = [mapper(category) for category in held]
+            if na_action is None and -1 in codes:
+                gap = mapper(math.nan)
         else:
             renamed = [mapper.get(category, math.nan) for category in held]
-        if len(set(renamed)) == len(renamed) and all(value == value for value in renamed):
+        distinct = len(set(renamed)) == len(renamed) and all(value == value for value in renamed)
+        if distinct and gap is math.nan:
             return self.rename_categories(renamed)
-        codes = self.codes.tolist()
-        return Index([math.nan if at < 0 else renamed[at] for at in codes], name=self.name)
+        labels = [gap if at < 0 else renamed[at] for at in codes]
+        return Index([None if label != label else label for label in labels], name=self.name)
 
     def as_ordered(self) -> CategoricalIndex:
         """The same labels with the categories in order."""
