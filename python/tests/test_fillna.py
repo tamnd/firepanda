@@ -28,6 +28,26 @@ def frame(module):
     return module.DataFrame({"i": [1, None, 3], "f": [1.5, None, 3.5], "s": ["a", None, "c"]})
 
 
+def holed(firepanda):
+    """An integer column with a hole in it, as Arrow hands one over.
+
+    A list with a None in it is float64 in both libraries, so the integer column with
+    a gap that firepanda's fill rules are about is read in through Arrow, which keeps it.
+    """
+    import pyarrow as pa
+
+    table = pa.table({"i": pa.array([1, None, 3], pa.int64()), "s": ["a", "b", "c"]})
+    return firepanda.from_arrow(table)
+
+
+def holed_labelled(firepanda, labels, values):
+    """`labelled` for an integer column with a hole in it, read in through Arrow."""
+    import pyarrow as pa
+
+    table = pa.table({"k": labels, "v": pa.array(values, pa.int64())})
+    return firepanda.from_arrow(table).set_index("k")["v"]
+
+
 def labelled(module, labels, values):
     """A column carrying labels, built the way each library builds one."""
     if module is pd:
@@ -69,9 +89,9 @@ def test_a_none_means_there_is_nothing_to_do(firepanda):
 
 
 def test_the_column_keeps_its_type_and_the_frame_its_shape(firepanda):
-    answered = frame(firepanda).fillna({"i": 0})
+    answered = holed(firepanda).fillna({"i": 0})
     assert answered["i"].dtype == "int64"
-    assert answered.shape == (3, 3)
+    assert answered.shape == (3, 2)
 
 
 def test_the_row_labels_and_their_name_come_through(firepanda):
@@ -116,7 +136,7 @@ def test_a_column_of_true_and_false_takes_one(firepanda):
 
 def test_true_is_not_a_number_here_and_is_not_one_in_pandas_either(firepanda):
     with pytest.raises(TypeError, match="Invalid value 'True' for dtype 'int64'"):
-        frame(firepanda).fillna({"i": True})
+        holed(firepanda).fillna({"i": True})
 
 
 def test_a_number_is_not_a_truth_value(firepanda):
@@ -126,13 +146,13 @@ def test_a_number_is_not_a_truth_value(firepanda):
 
 def test_text_does_not_go_into_a_column_of_numbers(firepanda):
     with pytest.raises(TypeError, match="Invalid value 'x' for dtype 'int64'"):
-        frame(firepanda).fillna({"i": "x"})
+        holed(firepanda).fillna({"i": "x"})
 
 
 def test_a_fraction_does_not_go_into_a_column_of_whole_numbers(firepanda):
     """A cast exists and throws the fraction away, which is not what was asked."""
     with pytest.raises(TypeError, match=r"Invalid value '0\.5' for dtype 'int64'"):
-        frame(firepanda).fillna({"i": 0.5})
+        holed(firepanda).fillna({"i": 0.5})
 
 
 def test_a_number_does_not_go_into_a_column_of_text(firepanda):
@@ -288,7 +308,7 @@ def test_a_fallback_of_whole_numbers_fills_a_column_of_fractions(firepanda):
 
 
 def test_a_fraction_cannot_go_into_a_column_of_whole_numbers(firepanda):
-    made = labelled(firepanda, ["a", "b"], [1, None])
+    made = holed_labelled(firepanda, ["a", "b"], [1, None])
     with pytest.raises(TypeError, match="cannot safely cast non-equivalent"):
         made.fillna(labelled(firepanda, ["a", "b"], [2.0, 2.5]))
 
@@ -300,7 +320,7 @@ def test_a_fraction_in_a_row_nobody_reads_is_nobody_s_business(firepanda):
 
 
 def test_a_word_that_is_not_a_number_says_what_it_could_not_read(firepanda):
-    made = labelled(firepanda, ["a", "b"], [1, None])
+    made = holed_labelled(firepanda, ["a", "b"], [1, None])
     with pytest.raises(ValueError, match="invalid literal for int"):
         made.fillna(labelled(firepanda, ["a", "b"], ["2", "x"]))
 
