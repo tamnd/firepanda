@@ -773,6 +773,41 @@ def _text_total(column: Any, skipna: bool, min_count: int) -> Any:
     return "".join(column.dropna().tolist())
 
 
+def _objects_scan(column: Any, kind: str, skipna: bool) -> Any:
+    """A running total, product, least or greatest down an object column, in Python.
+
+    pandas scans an object column with Python's own `+`, `*` and comparisons,
+    so a flag counts as 1 or 0 beside a number. A gap is read as the float that
+    leaves the scan where it was, 0.0 for a total, 1.0 for a product and an
+    infinity for the least or greatest, and answered NaN, so a whole number
+    after a gap in a total or a product is a float, as in pandas. Under
+    `skipna=False` every row after the first gap is NaN.
+    """
+    from ._frame import Series
+
+    neutral = {"cumsum": 0.0, "cumprod": 1.0, "cummax": -math.inf, "cummin": math.inf}[kind]
+    running: Any = None
+    poisoned = False
+    out: list[Any] = []
+    for value in _values_of(column._inner):
+        gap = _is_gap(value)
+        if poisoned or (gap and not skipna):
+            poisoned = True
+            out.append(math.nan)
+            continue
+        value = neutral if gap else value
+        if running is None:
+            running = value
+        elif kind == "cumsum":
+            running += value
+        elif kind == "cumprod":
+            running *= value
+        else:
+            running = min(running, value) if kind == "cummin" else max(running, value)
+        out.append(math.nan if gap else running)
+    return Series(out, index=column.index, name=column.name, dtype=object)
+
+
 def _text_scan(column: Any, kind: str, skipna: bool) -> Any:
     """A running join, least or greatest down a text column, as pandas scans text.
 
@@ -16068,8 +16103,25 @@ class DataFrameMixin(_Carries):
         return self._transformed("pct_change", periods)
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> DataFrame:
-        """Runs one of the four scans down every column."""
+        """Runs one of the four scans down every column, or across every row.
+
+        pandas runs a scan across the rows as the same scan down the columns of
+        the frame turned on its side, and turns the answer back, so the columns
+        share the one type the turn gives them.
+        """
         read = self._numeric_part() if numeric_only else self
+        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            return read.T._scan(kind, 0, skipna, False).T
+        width = read.shape[1]
+        if any(_objects.is_object(read.iloc[:, at]._inner) for at in range(width)):
+            from ._frame import DataFrame
+
+            # An object column is scanned in Python, so each column goes on its own.
+            parts = {
+                at: read.iloc[:, at]._scan(kind, 0, skipna, False).reset_index(drop=True)
+                for at in range(width)
+            }
+            return DataFrame(parts).set_axis(read.index, axis=0).set_axis(read.columns, axis=1)
         scanned = read._transformed(kind, 0, axis)
         if skipna:
             return scanned
@@ -19453,6 +19505,9 @@ class SeriesMixin(_Carries):
         if _is_text(self):
             _axis_number(axis, "Series", 0, (0,))
             return _text_scan(self, kind, skipna)
+        if _objects.is_object(self._inner):
+            _axis_number(axis, "Series", 0, (0,))
+            return _objects_scan(self, kind, skipna)
         scanned = self._transformed(kind, 0, axis)
         if skipna or not self._inner.null_count():
             return scanned
