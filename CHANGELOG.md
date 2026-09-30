@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Timestamp.tz_localize settles a repeated or skipped hour
+
+`Timestamp.tz_localize` took only `ambiguous="raise"` and `nonexistent="raise"`, and even then attached the zone to a repeated or skipped hour without a word. It now reads the zone's transitions as an index does: `ambiguous` takes True, False or "NaT", `nonexistent` takes "NaT", "shift_forward", "shift_backward" or a timedelta, and "raise" refuses in pandas' words. Those refusals, from an index or a column too, no longer start with the core's `temporal: `.
+
 ### Fixed: A label of another type in `in` and drop
 
 `"x" in Index([1, 2])` raised the core's refusal to compare a text label with numbers, where pandas answers False, and `drop` of such a label raised the same error rather than pandas' `KeyError`, or skipping it under `errors="ignore"`. Both now answer as pandas does, and a whole float finds an integer label, and an integer a float one, as it does in pandas.

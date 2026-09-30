@@ -510,6 +510,8 @@ def translate(error: BaseException) -> BaseException:
         # whole message including the prefix is deliberate: the prefix is the
         # evidence of what went wrong.
         wanted = BY_KIND.get(kind)
+        # The core names its date and time module first, which pandas never does.
+        rest = rest.removeprefix("temporal: ")
         return wanted(rest) if wanted is not None else RuntimeError(message)
 
     # `Exception: TypeError: ...` and the double wrapped `ValueError: TypeError:

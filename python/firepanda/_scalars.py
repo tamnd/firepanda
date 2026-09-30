@@ -379,6 +379,20 @@ _NONEXISTENT_REFUSAL = (
 )
 
 
+def _zone_words(ambiguous: Any, nonexistent: Any) -> None:
+    """Refuses a daylight saving policy pandas does not take, naming the ones it does.
+
+    Raises:
+        InvalidArgumentError: If either is not in its vocabulary.
+    """
+    # `in` would take 1 for True, and pandas does not, so the two booleans are
+    # matched by identity and the strings by value.
+    if ambiguous is not True and ambiguous is not False and ambiguous not in ("NaT", "raise"):
+        raise InvalidArgumentError(_AMBIGUOUS_REFUSAL)
+    if not isinstance(nonexistent, _datetime.timedelta) and nonexistent not in _NONEXISTENT:
+        raise InvalidArgumentError(_NONEXISTENT_REFUSAL)
+
+
 def _zone_policies(ambiguous: Any, nonexistent: Any, live: bool) -> None:
     """Refuses the two daylight saving policies, telling a typo from a gap.
 
@@ -396,7 +410,8 @@ def _zone_policies(ambiguous: Any, nonexistent: Any, live: bool) -> None:
     `live` is whether pandas looks at these arguments at all on this call, and it
     is measured rather than reasoned about. `tz_localize` always looks, even when
     it is handed None and even when the moment already carries a zone, so it
-    passes True. The rounding family only looks when the moment is already zoned,
+    checks the words with `_zone_words` on every call and then answers the
+    policies itself. The rounding family only looks when the moment is already zoned,
     and hands a naive one straight back with a misspelling in its arguments
     unread, so it passes whether there is a zone. Checking anyway would be
     firepanda refusing input pandas accepts, which is the direction of difference
@@ -418,12 +433,7 @@ def _zone_policies(ambiguous: Any, nonexistent: Any, live: bool) -> None:
     """
     if not live:
         return
-    # `in` would take 1 for True, and pandas does not, so the two booleans are
-    # matched by identity and the strings by value.
-    if ambiguous is not True and ambiguous is not False and ambiguous not in ("NaT", "raise"):
-        raise InvalidArgumentError(_AMBIGUOUS_REFUSAL)
-    if not isinstance(nonexistent, _datetime.timedelta) and nonexistent not in _NONEXISTENT:
-        raise InvalidArgumentError(_NONEXISTENT_REFUSAL)
+    _zone_words(ambiguous, nonexistent)
     for name, given in (("ambiguous", ambiguous), ("nonexistent", nonexistent)):
         if given != "raise":
             raise UnsupportedError(
@@ -1216,11 +1226,16 @@ class Timestamp(_datetime.datetime):
         Returns:
             The moment in that zone, reading the same on the clock.
 
+        A repeated or missing hour is settled by the policies as pandas settles
+        it, by localizing an index of this one moment, which reads the zone's
+        transitions.
+
         Raises:
             TypeError: If it already has a zone.
-            NotImplementedError: If either policy is asked for.
+            ValueError: For a repeated or missing hour under `"raise"`, in
+                pandas' words.
         """
-        _zone_policies(ambiguous, nonexistent, True)
+        _zone_words(ambiguous, nonexistent)
         if tz is None:
             # Stripping a zone off something that has none is a no operation and
             # not a mistake. pandas hands the moment straight back, which is the
@@ -1229,7 +1244,20 @@ class Timestamp(_datetime.datetime):
             return self if self.tzinfo is None else self.replace(tzinfo=None)
         if self.tzinfo is not None:
             raise DTypeError("Cannot localize tz-aware Timestamp, use tz_convert for conversions")
-        return self.replace(tzinfo=_zone(tz))
+        zone = _zone(tz)
+        wall = self.to_pydatetime(warn=False)
+        if (
+            wall.replace(tzinfo=zone, fold=0).utcoffset()
+            == wall.replace(tzinfo=zone, fold=1).utcoffset()
+        ):
+            # Neither repeated nor missing, the plain case, answered without the index.
+            return self.replace(tzinfo=zone)
+        from ._datetime import DatetimeIndex
+
+        localized = DatetimeIndex([self]).tz_localize(
+            tz, ambiguous=ambiguous, nonexistent=nonexistent
+        )
+        return localized[0]
 
     def tz_convert(self, tz: Any) -> Timestamp:
         """Moves a moment into another zone, keeping the instant.
