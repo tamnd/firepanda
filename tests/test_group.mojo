@@ -1487,6 +1487,58 @@ def test_the_fused_route_is_declined_for_a_text_key() raises:
     )
 
 
+def test_a_coded_text_key_fuses_on_its_codes() raises:
+    """Coded text beside a key too wide to table, which the fused route takes.
+
+    A coded column's codes point into distinct values, so two rows share a code
+    exactly when they share a string, and the fold and the verification run on
+    the codes as they would on any int32 key. ClickBench q16 groups a wide user
+    id with a coded search phrase this way. The same tuples written as two
+    narrow integers pack instead of hashing, and both routes owe the same
+    ordinals and the same representative rows. Some rows are null in the text,
+    because a null is a validity bit on the codes and not a code.
+    """
+    comptime stride = Int64(DIRECT_LIMIT) + 1
+    var alphabet: List[String] = ["ann", "bo", "carl", "dee"]
+    var rng = Rng(UInt64(0xC0DED))
+    for _ in range(40):
+        # At least two wide values, the first two rows, or a table could be laid
+        # over the wide key and fusing would rightly be declined.
+        var n = 2 + rng.next_below(300)
+        var wide = 2 + rng.next_below(11)
+
+        var far = Array[DType.int64](n)
+        var near = Array[DType.int64](n)
+        var codes = Array[DType.int32](n)
+        var counted = Array[DType.int64](n)
+        for i in range(n):
+            var w = i if i < 2 else rng.next_below(wide)
+            far[i] = Int64(w) * stride
+            near[i] = Int64(w)
+            var c = rng.next_below(len(alphabet))
+            codes[i] = Int32(c)
+            counted[i] = Int64(c)
+            if rng.next_below(7) == 0:
+                codes.set_null(i)
+                counted.set_null(i)
+
+        var cols = List[AnyArray]()
+        cols.append(AnyArray(far^))
+        cols.append(
+            AnyArray.dictionary_encoded(codes^, strings_from_list(alphabet))
+        )
+        var refs = borrow_columns(cols)
+        var at: List[Int] = [0, 1]
+        assert_true(_worth_fusing(refs, at))
+
+        var packed = List[Series]()
+        packed.append(Series("n", near^))
+        packed.append(Series("t", counted^))
+        _same_grouping(
+            group_ordinals(refs, at, n), _hashed_grouping(packed^), n
+        )
+
+
 def test_no_keys_is_refused() raises:
     var frame = sample_frame()
     with assert_raises():

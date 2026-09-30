@@ -99,6 +99,14 @@ first and answers no. What would change that answer is a cheaper verification,
 since the hash pass is work either route does, and the obvious one is to keep
 the per key hashes the fold already computed and compare those first.
 
+Coded text is the exception. Its codes point into distinct values, so they group
+the way the text does, and folding and verifying them is the work of an int32
+key, not of a string. ClickBench q16 groups a wide user id with a coded search
+phrase, and composing it cost two hash tables of about the same size, one over
+the user ids and one over the packed pair. Fused it costs one. At 1M rows on a
+six core machine that was busy with other work, the grouping went from 43 to 28
+ms at best, and q18's, which adds the minute, from 79 to 59.
+
 ## Skipping the per key factorize
 
 That measurement was taken. On ten million rows, one key costs 8.4 milliseconds
@@ -372,8 +380,8 @@ def _fold_key(
     `n` keys is `n` passes over eight bytes a row. That is the whole reason this
     route exists: a pass is a pass, and the thing it replaces is a hash table.
 
-    Text is not folded here. `_worth_fusing` declines a key list with a string
-    in it, because a pass that hashes bytes and a pass that compares them are
+    Text is not folded here, and a coded text key arrives as its codes.
+    `_worth_fusing` declines a key list with other text in it, because a pass that hashes bytes and a pass that compares them are
     what the string factorize was going to cost anyway, so fusing removes no
     hash table and still pays for one. The module docstring has the numbers.
 
@@ -621,23 +629,30 @@ def _worth_fusing[
         at: Which of them are keys.
 
     Returns:
-        True when no key is text and at least one key would be hashed.
+        True when no key is text other than a coded one and at least one key
+        would be hashed.
 
     Raises:
         If a key dtype has no physical layout.
     """
+    # A coded text key is not text here. Its codes point into distinct values,
+    # so they group the way the text does, and they fold and verify as the
+    # int32 column they are. A table can always be laid over them, so they are
+    # never the key that makes fusing worth it, and the loops below skip them.
     for k in range(len(at)):
         ref col = columns[at[k]][]
-        if col.is_string():
+        if col.is_string() and not col.is_coded():
             return False
 
     for k in range(len(at)):
         ref col = columns[at[k]][]
-        if not col.dtype().is_integral():
+        if not col.is_coded() and not col.dtype().is_integral():
             return True
 
     for k in range(len(at)):
         ref col = columns[at[k]][]
+        if col.is_coded():
+            continue
         var kind = col.dtype()
         comptime for dt in ALL:
             comptime if dt.is_integral():
@@ -675,9 +690,17 @@ def _fused_grouping[
     Raises:
         If a key dtype has no physical layout.
     """
+    # A coded text key goes in as its codes, which is what `_worth_fusing`
+    # counted on. The choice is made here rather than inside `_fold_key` and
+    # `_key_agrees`, because a function that calls itself on the codes is what
+    # hung the compiler in #1283.
     var hashes = Array[DType.uint64](overwritten=rows)
     for k in range(len(at)):
-        _fold_key(columns[at[k]][], k == 0, seed, rows, hashes)
+        ref col = columns[at[k]][]
+        if col.is_coded():
+            _fold_key(col.code_column(), k == 0, seed, rows, hashes)
+        else:
+            _fold_key(col, k == 0, seed, rows, hashes)
 
     # The hashes have no nulls, whatever the keys had, so `firsts` covers every
     # group and is in first appearance order. That is what `Grouping` wants and
@@ -689,7 +712,11 @@ def _fused_grouping[
     found^.into_parts(codes, firsts)
 
     for k in range(len(at)):
-        if not _key_agrees(columns[at[k]][], codes, firsts):
+        ref col = columns[at[k]][]
+        if col.is_coded():
+            if not _key_agrees(col.code_column(), codes, firsts):
+                return None
+        elif not _key_agrees(col, codes, firsts):
             return None
     return Grouping(codes^, groups, firsts^)
 
