@@ -13,6 +13,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 Built against Mojo 1.0.0 (ed45d567).
 
 A patch release. On the pandas side it brings the readers and writers pandas has beyond CSV and Parquet (Excel, Stata, SAS, HDF, SQL over sqlite3, HTML, XML, LaTeX, the clipboard, Iceberg and SPSS), periods and interval columns, categoricals, object, sparse and masked columns, rows and columns labelled by a MultiIndex, `DataFrame.style` with `to_excel`, plotting with matplotlib, `firepanda.testing`, and pandas' byte counts, str dtype and float answers for var, std, sem, skew and kurt. SQL gains LATERAL subqueries, ASOF joins, PIVOT and UNPIVOT, recursive CTEs, named windows, window frames and CREATE, INSERT and DROP. The group by skips text keys another key already decides, packs two wide integer keys without factorizing either and uses every core on half a million rows or more, and the ClickBench driver builds again after a compiler hang that came in with the first of those.
+### Added: Cross and anti merges
+
+`merge` answers `how="cross"`, `how="left_anti"` and `how="right_anti"` the way pandas 3 does, and `DataFrame.join(how="cross")` works. A cross join pairs every left row with every right row, left order first, and refuses any key with pandas' MergeError. An anti join keeps the rows of one side that found no partner on the other, labelled as the outer join labels them, with the other side's columns empty. A failed `validate` now reads as pandas' message does, with the repeated keys listed under it.
 
 ### Changed: Byte counts are pandas' byte counts
 

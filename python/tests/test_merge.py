@@ -98,6 +98,23 @@ BUILDS: list[Callable[[Any], Any]] = [
         how="outer",
         indicator=True,
     ),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), how="cross"),
+    lambda m: m.merge(m.DataFrame(LEFT), m.DataFrame(RIGHT), how="cross", suffixes=("_l", "_r")),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), how="cross", indicator=True),
+    lambda m: m.DataFrame(NUMBERS).join(m.DataFrame(OTHERS), how="cross", lsuffix="_l"),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", how="left_anti"),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", how="right_anti"),
+    lambda m: m.merge(m.DataFrame(LEFT), m.DataFrame(RIGHT), on="k", how="left_anti"),
+    lambda m: m.merge(
+        m.DataFrame(LEFT), m.DataFrame(RIGHT), on="k", how="right_anti", indicator=True
+    ),
+    lambda m: m.merge(
+        m.DataFrame(NUMBERS).set_index("k"),
+        m.DataFrame(OTHERS).set_index("k"),
+        left_index=True,
+        right_index=True,
+        how="left_anti",
+    ),
 ]
 
 
@@ -135,6 +152,9 @@ MISTAKES: list[Callable[[Any], Any]] = [
         on="k",
         indicator=True,
     ),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", how="cross"),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), how="cross", left_index=True),
+    lambda m: m.DataFrame(NUMBERS).join(m.DataFrame(OTHERS), on="k", how="cross"),
 ]
 
 
@@ -165,9 +185,32 @@ def test_a_missing_key_is_a_key_error(firepanda: ModuleType) -> None:
 def test_the_unwritten_options_are_refused(firepanda: ModuleType) -> None:
     """Refused by name rather than ignored."""
     left, right = firepanda.DataFrame(NUMBERS), firepanda.DataFrame(OTHERS)
-    for options in ({"how": "cross"}, {"how": "asof"}):
-        with pytest.raises(NotImplementedError):
-            firepanda.merge(left, right, **options)
+    with pytest.raises(NotImplementedError):
+        firepanda.merge(left, right, how="asof")
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "validate"),
+    [
+        (NUMBERS, OTHERS, "one_to_one"),
+        (OTHERS, NUMBERS, "many_to_one"),
+        (NUMBERS, NUMBERS, "1:1"),
+        (NUMBERS, OTHERS, "1:m"),
+    ],
+)
+def test_a_failed_validate_lists_the_repeats(
+    firepanda: ModuleType, left: dict, right: dict, validate: str
+) -> None:
+    """The whole message, the repeated keys included, as pandas writes it."""
+    import pandas as pd
+
+    with pytest.raises(Exception) as theirs:
+        pd.merge(pd.DataFrame(left), pd.DataFrame(right), on="k", validate=validate)
+    with pytest.raises(Exception) as mine:
+        firepanda.merge(
+            firepanda.DataFrame(left), firepanda.DataFrame(right), on="k", validate=validate
+        )
+    assert str(mine.value) == str(theirs.value)
 
 
 def test_both_spellings_have_the_pandas_signature(firepanda: ModuleType) -> None:
