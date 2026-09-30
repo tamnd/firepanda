@@ -115,6 +115,45 @@ def test_a_named_transform_is_pandas_transform(
     agrees(group(firepanda).transform(func), group(pd).transform(func))
 
 
+WITH_ARGUMENTS: list[Callable[[Any], Any]] = [
+    lambda m: frame(m).groupby("k")["x"].transform("shift", 2),
+    lambda m: frame(m).groupby("k")[["x", "y"]].transform("shift", periods=-1),
+    lambda m: frame(m).groupby("k")["y"].transform("diff", 1),
+    lambda m: frame(m).groupby("j")[["x", "y"]].transform("std", ddof=0),
+    lambda m: frame(m).groupby("k")["y"].transform("sum", min_count=2),
+    lambda m: frame(m).groupby("k", sort=False)["y"].transform("quantile", 0.25),
+    lambda m: frame(m).groupby("k")[["x", "y"]].transform("rank", pct=True),
+    lambda m: frame(m).groupby("k")[["x", "y"]].transform("size"),
+    lambda m: frame(m).groupby("k", dropna=False)["y"].transform("size"),
+    lambda m: frame(m).groupby("k")["x"].transform("idxmax"),
+    lambda m: frame(m).groupby("k", dropna=False)["y"].transform("idxmin"),
+    lambda m: frame(m).groupby("j")["y"].transform("kurt"),
+    lambda m: frame(m).groupby("k")[["y"]].transform("ffill"),
+    lambda m: frame(m).groupby("k")["y"].transform("bfill"),
+    lambda m: frame(m).groupby("k")["y"].transform("pct_change"),
+    lambda m: frame(m).groupby("k").transform("cumcount"),
+    lambda m: frame(m).groupby("k", dropna=False).transform("ngroup"),
+    lambda m: frame(m).groupby("k", as_index=False)[["y"]].transform("std", ddof=0),
+    lambda m: frame(m).groupby(["k", "j"])["y"].transform("sum", min_count=1),
+]
+
+
+@pytest.mark.parametrize("build", WITH_ARGUMENTS)
+def test_a_name_with_arguments_is_pandas_transform(
+    firepanda: ModuleType, build: Callable[[Any], Any]
+) -> None:
+    """A reduction or a transform by name, handed its arguments, over each group."""
+    import pandas as pd
+
+    agrees(build(firepanda), build(pd))
+
+
+def test_a_list_of_names_is_refused_as_pandas_refuses_it(firepanda: ModuleType) -> None:
+    """pandas calls what it is handed, and a list cannot be called."""
+    with pytest.raises(TypeError, match="'list' object is not callable"):
+        frame(firepanda).groupby("k").transform(["sum"])
+
+
 SHIFTS: list[Callable[[Any], Any]] = [
     lambda m: frame(m).groupby("k")["x"].shift(2),
     lambda m: frame(m).groupby("k")["y"].shift(-1),
