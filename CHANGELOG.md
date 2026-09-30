@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: skipna on a group by's cumsum, cumprod, cummin and cummax
+
+The four running folds of a group by take `skipna` through their keywords as pandas does, where any keyword used to be refused. `skipna=False` leaves every row of a group after its first gap missing. `cummin` and `cummax` pass over any other keyword, as pandas does, and `cumsum` and `cumprod` refuse one with pandas' "numpy operations are not valid with groupby" ValueError.
+
 ### Added: DataFrame.quantile with method="table"
 
 `DataFrame.quantile(method="table")` sorts the rows by every column at once, missing values last, and answers the whole row at each quantile's place, where it used to be refused. `lower`, `higher` and `nearest` pick between two rows, `nearest` rounding half to even as numpy does, and `linear` and `midpoint` raise pandas' "Invalid interpolation" error. `axis=1`, `numeric_only`, a single quantile and an empty frame answer what pandas answers.
