@@ -18,8 +18,15 @@ refused by name.
 The rules below were measured against pandas 3.0.
 
 - The bins are measured from `origin`. The default, `start_day`, is midnight
-  of the first day, `start` is the first timestamp and `epoch` is 1970-01-01.
-  A rule in days always measures from midnight of the first day.
+  of the first day, `start` is the first timestamp, `epoch` is 1970-01-01 and
+  a timestamp is itself. `end` and `end_day` count whole steps back from the
+  last timestamp or the midnight after it, and make the bins close on and be
+  named by their right end unless told otherwise. `offset` moves the origin
+  by a span.
+- A rule in days always measures from midnight of the first day, and pandas
+  warns that `origin` and `offset` do nothing to it. Its bins run from
+  midnight of the first day, or a step before it when they close on the
+  right, to a step past midnight of the last day, so an end bin can be empty.
 - With `closed="left"`, the default for every step here, a bin holds the
   timestamps from its start up to but not including its end, and with
   `closed="right"` from after its start up to and including its end.
@@ -102,7 +109,7 @@ def _step(rule: Any) -> tuple[int, bool]:
         raise InvalidArgumentError(f"Invalid frequency: {rule}")
     length = float(count) * _NANOS[unit] if count else _NANOS[unit]
     if length == 0:
-        raise ZeroDivisionError("integer modulo by zero")
+        raise ZeroDivisionError("division by zero")
     if length != int(length):
         raise InvalidArgumentError(f"Invalid frequency: {rule}")
     return int(length), unit == "D"
@@ -117,6 +124,97 @@ def _unit(dtype: str) -> str:
     """The unit of a datetime type with no zone, or empty for any other type."""
     found = re.fullmatch(r"datetime64\[(s|ms|us|ns)\]", dtype)
     return found.group(1) if found else ""
+
+
+def _moment(origin: Any) -> Any:
+    """`origin` as one of pandas' words or a timestamp with no zone.
+
+    Raises:
+        InvalidArgumentError: For text that is neither, or a timestamp with a zone, in
+            pandas' words.
+    """
+    if isinstance(origin, str) and origin in ("epoch", "start", "start_day", "end", "end_day"):
+        return origin
+    from ._scalars import Timestamp
+
+    try:
+        moment = Timestamp(origin)
+    except (ValueError, TypeError):
+        raise InvalidArgumentError(
+            "'origin' should be equal to 'epoch', 'start', 'start_day', 'end', 'end_day' or"
+            f" should be a Timestamp convertible type. Got '{origin}' instead."
+        ) from None
+    if moment.tz is not None:
+        raise InvalidArgumentError("The origin must have the same timezone as the index.")
+    return moment
+
+
+def _shift(offset: Any) -> int | None:
+    """`offset` in nanoseconds, or None when there is none.
+
+    Raises:
+        InvalidArgumentError: For a value that is not a span, in pandas' words.
+    """
+    if offset is None:
+        return None
+    from ._scalars import Timedelta
+
+    try:
+        return int(Timedelta(offset).value)
+    except (ValueError, TypeError):
+        raise InvalidArgumentError(
+            f"'offset' should be a Timedelta convertible type. Got '{offset}' instead."
+        ) from None
+
+
+def _counted(nanoseconds: int | None, per: int) -> int:
+    """A span in nanoseconds counted in the timestamps' own unit.
+
+    Raises:
+        NotImplementedError: For a span finer than that unit.
+    """
+    if not nanoseconds:
+        return 0
+    if nanoseconds % per:
+        raise NotImplementedError(
+            "resample: an origin or offset finer than the unit the timestamps are counted in"
+            " is not supported, because pandas answers it on a finer unit"
+        )
+    return nanoseconds // per
+
+
+def _unmoved(origin: Any, offset: Any) -> None:
+    """Warns, as pandas does, that a rule in days is not moved by `origin` or `offset`."""
+    import warnings
+
+    for name, given in (("offset", offset is not None), ("origin", origin != "start_day")):
+        if given:
+            warnings.warn(
+                f"The '{name}' keyword does not take effect when resampling with a 'freq' that"
+                " is not Tick-like (h, m, s, ms, us, ns)",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+
+
+def _anchor(origin: Any, counts: Any, step: int, day: int, per: int, right: bool) -> int:
+    """The count the bins of a fixed step are measured from, before any offset.
+
+    `end` counts whole steps back from the last timestamp and `end_day` from
+    the midnight after it, as far as the first timestamp, with one step more
+    when the bins close on the left so that the first one still holds it.
+    """
+    first, last = int(counts.min()), int(counts.max())
+    if origin == "epoch":
+        return 0
+    if origin == "start":
+        return first
+    if origin == "start_day":
+        return first // day * day
+    if origin in ("end", "end_day"):
+        end = last if origin == "end" else -(-last // day) * day
+        return end - ((end - first) // step + (not right)) * step
+    return _counted(int(origin.value), per)
 
 
 class Resampler:
@@ -152,23 +250,12 @@ class Resampler:
             raise InvalidArgumentError(f"Unsupported value {closed} for `closed`")
         if label not in (None, "left", "right"):
             raise InvalidArgumentError(f"Unsupported value {label} for `label`")
-        if origin not in ("epoch", "start", "start_day", "end", "end_day") and isinstance(
-            origin, str
-        ):
-            raise InvalidArgumentError(
-                "'origin' should be equal to 'epoch', 'start', 'start_day', 'end', 'end_day'"
-                f" or should be a Timestamp convertible type. Got {origin!r} instead."
-            )
-        if origin not in ("epoch", "start", "start_day"):
-            raise NotImplementedError(
-                f"resample: origin={origin!r} is not supported yet, because measuring the"
-                " bins back from the last timestamp or from a chosen moment is not written"
-            )
-        if offset is not None:
-            raise NotImplementedError(
-                "offset= is not supported yet, because moving the bins by a span needs"
-                " pandas' span parsing, which the resample does not have"
-            )
+        origin = _moment(origin)
+        shift = _shift(offset)
+        if origin in ("end", "end_day"):
+            # Counting back from the last timestamp, a bin is named by and holds its end.
+            closed = closed or "right"
+            label = label or "right"
         if on is not None:
             if not isinstance(obj, DataFrame):
                 raise NotImplementedError("resample: on= names a column, which a series has not")
@@ -213,21 +300,29 @@ class Resampler:
             times = times.iloc[kept].reset_index(drop=True)
         step = length // per
         counts = times.astype("int64")
-        if len(counts) == 0 or (origin == "epoch" and not days):
+        right = closed == "right"
+        day = _NANOS["D"] // per
+        if days:
+            _unmoved(origin, offset)
+        if len(counts) == 0:
             start = 0
-        elif origin == "start" and not days:
-            start = int(counts.min())
-        else:
-            day = _NANOS["D"] // per
+        elif days:
             start = int(counts.min()) // day * day
+        else:
+            start = _anchor(origin, counts, step, day, per, right) + _counted(shift, per)
         # Closed on the left a bin holds [edge, edge + step), and closed on the
         # right (edge, edge + step], which is the ceiling less one.
-        right = closed == "right"
         codes = -((start - counts) // step) - 1 if right else (counts - start) // step
         self._times = times
         self._codes = codes
         self._first = int(codes.min()) if len(codes) else 0
         self._count = int(codes.max()) - self._first + 1 if len(codes) else 0
+        if days and len(codes):
+            # pandas 3 lays day bins from one step before midnight of the first
+            # day when they close on the right, and up to midnight of the last
+            # day plus a step, so either end can hold a bin with nothing in it.
+            self._first = -1 if right else 0
+            self._count = (int(counts.max()) // day * day - start) // step - self._first + 1
         self._origin = start
         self._step = step
         self._time_unit = unit
