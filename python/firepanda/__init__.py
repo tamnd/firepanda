@@ -56,7 +56,8 @@ from . import (
 from ._array import array
 from ._arrowtyped import ArrowDtype
 from ._attrs import Flags
-from ._categorical import Categorical, CategoricalDtype, CategoricalIndex
+from ._categorical import Categorical, CategoricalDtype
+from ._category_index import CategoricalIndex
 from ._clipboard import read_clipboard
 from ._columnar import read_feather, read_orc, read_parquet
 from ._config import (

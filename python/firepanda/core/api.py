@@ -7,7 +7,8 @@ from typing import Any as _Any
 from .._array import array
 from .._arrowtyped import ArrowDtype
 from .._attrs import Flags
-from .._categorical import Categorical, CategoricalDtype, CategoricalIndex
+from .._categorical import Categorical, CategoricalDtype
+from .._category_index import CategoricalIndex
 from .._config import set_eng_float_format
 from .._date_range import bdate_range, date_range
 from .._datetime import DatetimeIndex

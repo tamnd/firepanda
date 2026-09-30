@@ -27472,6 +27472,9 @@ class IndexMixin:
         out of a named series is named after it, and a name written in the call
         wins over one the data was carrying.
         """
+        if type(data).__name__ == "Categorical":
+            # pandas answers a Categorical with a CategoricalIndex, categories kept.
+            data = data._column
         label = _label_of(data) if name is None else str(name)
         if dtype is not None:
             self._typed(data, dtype, label)
@@ -27920,6 +27923,10 @@ class IndexMixin:
             from ._timedelta import TimedeltaIndex
 
             return TimedeltaIndex
+        if kind == "category":
+            from ._category_index import CategoricalIndex
+
+            return CategoricalIndex
         if kind == "string" and _objects.period_name_of(inner) is not None:
             from ._period_index import PeriodIndex
 
