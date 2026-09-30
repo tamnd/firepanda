@@ -336,7 +336,7 @@ def test_the_signatures_are_pandas(firepanda: ModuleType) -> None:
 def test_where_firepanda_differs(firepanda: ModuleType) -> None:
     """The differences that stay, because firepanda has no object dtype."""
     frame = firepanda.read_csv(io.StringIO("a,b\nTrue,99999999999999999999999\n,1\n"))
-    assert [str(kind) for kind in frame.dtypes] == ["bool", "string"]
+    assert [str(kind) for kind in frame.dtypes] == ["bool", "str"]
     assert frame["a"].tolist() == [True, None]
     frame = firepanda.read_csv(io.StringIO("a;b\n1;2\n"), sep=None)
     assert list(frame.columns) == ["a", "b"]

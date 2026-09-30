@@ -238,10 +238,7 @@ def test_the_same_literal_means_the_same_thing_in_both(firepanda: ModuleType) ->
     assert ours.columns == list(theirs.columns)
     for name in data:
         assert ours[name].tolist() == theirs[name].tolist()
-        # pandas 3.0 calls a text column `str` and firepanda calls it `string`,
-        # which is the Arrow name and is what pyarrow and Polars both use.
-        theirs_dtype = str(theirs[name].dtype)
-        assert str(ours[name].dtype) == ("string" if theirs_dtype == "str" else theirs_dtype)
+        assert str(ours[name].dtype) == str(theirs[name].dtype)
 
 
 MAPPINGS: list[dict[str, Any]] = [

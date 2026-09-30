@@ -193,7 +193,24 @@ def test_the_types_of_a_frame_are_labelled_by_column_name(firepanda: ModuleType)
 
     made = firepanda.DataFrame(DATA).dtypes
     assert made.index.tolist() == pd.DataFrame(DATA).dtypes.index.tolist()
-    assert made.tolist() == ["int64", "float64", "string"]
+    assert made.tolist() == ["int64", "float64", "str"]
+
+
+@needs_pandas
+def test_text_is_spelt_the_way_pandas_spells_it(firepanda: ModuleType) -> None:
+    """`str`, pandas' `StringDtype` with NaN for a gap, which still equals `string`."""
+    import pandas as pd
+
+    for lib in (firepanda, pd):
+        frame = lib.DataFrame(DATA)
+        column = frame["c"]
+        assert repr(column.dtype) == "<StringDtype(na_value=nan)>"
+        assert str(column.dtype) == "str"
+        assert column.dtype == "string"
+        assert column.dtype == "str"
+        assert str(column.dtypes) == "str"
+        assert str(frame.columns.dtype) == "str"
+        assert [str(kind) for kind in frame.dtypes] == ["int64", "float64", "str"]
 
 
 @needs_pandas

@@ -1231,7 +1231,7 @@ def _core(source: Any, values: dict[str, Any], separator: Any) -> Any:
             if not column.isna().any() and column.abs().max() >= 2.0**63:
                 return None
             continue
-        if str(column.dtype) != "string":
+        if str(column.dtype) not in ("string", "str"):
             continue
         if column.isna().all():
             frame[name] = column.astype("float64")
