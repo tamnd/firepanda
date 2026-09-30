@@ -33,6 +33,7 @@ import contextlib
 import datetime
 import functools
 import importlib.util
+import inspect
 import itertools
 import math
 import numbers
@@ -33863,3 +33864,69 @@ DataFrameMixin.to_iceberg = _iceberg.to_iceberg  # type: ignore[attr-defined]
 # `to_hdf` is pandas' method, which writes the object into an HDF5 store, and lives
 # with `HDFStore` and pandas' storers in `_hdf`.
 SeriesMixin.to_hdf = DataFrameMixin.to_hdf = _hdf._to_hdf  # type: ignore[attr-defined]
+
+
+_POSITIONAL_REDUCTIONS = (
+    "sum",
+    "prod",
+    "product",
+    "mean",
+    "max",
+    "min",
+    "median",
+    "var",
+    "std",
+    "sem",
+    "skew",
+    "kurt",
+    "all",
+)
+
+
+def _warns_by_position(fn: Callable[..., Any], shown: str) -> Callable[..., Any]:
+    """`fn`, taking its keyword-only arguments by position too, with pandas' warning.
+
+    pandas 3 declares the reductions keyword-only but still binds positional arguments to them in
+    order, warning that pandas 4 will stop, so `df.sum(1)` sums across rows. `any` is the one
+    reduction pandas does not wrap, so it is left out of the list above.
+    """
+    names = [
+        name
+        for name, param in inspect.signature(fn).parameters.items()
+        if param.kind is inspect.Parameter.KEYWORD_ONLY
+    ]
+
+    @functools.wraps(fn)
+    def method(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if args:
+            from .errors import Pandas4Warning
+
+            if len(args) > len(names):
+                raise TypeError(
+                    f"{type(self).__name__}.{shown}() takes from 1 to {len(names) + 1} positional"
+                    f" arguments but {len(args) + 1} were given"
+                )
+            warnings.warn(
+                f"Starting with pandas version 4.0 all arguments of {shown} will be keyword-only.",
+                Pandas4Warning,
+                stacklevel=3,
+            )
+            for name, value in zip(names, args, strict=False):
+                if name in kwargs:
+                    raise TypeError(
+                        f"{type(self).__name__}.{shown}() got multiple values for argument"
+                        f" '{name}'"
+                    )
+                kwargs[name] = value
+        return fn(self, **kwargs)
+
+    return method
+
+
+def _allow_positional(*classes: type) -> None:
+    """Lets each class's reductions take their arguments by position, as pandas 3 still does."""
+    for cls in classes:
+        for name in _POSITIONAL_REDUCTIONS:
+            raw = inspect.getattr_static(cls, name)
+            setattr(cls, name, _warns_by_position(raw, "prod" if name == "product" else name))
+

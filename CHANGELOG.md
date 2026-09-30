@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Reductions take a positional axis with pandas' warning
+
+pandas 3 declares the reductions keyword-only but still binds positional arguments in order, with a `Pandas4Warning` saying pandas 4 will stop, so `df.sum(1)` sums across rows. firepanda now does the same for sum, prod, product, mean, max, min, median, var, std, sem, skew, kurt and all, and leaves `any` refusing them as pandas does.
+
 ### Added: Reductions across rows, and sort keys
 
 A frame reduced with `axis=1` now answers one value per row for sum, prod, max, min, mean, median, var, std, sem, skew, kurt, count, nunique, any and all, with the types, gaps and `min_count` handling pandas gives, and a frame of text joins for a sum and compares for a max. `sort_index` takes `key`, `na_position` and `sort_remaining`, and `sort_values` on a frame or a series takes `key`. A row that mixes flags with numbers is still refused, since pandas answers it as object.

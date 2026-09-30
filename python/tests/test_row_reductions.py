@@ -106,3 +106,30 @@ def test_a_row_of_text_says_the_operation_is_not_supported() -> None:
 def test_a_key_on_the_column_axis_is_refused() -> None:
     with pytest.raises(NotImplementedError, match="key"):
         numbers(fp).sort_index(axis=1, key=lambda labels: labels)
+
+
+@needs_pandas
+@pytest.mark.parametrize("name", ["sum", "prod", "product", "mean", "max", "var", "kurt", "all"])
+def test_a_positional_axis_warns_and_is_used_as_pandas_does(name: str) -> None:
+    import pandas as pd
+    from firepanda.errors import Pandas4Warning
+
+    with pytest.warns(Pandas4Warning, match="keyword-only") as ours:
+        mine = getattr(numbers(fp), name)(1, False)
+    with pytest.warns(Warning, match="keyword-only") as theirs:
+        expected = getattr(numbers(pd), name)(1, False)
+    assert repr(mine) == repr(expected)
+    assert str(ours[0].message) == str(theirs[0].message)
+    assert ours[0].filename == __file__
+
+
+def test_any_takes_no_positional_arguments_as_in_pandas() -> None:
+    with pytest.raises(TypeError):
+        numbers(fp).any(1)
+
+
+def test_too_many_positional_arguments_say_so() -> None:
+    with pytest.raises(TypeError, match="takes from 1 to 5 positional arguments but 6"):
+        numbers(fp).sum(1, True, False, 0, 9)
+    with pytest.raises(TypeError, match="multiple values for argument 'axis'"):
+        numbers(fp).sum(1, axis=1)
