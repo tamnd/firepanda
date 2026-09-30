@@ -7164,6 +7164,17 @@ EVERY = _Every()
 """The one instance, compared by identity."""
 
 
+def _first_level_label(frame: Any, key: Any) -> bool:
+    """Whether a column key is a label of the first level of columns of several levels."""
+    if not isinstance(key, (str, int, float)) or isinstance(key, bool):
+        return False
+    names = frame._inner.names()
+    if _names.held(key) in names:
+        return False
+    labels = _names.shown_all(names)
+    return _column_depth(labels) > 1 and any(label[0] == key for label in labels)
+
+
 def _two_axes(key: Any) -> tuple[Any, Any]:
     """Splits a subscript into a row key and a column key.
 
@@ -7574,6 +7585,11 @@ class _Selection:
             rows, columns = _level_axes(self._owner, key)
         else:
             rows, columns = _two_axes(key)
+        if labelled and _first_level_label(self._owner, columns):
+            # A label of the first level of the columns names the columns under it, as `df[key]`.
+            part = self._owner[columns]
+            every = isinstance(rows, slice) and rows == slice(None)
+            return part if every else part.loc[rows]
         answer = self._picked(rows, columns)
         return _prefix_dropped(self._owner, rows, answer) if labelled else answer
 
@@ -9960,7 +9976,11 @@ def _level_selected(frame: Any, key: Any) -> Any:
         chosen = chosen.renamed_columns([held[at] for at in picked], _names.held_all(rests))
     except Exception as error:
         raise translate(error) from None
-    return DataFrame._wrap(chosen)
+    answer = DataFrame._wrap(chosen)
+    levels = getattr(frame, "_column_names", None)
+    if levels is not None:
+        _hold_columns(answer, levels[1:])
+    return answer
 
 
 def _shown_names(frame: Any) -> list[Any]:
@@ -10340,23 +10360,29 @@ def _cross_section(owner: Any, key: Any, axis: Any, level: Any, drop_level: bool
 
     Without `level` this is `loc` on the rows, or the column of that name
     across. With `level` the key is one value per named level, and the named
-    levels are dropped from the answer unless `drop_level` is False.
+    levels are dropped from the answer unless `drop_level` is False, along the
+    rows or along the columns alike.
 
     Raises:
         KeyError: When no row holds the key.
+        TypeError: For `level` across columns with one level of names.
     """
-    from ._frame import DataFrame
+    from ._frame import DataFrame, Series
     from ._multi import MultiIndex
 
     frame = isinstance(owner, DataFrame)
     number = _align_axis(axis, "DataFrame" if frame else "Series", (0, 1) if frame else (0,))
     if number == 1:
-        if level is not None:
-            raise NotImplementedError(
-                "xs with level= across the columns is not supported yet, because a firepanda"
-                " frame names its columns with one level"
-            )
-        return owner[key]
+        if level is None:
+            return owner[key]
+        if not isinstance(owner.columns, MultiIndex):
+            raise TypeError("Index must be a MultiIndex")
+        # The columns' labels are crossed as rows would be, then taken by position.
+        places = Series(range(len(owner.columns)), index=owner.columns)
+        picked = _cross_section(places, key, 0, level, drop_level)
+        answer = owner.iloc[:, [int(place) for place in picked.tolist()]]
+        answer.columns = picked.index
+        return answer
     index = owner.index
     if not isinstance(index, MultiIndex):
         if level is not None:
