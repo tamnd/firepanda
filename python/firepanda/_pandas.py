@@ -24787,24 +24787,28 @@ BROADCAST = frozenset(
 )
 """The reductions `transform` puts on every row of the group, by name."""
 
-BROADCAST_LATER = frozenset(
+_GROUP_REDUCTIONS = BROADCAST | frozenset(
+    {"size", "quantile", "idxmax", "idxmin", "corrwith", "kurt"}
+)
+"""The reductions pandas names in `transform`, each put on every row of its group."""
+
+_GROUP_TRANSFORMS = frozenset(
     {
-        "size",
-        "quantile",
-        "idxmax",
-        "idxmin",
-        "corrwith",
-        "ohlc",
         "bfill",
-        "ffill",
-        "fillna",
-        "pct_change",
         "cumcount",
+        "cummax",
+        "cummin",
+        "cumprod",
+        "cumsum",
+        "diff",
+        "ffill",
         "ngroup",
-        "kurt",
+        "pct_change",
+        "rank",
+        "shift",
     }
 )
-"""The names pandas takes in `transform` that are not answered yet."""
+"""The transforms pandas names in `transform`, each already as tall as the frame."""
 
 
 def _cast_back(source: Any, out: Any, kind: str) -> Any:
@@ -26043,27 +26047,40 @@ class GroupByMixin[Answer]:
         if callable(func) and not isinstance(func, str):
             return self._transformed_by(func, args, kwargs)
         if not isinstance(func, str):
-            raise NotImplementedError(
-                "transform takes the name of a reduction or a transform, or a"
-                " function, and a list or a mapping of them is not supported yet"
-            )
-        if args or kwargs:
-            raise UnsupportedError(
-                f"transform({func!r}) takes no further arguments for now, because"
-                " the named reductions are answered with their defaults"
-            )
-        if func in BROADCAST or func in ("cumsum", "cumprod", "cummax", "cummin"):
-            return self._shape_rows(func, 1)
-        if func in ("shift", "diff"):
-            return self._shape_rows(func, 1)
-        if func == "rank":
-            return self.rank()
-        if func in BROADCAST_LATER:
-            raise NotImplementedError(
-                f"transform({func!r}) is not written yet, because it answers"
-                " differently from the reductions and scans that are"
-            )
+            raise TypeError(f"'{type(func).__name__}' object is not callable")
+        if not args and not kwargs:
+            if func in BROADCAST or func in ("cumsum", "cumprod", "cummax", "cummin"):
+                return self._shape_rows(func, 1)
+            if func in ("shift", "diff"):
+                return self._shape_rows(func, 1)
+        if func in _GROUP_TRANSFORMS:
+            return getattr(self, func)(*args, **kwargs)
+        if func in _GROUP_REDUCTIONS:
+            return self._spread_reduced(func, args, kwargs)
         raise InvalidArgumentError(f"'{func}' is not a valid function name for transform(name)")
+
+    def _spread_reduced(self, func: str, args: Any, kwargs: Any) -> Any:
+        """A reduction by name put on every row of its group, which is `transform(name)`.
+
+        The groups are reduced with their keys on the row labels whatever
+        `as_index` says, as pandas does, and each row takes its group's answer.
+        A row whose key is not a group answers missing.
+        """
+        import copy
+
+        keyed = copy.copy(self)
+        keyed._as_index = True
+        reduced = getattr(keyed, func)(*args, **kwargs)
+        source = self._source()
+        order: list[int] = []
+        taken: list[int] = []
+        for number, (_, places) in enumerate(self._members()):
+            order.extend(places)
+            taken.extend([number] * len(places))
+        if not order:
+            return reduced.iloc[:0].set_axis(source.index[:0])
+        spread = reduced.reset_index(drop=True).iloc[taken].set_axis(order)
+        return spread.reindex(range(len(source))).set_axis(source.index)
 
     def aggregate(
         self,

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: transform by name with arguments and every name pandas takes
+
+`GroupBy.transform` now passes positional and keyword arguments on to the named method, as in `transform("quantile", 0.25)` or `transform("std", ddof=0)`, and takes every name pandas takes: the reductions `size`, `quantile`, `idxmax`, `idxmin`, `corrwith` and `kurt` spread back over each group's rows, and the transformations `ffill`, `bfill`, `cumcount`, `ngroup`, `pct_change` and `rank` answer row by row. Another name is refused in pandas' words, and something that is neither a name nor callable raises the TypeError pandas raises.
+
 ### Added: apply answering one value a group with as_index=False
 
 `apply` on a grouped frame with `as_index=False`, when the function answers one value a group, gives a frame of the keys and the values in a column named None, as pandas prints it. The column name reads back as the text `None`, as any column named None does in firepanda.
