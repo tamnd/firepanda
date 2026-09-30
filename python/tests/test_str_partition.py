@@ -217,18 +217,36 @@ def test_a_separator_that_is_not_a_string_is_a_type_error(firepanda: ModuleType)
 
 
 @needs_pandas
-def test_expand_false_is_refused_rather_than_approximated(firepanda: ModuleType) -> None:
-    """The other half of the pandas argument, and the half that needs a type.
+@pytest.mark.parametrize("name", ["partition", "rpartition"])
+@pytest.mark.parametrize("sep", [" ", "--", "z"])
+def test_expand_false_answers_one_column_of_tuples(
+    firepanda: ModuleType, name: str, sep: str
+) -> None:
+    """The other half of the pandas argument: a column of three element tuples.
 
-    `expand=False` answers one column of three element tuples. There is no
-    column type here that holds a tuple, so this is a gap rather than a
-    disagreement, and it is refused by name so the board reads it as one.
+    pandas answers an object column with a tuple per row and a missing row left
+    missing, and the column keeps the index and the name.
     """
-    mine = made(firepanda)
+    mine = getattr(made(firepanda).rename("s").str, name)(sep, expand=False)
+    ours = getattr(theirs().rename("s").str, name)(sep, expand=False)
+    assert str(mine.dtype) == str(ours.dtype) == "object"
+    assert mine.name == ours.name
+    got = mine.tolist()
+    want = ours.tolist()
+    assert [row for row in got if isinstance(row, tuple)] == [
+        row for row in want if isinstance(row, tuple)
+    ]
+    assert [row != row for row in got] == [row != row for row in want]
+
+
+@needs_pandas
+def test_expand_false_on_an_index_is_refused_by_name(firepanda: ModuleType) -> None:
+    """pandas answers an index of tuples, and an index here does not hold objects."""
+    labels = firepanda.Index(["a b", "c"])
     for name in ("partition", "rpartition"):
-        with pytest.raises(firepanda.errors.UnsupportedError) as caught:
-            getattr(mine.str, name)(" ", expand=False)
-        assert "expand=False" in str(caught.value), name
+        with pytest.raises(NotImplementedError) as caught:
+            getattr(labels.str, name)(" ", expand=False)
+        assert "index of objects" in str(caught.value), name
 
 
 @needs_pandas
