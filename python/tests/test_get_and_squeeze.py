@@ -149,19 +149,14 @@ def test_the_axis_a_series_does_have_is_taken(firepanda):
     assert series.squeeze(axis="index") == 10
 
 
-def test_a_row_read_across_the_columns_says_what_it_cannot_do(firepanda):
-    # pandas answers the row as a series here. A row across columns of
-    # different types needs a type of its own and pandas' rule for finding one
-    # ends at the object dtype, which this library does not have. It is also
-    # named after the row label, which pandas carries as an int and a series
-    # here carries as a string, so the refusal covers the one column shape too
-    # even though that one has a type it could have used.
-    with pytest.raises(NotImplementedError, match="drops the row axis"):
-        rows(firepanda).head(1).squeeze()
-    assert rows(pd).head(1).squeeze().tolist() == [1.0, 4.5]
-    with pytest.raises(NotImplementedError, match="drops the row axis"):
-        one_cell(firepanda).squeeze(axis=0)
-    assert one_cell(pd).squeeze(axis=0).tolist() == [7]
+def test_a_row_read_across_the_columns_is_a_series(firepanda):
+    # pandas answers the row as a series named by its label, which is iloc[0].
+    assert repr(rows(firepanda).head(1).squeeze()) == repr(rows(pd).head(1).squeeze())
+    assert repr(one_cell(firepanda).squeeze(axis=0)) == repr(one_cell(pd).squeeze(axis=0))
+    labelled = {"a": [1], "b": [2]}
+    assert repr(firepanda.DataFrame(labelled, index=["r"]).squeeze("index")) == repr(
+        pd.DataFrame(labelled, index=["r"]).squeeze("index")
+    )
 
 
 def test_squeeze_keeps_the_labels_the_frame_had(firepanda):

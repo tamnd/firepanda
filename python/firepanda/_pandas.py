@@ -4722,6 +4722,66 @@ def _isin_timed(printed: str, values: list[Any]) -> list[Any]:
     return [Series(kept).dt.as_unit(_unit_of(printed))] if kept else []
 
 
+def _isin_aligned(frame: Any, values: Any) -> DataFrame:
+    """`isin` against a frame or a series, which pandas answers as an equality test by label.
+
+    A series is lined up against the rows and asked of every column, and a frame against both the
+    rows and the columns, with a cell that has nothing across from it answering false. A gap is
+    never equal to anything, and labels that repeat on the other side are refused in pandas' words,
+    since a label would then point at two cells.
+
+    Args:
+        frame: The frame being asked about.
+        values: The frame or series to compare it with.
+
+    Returns:
+        The frame of flags.
+
+    Raises:
+        InvalidArgumentError: If the other side repeats a label.
+    """
+    from ._frame import Series
+
+    duplicated = not values.index.is_unique
+    if isinstance(values, DataFrameMixin):
+        duplicated = duplicated or not values.columns.is_unique
+    if duplicated:
+        raise InvalidArgumentError("cannot compute isin with a duplicate axis.")
+    names = frame._inner.names()
+    rows = values.index.tolist()
+    if isinstance(values, SeriesMixin):
+        found = dict(zip(rows, values.tolist(), strict=True))
+        wanted = dict.fromkeys(names, found)
+    else:
+        theirs = {
+            label: dict(zip(rows, values[label].tolist(), strict=True)) for label in values.columns
+        }
+        wanted = {
+            name: theirs.get(label, {})
+            for name, label in zip(names, frame.columns, strict=True)
+        }
+    labels = frame.index.tolist()
+    columns: dict[str, Any] = {}
+    for name in names:
+        cells = Series._wrap(frame._inner.column(name)).tolist()
+        against = wanted[name]
+        columns[name] = [
+            label in against and _same_cell(cell, against[label])
+            for cell, label in zip(cells, labels, strict=True)
+        ]
+    return _isin_framed(frame, columns)
+
+
+def _same_cell(mine: Any, theirs: Any) -> bool:
+    """Whether two cells are equal the way pandas' `eq` reads them, with a gap equal to nothing."""
+    if _is_gap(mine) or _is_gap(theirs) or mine is NaT or theirs is NaT:
+        return False
+    try:
+        return bool(mine == theirs)
+    except (TypeError, ValueError):
+        return False
+
+
 def _isin_framed(frame: Any, columns: dict[str, Any]) -> DataFrame:
     """A frame of answers, built from values and given back the labels it describes.
 
@@ -12878,11 +12938,9 @@ class DataFrameMixin(_Carries):
         mapping does not name answering false all the way down rather than being left out. Both of
         those are pandas'.
 
-        A frame or a series is refused, and that is the one shape here that is a gap rather than a
-        decision about a set. pandas does not read either of them as a set at all: it lines them up
-        against this frame by label and compares cell against cell, so `df.isin(other_frame)` is an
-        aligned equality test wearing the name of a membership test. Answering it as a set would be
-        a wrong answer that looks like a right one, so it is not answered.
+        A frame or a series is not read as a set at all: pandas lines it up against this frame by
+        label and compares cell against cell, so `df.isin(other_frame)` is an aligned equality test
+        wearing the name of a membership test, answered in `_isin_aligned`.
 
         The columns are asked one at a time and put back together through the constructor, which
         means the answer crosses into Python as values and back. That is the slow way to build a
@@ -12892,11 +12950,7 @@ class DataFrameMixin(_Carries):
         from ._frame import Series
 
         if isinstance(values, (DataFrameMixin, SeriesMixin)):
-            raise UnsupportedError(
-                f"isin against a {type(values).__name__} lines the two up by label and compares"
-                " them cell against cell rather than reading it as a set, and that comparison is"
-                " not written"
-            )
+            return _isin_aligned(self, values)
         names = self._inner.names()
         if isinstance(values, dict):
             wanted = {
@@ -14712,15 +14766,9 @@ class DataFrameMixin(_Carries):
         those is itself. The axis names which of the two may be dropped, and
         `None`, the default, lets either go.
 
-        The one answer refused is the one where the row axis goes and the
-        column axis stays, which pandas gives as the frame's one row read
-        across its columns. That row is a set of values of several types coming
-        back as a series, which has one, and pandas' rule for choosing it sends
-        a bool beside a number, or a string beside anything, to the object
-        dtype, which this library does not have. Its name is the row label
-        rather than a column name, which is the second thing in the way, since
-        a series here is named by a string. Saying so is better than answering
-        that row under some other type and some other name.
+        When the row axis goes and the column axis stays, the answer is the
+        frame's one row read across its columns, under the row's label, which
+        is `iloc[0]` and is how pandas answers it too.
         """
         from ._frame import DataFrame
 
@@ -14737,13 +14785,7 @@ class DataFrameMixin(_Carries):
         if one_column:
             return self[names[0]]
         if one_row:
-            raise UnsupportedError(
-                "squeeze that drops the row axis and keeps the column axis is"
-                " not written, because the answer is the row read across the"
-                " columns, which is a series of one type where the columns it"
-                " covers need not share one, under the row's label for a name"
-                " where a series here is named by a string"
-            )
+            return self.iloc[0]
         # A fresh wrapper around the same columns rather than `self`, because
         # pandas hands back something that is not the frame it was given even
         # when there was nothing to drop, and a caller who checks that is
@@ -24995,11 +25037,9 @@ class StringMixin:
             raise DTypeError(f"firepanda:dtype: sep must be str, not {type(sep).__name__}")
         if sep == "":
             raise InvalidArgumentError("firepanda:value: empty separator")
-        if dtype is not None and dtype not in ("int64", "bool", int, bool):
-            raise UnsupportedError(
-                f"firepanda:unsupported: str.get_dummies with dtype={dtype!r} is not"
-                " written, only int64 which is the pandas default and bool"
-            )
+        wanted = None if dtype is None else _named_dtype(dtype)
+        if wanted is not None and not wanted.startswith(("int", "uint", "float", "bool")):
+            raise InvalidArgumentError("Only numeric or boolean dtypes are supported for 'dtype'")
         try:
             labels, columns = self._series._inner.string_dummies(sep)
         except Exception as error:
@@ -25007,8 +25047,8 @@ class StringMixin:
         built = DataFrame(
             {label: Series._wrap(column) for label, column in zip(labels, columns, strict=True)}
         )
-        if dtype in ("bool", bool):
-            return built.astype("bool")
+        if wanted is not None and wanted != "int64" and len(labels):
+            return built.astype(wanted)
         return built
 
     def _joined(self, others: Any, sep: Any, na_rep: Any, join: Any) -> Any:
@@ -32519,7 +32559,12 @@ def concat(
                 " used."
             )
         if verify_integrity:
-            raise UnsupportedError("concat(keys=) with verify_integrity is not supported yet")
+            made = concat(parts, axis=axis, join=join, keys=keys, names=names, sort=sort)
+            held = made.columns if CONCAT_AXES.get(axis) == 1 else made.index
+            if not held.is_unique:
+                repeated = held[held.duplicated()].unique()
+                raise InvalidArgumentError(f"Indexes have overlapping values: {repeated!r}")
+            return made
         if CONCAT_AXES.get(axis) == 1:
             return _levelled_columns(parts, keys, names, join, sort)
         joined = concat(parts, axis=axis, join=join, sort=sort)

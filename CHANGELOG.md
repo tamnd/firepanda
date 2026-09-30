@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: aligned isin, get_dummies types, verified keyed concat and row squeeze
+
+`DataFrame.isin` against a frame or a series answers pandas' equality test lined up by label, with a cell that has nothing across from it answering false and a repeated label on the other side refused. `str.get_dummies` takes any numeric or boolean `dtype`. `concat` with `keys` and `verify_integrity=True` checks the keyed labels and names the repeats. `squeeze` that drops the row axis answers the one row as a series, as `iloc[0]` does.
+
 ### Added: nlargest ties and several columns, and str.repeat per row
 
 `nlargest` and `nsmallest` take `keep="all"`, answering every row tied with the last one kept and every gap when the cut falls among the gaps, and a list of columns, ranked one column at a time and then sorted stably the way pandas does. `str.repeat` takes one count per row, read by position, with a missing row left missing. A `Series` built with the default `str` dtype object, as in `dtype=s.dtype`, is no longer refused, since that dtype hashes apart from its text.
