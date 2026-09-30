@@ -15494,6 +15494,7 @@ class DataFrameMixin(_Carries):
             or _sparse.sparse_of(self[name]) is not None
             or type(wanted).__name__ == "ArrowDtype"
             or _is_period_type(wanted)
+            or (_word(self[name].dtype) == "bool" and _named_dtype(wanted) == "string")
         }
         if decided:
             rest = {name: wanted for name, wanted in asked.items() if name not in decided}
@@ -18729,6 +18730,10 @@ class SeriesMixin(_Carries):
         texts = _temporal_texts(self) if wanted == "string" else None
         if texts is not None:
             return Series(texts, dtype="str", index=self.index, name=self.name)
+        if wanted == "string" and _word(self.dtype) == "bool":
+            # The core writes a flag as Arrow does, in lower case, and pandas as Python does.
+            written = Series._wrap(self._inner.cast("string", True))
+            return written.mask(self == True, "True").mask(self == False, "False")  # noqa: E712
         if wanted == "category" and _written_categories(_word(self.dtype)):
             return _number_categories(self)
         _category_of(_word(self.dtype), wanted)
