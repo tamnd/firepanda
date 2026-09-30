@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: group by the levels of a MultiIndex
+
+`groupby(level=...)` on labels of several levels groups by the values of each level named, by name, by number or as a list, as pandas does, on a frame and on a column. A `Grouper` with no key groups by the row labels or the level it names, and one with a frequency and no key bins the row labels as `resample` does, where both used to refuse.
+
 ### Added: group idxmax and idxmin with as_index=False
 
 `DataFrameGroupBy.idxmax` and `idxmin` with `as_index=False` answer the keys as columns before the labels found, as pandas does, where they used to refuse.
