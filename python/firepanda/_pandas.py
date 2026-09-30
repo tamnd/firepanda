@@ -33839,8 +33839,7 @@ def to_datetime(
 
     Hand written rather than generated for the reason the top of this file
     gives: what it does depends on its arguments. `cache` is accepted and has
-    no effect, and `exact` is refused by name, which is the pattern `_refuse`
-    exists for.
+    no effect.
 
     What it answers follows what it is handed, as in pandas: a column for a
     column, a `DatetimeIndex` for a list, a tuple or an index, and a
@@ -33871,8 +33870,9 @@ def to_datetime(
             column carrying more than one offset can be read at all.
         format: The format the text is written in, None to work it out from
             the first row, or `ISO8601` or `mixed` to work it out on every row.
-        exact: Refused. It is a question about a regular expression search that
-            this parser does not do.
+        exact: Whether the format has to match the whole of each row. False
+            lets it match the first part of the row it can and passes over
+            the rest, as pandas' search does. Ignored without a format.
         unit: What whole numbers are counts of, as one of `s`, `ms`, `us` and
             `ns`. Ignored for text, which pandas ignores it for too.
         origin: What the numbers count from: `unix` for 1970, `julian` for
@@ -33887,8 +33887,8 @@ def to_datetime(
         anything else that holds several values, and one instant for one.
 
     Raises:
-        NotImplementedError: For `exact` and for a format firepanda's guesser
-            does not recognise.
+        NotImplementedError: For a format firepanda's guesser does not
+            recognise.
         ValueError: For a row that does not match the format, for a column
             carrying more than one offset with no `utc`, and for an `errors`
             that is neither of the two words.
@@ -34018,11 +34018,6 @@ def _instants(
     """`to_datetime` as a column whatever it was handed, which the public name reshapes."""
     from ._frame import Series
 
-    if exact is not NO_DEFAULT:
-        raise NotImplementedError(
-            "exact= is not supported yet, because it asks whether the format may match"
-            " part of the value, and this parser reads the whole of it or none of it"
-        )
     if errors not in ("raise", "coerce"):
         raise ValueError(f"errors must be one of 'raise' or 'coerce', not {errors!r}")
 
@@ -34058,6 +34053,17 @@ def _instants(
         return _dates_by_row(column, True, errors == "coerce", utc, *order)
     if format == "ISO8601":
         return _dates_by_row(column, False, errors == "coerce", utc)
+    loose = exact is not NO_DEFAULT and not exact and format is not None and unit is None
+    if loose:
+        # The core holds a format to the whole row, and exact=False lets it
+        # match any part of the row, so the rows go to the reader that searches.
+        read = _dates_by_format(column, format, errors == "coerce", utc, *order, exact=False)
+        if read is not None:
+            if len(read) and bool(read.isna().all()):
+                return read.dt.as_unit("s")
+            if _row_formats.iso_runs_on(column.tolist(), format):
+                return read.dt.as_unit("ns")
+            return read
     if format is None and dayfirst and unit is None:
         # The core reads ISO 8601 month first, and pandas reads even that day
         # first when asked, so the rows go to the reader that knows the order.
@@ -34158,6 +34164,7 @@ def _dates_by_format(
     utc: bool,
     dayfirst: bool = False,
     yearfirst: bool = False,
+    exact: bool = True,
 ) -> Any:
     """`to_datetime` of text the core would not read, read against one format the way pandas does.
 
@@ -34166,7 +34173,8 @@ def _dates_by_format(
     holds every row to it, or reads every row on its own when it cannot guess
     one, so a column the core refused is read again here by those rules. That
     either reads it or raises the error pandas raises for the first row that
-    does not read.
+    does not read. Under `exact=False` the format is searched for in each
+    row rather than held to all of it.
 
     Returns:
         The instants, or None when the column is not text or the format has a
@@ -34185,7 +34193,8 @@ def _dates_by_format(
         if format is None:
             texts = _row_dates.rows_as_text(values, True, coerce, utc, dayfirst, yearfirst)
     if format is not None:
-        texts = _row_dates.written(_row_formats.rows_by_format(values, format, coerce), utc)
+        rows = _row_formats.rows_by_format(values, format, coerce, exact)
+        texts = _row_dates.written(rows, utc)
     read = Series(texts, index=column.index, name=column.name, dtype="str")
     try:
         return Series._wrap(read._inner.to_datetime("", "ns", False, utc))
