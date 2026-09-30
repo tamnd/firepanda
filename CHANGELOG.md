@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Index.view(cls) and pct_change fill_method as pandas
+
+`Index.view` with a type reads the labels' bytes as that type and answers a numpy array the way pandas does, and refuses an index of text with pandas' TypeError. `pct_change` with a `fill_method` other than None raises pandas' ValueError rather than a firepanda refusal, since pandas 3 took the fill away.
+
 ### Changed: allow_duplicates only refuses a real clash
 
 `DataFrame.reset_index` and `DataFrame.insert` accept `allow_duplicates=True` and answer as pandas does whenever the new column's label is not already there. Only a real clash is refused, since a frame holds each column label once. A nameless index now lands under `level_0` when `index` is already a column, which is pandas' fallback.

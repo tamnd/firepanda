@@ -4967,6 +4967,12 @@ def _reset_clash(frame: Any, name: str) -> None:
         )
 
 
+def _fill_method_none(fill_method: Any) -> None:
+    """Refuses a `fill_method` on `pct_change`, which pandas 3 only takes as None."""
+    if fill_method is not None and fill_method is not NO_DEFAULT:
+        raise InvalidArgumentError(f"fill_method must be None; got fill_method={fill_method!r}.")
+
+
 def _labelled(labels: list[Any], values: list[Any]) -> Any:
     """A column carrying the labels it was given, made out of two lists.
 
@@ -16590,7 +16596,7 @@ class DataFrameMixin(_Carries):
         Across the rows it is each column over the column `periods` before it,
         less one, which is how pandas works it out along that axis.
         """
-        _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
+        _fill_method_none(fill_method)
         across = _axis_number(axis, "DataFrame", 0, (0, 1))
         if freq is not None:
             if across == 1:
@@ -20008,7 +20014,7 @@ class SeriesMixin(_Carries):
         self, periods: int, fill_method: Any, freq: Any, axis: Any = 0, **kwargs: Any
     ) -> Series:
         """The fractional change between each row and the one before it."""
-        _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
+        _fill_method_none(fill_method)
         _axis_number(axis, "Series", 0, (0,))
         if freq is not None:
             return _changed_by_freq(self, periods, freq)
@@ -29480,11 +29486,14 @@ class IndexMixin:
     def view(self, cls: Any = None) -> Any:
         """The same index under a new wrapper, sharing its labels.
 
-        `cls` reinterprets the bytes underneath as another type, which needs a
-        buffer of fixed width values that an index of text does not have, so it
-        is refused.
+        `cls` reads the bytes underneath as another type, which answers a numpy
+        array the way pandas does. An index of text has no buffer of fixed width
+        values to read, so it is refused with pandas' message.
         """
-        _refuse("cls", cls, "reading the labels' bytes as another type is not written")
+        if cls is not None:
+            if str(self.dtype) == "str":
+                raise DTypeError("Cannot change data-type for string array.")
+            return self.to_numpy().view(cls)
         made: Any = type(self)
         return made._wrap(self._inner)
 

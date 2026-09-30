@@ -207,7 +207,22 @@ def test_a_join_of_text_and_numbers_is_refused(firepanda: ModuleType) -> None:
         firepanda.Index(["a"]).join(firepanda.Index([1]), how="outer")
 
 
-def test_view_as_another_type_is_refused(firepanda: ModuleType) -> None:
-    """Reading the labels' bytes as another type needs a buffer of fixed width values."""
-    with pytest.raises(NotImplementedError):
-        firepanda.Index([1, 2]).view("int32")
+@pytest.mark.parametrize(
+    ("labels", "cls"),
+    [([1, 2, 3], "int64"), ([1, 2], "int32"), ([1.5, 2.0], "int64"), ([True, False], "int8")],
+)
+def test_view_as_another_type_reads_the_bytes(
+    firepanda: ModuleType, labels: list[Any], cls: str
+) -> None:
+    """pandas answers a numpy array over the same bytes read as the other type."""
+    import pandas as pd
+
+    mine = firepanda.Index(labels).view(cls)
+    theirs = pd.Index(labels).view(cls)
+    assert (mine.dtype, mine.tolist()) == (theirs.dtype, theirs.tolist())
+
+
+def test_view_of_text_as_another_type_is_refused(firepanda: ModuleType) -> None:
+    """Text has no buffer of fixed width values, and pandas says so."""
+    with pytest.raises(TypeError, match="Cannot change data-type for string array"):
+        firepanda.Index(["a"]).view("int64")
