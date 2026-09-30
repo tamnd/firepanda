@@ -133,6 +133,29 @@ RANGES: dict[str, Callable[[ModuleType], Any]] = {
     "cut-overlap": lambda lib: lib.cut(
         lib.Series([1]), lib.IntervalIndex.from_tuples([(0, 2), (1, 4)])
     ),
+    "days": lambda lib: lib.interval_range(lib.Timestamp("2024-01-01"), periods=3),
+    "days-to-end": lambda lib: lib.interval_range(
+        lib.Timestamp("2024-01-01"), lib.Timestamp("2024-01-05")
+    ),
+    "days-by-two": lambda lib: lib.interval_range(
+        lib.Timestamp("2024-01-01"), lib.Timestamp("2024-01-05"), freq="2D"
+    ),
+    "hours": lambda lib: lib.interval_range(lib.Timestamp("2024-01-01"), periods=2, freq="12h"),
+    "days-back": lambda lib: lib.interval_range(end=lib.Timestamp("2024-01-05"), periods=2),
+    "days-split": lambda lib: lib.interval_range(
+        lib.Timestamp("2024-01-01"), lib.Timestamp("2024-01-05"), periods=3
+    ),
+    "months": lambda lib: lib.interval_range(lib.Timestamp("2024-01-01"), periods=2, freq="MS"),
+    "zoned": lambda lib: lib.interval_range(lib.Timestamp("2024-01-01", tz="UTC"), periods=2),
+    "spans": lambda lib: lib.interval_range(lib.Timedelta("1h"), periods=2, freq="30min"),
+    "spans-short": lambda lib: lib.interval_range(lib.Timedelta("0h"), lib.Timedelta("3h")),
+    "spans-split": lambda lib: lib.interval_range(
+        lib.Timedelta("0h"), lib.Timedelta("3h"), periods=4
+    ),
+    "instant-and-number": lambda lib: lib.interval_range(lib.Timestamp("2024-01-01"), 5),
+    "days-left": lambda lib: lib.interval_range(
+        lib.Timestamp("2024-01-01"), periods=2, closed="left", name="k"
+    ),
 }
 
 
@@ -148,8 +171,3 @@ def plain_outcome(build: Callable[[], Any]) -> str:
 @pytest.mark.parametrize("case", RANGES.values(), ids=RANGES.keys())
 def test_ranges_answer_as_pandas(case: Callable[[ModuleType], Any]) -> None:
     assert plain_outcome(lambda: case(fp)) == plain_outcome(lambda: case(pd))
-
-
-def test_a_range_of_instants_is_refused() -> None:
-    with pytest.raises(NotImplementedError, match="interval_range"):
-        fp.interval_range(fp.Timestamp("2020-01-01"), periods=2)
