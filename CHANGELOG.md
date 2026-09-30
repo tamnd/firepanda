@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a series' var, std and sem are pandas' floats
+
+`Series.var`, `Series.std` and `Series.sem` of a column of numbers take the squared distances from the mean numpy sums and leave its error alone, the steps pandas' `nanvar` takes, where the kernel corrected for that error. On five values near two to the fifty two that is pandas' 37.25 where exact arithmetic gives 37.2, and `skew` agrees with pandas' twelve percent on the same column. Without numpy the kernel still answers.
+
 ### Changed: skew and kurt of whole numbers are pandas' answers
 
 `Series.skew` and `Series.kurt` cast a column of whole numbers to float64 before taking its moments and add in numpy's order, step by step as pandas' `nanskew` and `nankurt` do, so near two to the sixty two they answer pandas' float rather than the exact value a few parts in ten million away. A float column's skew now goes the same way, which was already how its kurtosis went.
