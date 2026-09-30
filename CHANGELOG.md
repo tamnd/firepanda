@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: concat with keys across the columns
+
+`concat(keys=, axis=1)` labels the columns with each part's key, as pandas does. Series take their keys as their column names, frames put each key in front of every one of their columns' labels as a MultiIndex over the columns, and a series beside frames is a frame of one column. `names` names the levels from the front, a key that is a tuple is one level a value, and `DataFrame.transform` with a list of functions now answers through the same door.
+
 ### Fixed: boolean column names print as pandas prints them
 
 A frame whose column names are booleans, as a crosstab or an unstack of a flag makes, prints them flush left to one width as pandas does, so beside `False` the name `True` reads `True ` and its column is a character wider.

@@ -30396,6 +30396,62 @@ def _levelled_rows(joined: Any, keys: list[Any], lengths: list[int], names: Any)
     return joined.set_axis(MultiIndex.from_arrays(columns, names=labels))
 
 
+def _levelled_columns(parts: list[Any], keys: list[Any], names: Any, join: str, sort: Any) -> Any:
+    """Parts side by side with each part's key as levels over its columns' labels.
+
+    Series take their keys as their column names, and frames put each key in
+    front of every one of their columns' labels, as pandas does. The parts are
+    joined under names of their own first, so columns that repeat across the
+    parts stay apart.
+
+    Raises:
+        UnsupportedError: For frames whose columns have different numbers of levels.
+    """
+    from ._frame import DataFrame, Index
+    from ._multi import MultiIndex
+
+    wide = all(isinstance(key, tuple) for key in keys)
+    depth = len(keys[0]) if wide and keys else 1
+    given = [] if names is None else list(names)
+    if all(isinstance(part, SeriesMixin) for part in parts):
+        held = [part.rename(f"__firepanda_part_{at}") for at, part in enumerate(parts)]
+        joined = concat(held, axis=1, join=join, sort=sort)
+        if wide:
+            labels: Any = MultiIndex.from_tuples(keys, names=[*given, *[None] * depth][:depth])
+        else:
+            labels = Index(list(keys), name=given[0] if given else None)
+        return joined.set_axis(labels, axis=1)
+    framed = []
+    unnamed = 0
+    for part in parts:
+        # Beside a frame a series is a frame of one column, as pandas makes it.
+        framed.append(part if isinstance(part, DataFrame) else _concat_framed(part, unnamed))
+        unnamed += isinstance(part, SeriesMixin) and part.name is None
+    parts = framed
+    inner = [part.columns for part in parts]
+    levels = {getattr(columns, "nlevels", 1) for columns in inner}
+    if len(levels) > 1:
+        raise UnsupportedError(
+            "concat(keys=) across the columns of frames with different levels of column"
+            " labels is not supported yet"
+        )
+    held = [
+        part.set_axis([f"__firepanda_part_{at}_{n}" for n in range(part.shape[1])], axis=1)
+        for at, part in enumerate(parts)
+    ]
+    joined = concat(held, axis=1, join=join, sort=sort)
+    arrays: list[list[Any]] = [[] for _ in range(depth + levels.pop())]
+    for key, columns in zip(keys, inner, strict=True):
+        width = len(columns)
+        for array, value in zip(arrays, key if wide else (key,), strict=False):
+            array.extend([value] * width)
+        for n in range(len(arrays) - depth):
+            arrays[depth + n].extend(columns.get_level_values(n).tolist())
+    labels = [*given, *[None] * (depth - len(given))] if len(given) <= depth else given
+    labels = [*labels, *list(inner[0].names)[len(labels) - depth :]]
+    return joined.set_axis(MultiIndex.from_arrays(arrays, names=labels), axis=1)
+
+
 def _concat_framed(part: Any, unnamed: int) -> DataFrame:
     """A part as a frame, which is what a series is on the frame side of a concat.
 
@@ -31091,13 +31147,10 @@ def concat(
                 f"Cannot set ignore_index={ignore_index!r} and specify keys. Either should be"
                 " used."
             )
-        if CONCAT_AXES.get(axis) == 1:
-            raise UnsupportedError(
-                "concat(keys=) across the columns labels them with levels, and a firepanda"
-                " column name is text"
-            )
         if verify_integrity:
             raise UnsupportedError("concat(keys=) with verify_integrity is not supported yet")
+        if CONCAT_AXES.get(axis) == 1:
+            return _levelled_columns(parts, keys, names, join, sort)
         joined = concat(parts, axis=axis, join=join, sort=sort)
         return _levelled_rows(joined, keys, [len(part) for part in parts], names)
     if axis not in CONCAT_AXES:
