@@ -92,6 +92,7 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(OTHER)], axis="columns", join="inner"),
     lambda m: m.concat([m.DataFrame(FIRST).iloc[::-1], m.DataFrame(OTHER)], axis=1, sort=True),
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(FIRST)], verify_integrity=False),
+    lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(FIRST).set_index("b")]),
 ]
 
 
@@ -131,7 +132,6 @@ REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(SECOND)], keys=["p", "q"], axis=1),
     lambda m: m.concat([m.DataFrame(FIRST)], names=["n"]),
     lambda m: m.concat([m.Series([True]), m.Series([1])]),
-    lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(FIRST).set_index("b")]),
 ]
 
 
