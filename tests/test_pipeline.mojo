@@ -1973,6 +1973,77 @@ def test_a_mean_over_uneven_chunks_is_not_a_mean_of_means() raises:
     assert_equal(got, Float64(3.5), "the mean of one through six")
 
 
+def coded_frame() raises -> DataFrame:
+    """A string column held as codes, in two chunks over one set of categories,
+    beside a number column. Six rows, four distinct strings, one null."""
+    var codes = Array[DType.int32](6)
+    var picked: List[Int32] = [0, 1, 0, 2, 3, 1]
+    for i in range(6):
+        codes.set_valid(i, picked[i])
+    codes.set_null(2)
+    var col = AnyArray.dictionary_encoded(
+        codes^, strings_from_list(["b", "a", "d", "a string too long to inline"])
+    )
+    var s = ChunkedArray(LogicalType.STRING)
+    s.append(col.slice(0, 4))
+    s.append(col.slice(4, 6))
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3, 4]))
+    n.append(numbers([5, 6]))
+    var columns = List[ChunkedArray]()
+    columns.append(s^)
+    columns.append(n^)
+    var fields = List[Field]()
+    fields.append(Field("s", LogicalType.STRING))
+    fields.append(Field("n", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_distinct_count_reads_the_codes() raises:
+    """A column a reduction only counts distinct goes in as codes, and the
+    answer is the one the strings give."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.NUNIQUE, "kinds"))
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    var pipeline = Pipeline(coded_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var coded = pipeline.coded_columns()
+    assert_true(coded[0], "the counted column stays coded")
+    assert_false(coded[1], "the summed column is read as values")
+    var out = pipeline^.run()
+    assert_equal(one_int(out, "kinds"), 4, "b, a, d and the long one")
+    assert_equal(one_int(out, "total"), 21, "1 through 6")
+
+
+def test_a_column_read_as_strings_is_decoded() raises:
+    """A minimum reads the strings, so the column is decoded for the whole
+    reduction, the distinct count beside it included."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.NUNIQUE, "kinds"))
+    aggs.append(GroupAgg(0, AggKind.MIN, "low"))
+    var pipeline = Pipeline(coded_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    assert_false(pipeline.coded_columns()[0], "the minimum reads strings")
+    var out = pipeline^.run()
+    assert_equal(one_int(out, "kinds"), 4, "the same count")
+    assert_equal(out.column("low").strings()[0], "a", "the smallest string")
+
+
+def test_codes_pass_through_a_projection() raises:
+    """A projection in front moves the column, and the flag follows it."""
+    var keep: List[Int] = [1, 0]
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.NUNIQUE, "kinds"))
+    var pipeline = Pipeline(coded_frame())
+    pipeline.add(Node(Project(keep^)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var coded = pipeline.coded_columns()
+    assert_true(coded[0], "counted distinct after the projection")
+    assert_true(coded[1], "not read by the reduction")
+    var out = pipeline^.run()
+    assert_equal(one_int(out, "kinds"), 4, "the same count")
+
+
 def big_frame() raises -> DataFrame:
     """Six values near 1.9e18, in chunks of two, three and one.
 

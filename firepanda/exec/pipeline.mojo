@@ -64,7 +64,8 @@ from .node import Node, NodeStatus, Reduce, node_apply, node_bind
 from .node import node_computes_per_row, node_ends_early, node_finish
 from .node import mark_chained_filters, node_is_breaker
 from .node import node_is_row_local, node_process
-from .node import node_status
+from .node import node_reads_codes, node_status
+from .node import Project
 from .parallel import worker_count
 
 comptime BATCH_CHUNKS_PER_WORKER = 4
@@ -122,6 +123,12 @@ struct Scan(Movable):
     var cuttable: Bool
     """Whether `cut` would do anything, which is false for a nested column."""
 
+    var coded: List[Bool]
+    """Per column, whether a morsel held as codes goes out as codes.
+
+    Empty, which decodes every column, until the pipeline says otherwise.
+    """
+
     def __init__(out self, var frame: DataFrame) raises:
         """Constructs a scan over a frame, consuming it.
 
@@ -165,6 +172,7 @@ struct Scan(Movable):
         self.columns = columns^
         self.remaining = count
         self.cuttable = cuttable
+        self.coded = List[Bool]()
 
     def cut(mut self) raises:
         """Cuts every chunk taller than a morsel into morsels.
@@ -245,7 +253,9 @@ struct Scan(Movable):
             # the encoding is there to avoid; a morsel's worth is a few
             # megabytes and is gone when the morsel is. An operator taught to
             # read codes is what removes this, one operator at a time.
-            if not piece.is_flat():
+            if not piece.is_flat() and not (
+                piece.is_coded() and i < len(self.coded) and self.coded[i]
+            ):
                 piece = piece.decoded()
             row.append(piece^)
         self.remaining -= 1
@@ -516,6 +526,41 @@ struct Pipeline(Movable):
         """
         return len(self.cut_points()) + 1
 
+    def coded_columns(self) -> List[Bool]:
+        """Works out which source columns can reach the line as codes.
+
+        A column goes through the projections at the front of the line to the
+        first operator that is not one, and stays coded if that operator says
+        it reads codes there, or if a projection drops it on the way.
+
+        Returns:
+            One flag per source column.
+        """
+        var out = List[Bool](capacity=len(self.source.columns))
+        for c in range(len(self.source.columns)):
+            var at = c
+            var coded = False
+            for i in range(len(self.operators)):
+                if self.operators[i].isa[Project]():
+                    ref keep = self.operators[i][Project].keep
+                    var found = -1
+                    var times = 0
+                    for j in range(len(keep)):
+                        if keep[j] == at:
+                            found = j
+                            times += 1
+                    if times == 0:
+                        coded = True
+                        break
+                    if times > 1:
+                        break
+                    at = found
+                    continue
+                coded = node_reads_codes(self.operators[i], at)
+                break
+            out.append(coded)
+        return out^
+
     def run(deinit self) raises -> DataFrame:
         """Runs the pipeline and returns the result.
 
@@ -532,6 +577,7 @@ struct Pipeline(Movable):
         # makes again. Here rather than at `add`, because a node is built before
         # the one above it exists.
         mark_chained_filters(self.operators)
+        self.source.coded = self.coded_columns()
         # The source is cut into morsels here rather than when it was built,
         # because a morsel is only worth having when there is a prefix to hand
         # out over it. This is the first point where both halves of that are
