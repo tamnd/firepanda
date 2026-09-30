@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from ._frame import DataFrame, Index, Series
+from ._frozen import FrozenList
 from ._pandas import NO_DEFAULT, _list_like, _missing
 from .errors import InvalidArgumentError
 
@@ -285,22 +286,22 @@ class MultiIndex:
     # The shape of the thing.
 
     @property
-    def levels(self) -> list[Index]:
+    def levels(self) -> FrozenList:
         """The distinct values of every level, each an index named after its level."""
-        return [
+        return FrozenList(
             Index(list(level), name=name)
             for level, name in zip(self._levels, self._names, strict=True)
-        ]
+        )
 
     @property
-    def codes(self) -> list[Any]:
+    def codes(self) -> FrozenList:
         """Which value of its level every row holds, one array per level, -1 for a gap."""
-        return [_array(list(code), _code_type(level)) for code, level in self._pairs()]
+        return FrozenList(_array(list(code), _code_type(level)) for code, level in self._pairs())
 
     @property
-    def names(self) -> list[Any]:
+    def names(self) -> FrozenList:
         """The level names."""
-        return list(self._names)
+        return FrozenList(self._names)
 
     @names.setter
     def names(self, names: Any) -> None:
