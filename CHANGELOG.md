@@ -196,6 +196,9 @@ A `MAP` type now carries its key and value types, written `MAP(K, V)` as DuckDB 
 ### Changed: an infinity in a window is a missing value
 
 Rolling, expanding and exponentially weighted windows now treat both infinities as missing values, as pandas does in `BaseWindow._prep_values`, where before they were kept as values. `count` still counts an infinity, and `sem` divides the spread of the finite values by that count, which is how pandas composes it. So `rolling(3).sum()` over `[1, 2, inf, 3, 4, 5, 6]` is `[nan, nan, nan, nan, nan, 12, 15]`, and `rolling(2).max()` over `[1, inf, 2, 3]` is `[nan, nan, nan, 3]`.
+### Changed: text counts with a missing row are float64
+
+`str.len`, `str.find`, `str.rfind`, `str.index`, `str.rindex` and `str.count` now answer float64 with NaN in the missing rows when the column has one, as pandas does, where before they answered int64 holding NaN. A column with no missing row still answers int64.
 
 ### Added: Styler.to_excel
 

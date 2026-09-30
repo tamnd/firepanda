@@ -22874,7 +22874,7 @@ class StringMixin:
         """
         found = self._found(kind, sub, start, end)
         for value in found.tolist():
-            if isinstance(value, int) and value < 0:
+            if isinstance(value, (int, float)) and value < 0:
                 raise InvalidArgumentError("substring not found")
         return found
 

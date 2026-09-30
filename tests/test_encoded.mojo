@@ -7,6 +7,7 @@ the payload side of a view is exercised, and a null row, so the codes' validity
 is.
 """
 
+from std.math import isnan
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -285,6 +286,18 @@ def same_numbers[dt: DType](a: AnyArray, b: AnyArray) raises:
             assert_equal(x[i], y[i], "row " + String(i))
 
 
+def same_floats(a: AnyArray, b: AnyArray) raises:
+    assert_true(a.type.is_float(), "a count with a gap is float64")
+    ref x = a.as_typed_view[DType.float64]()
+    ref y = b.as_typed_view[DType.float64]()
+    assert_equal(len(x), len(y), "rows")
+    for i in range(len(x)):
+        if isnan(x[i]):
+            assert_true(isnan(y[i]), "NaN at " + String(i))
+        else:
+            assert_equal(x[i], y[i], "row " + String(i))
+
+
 def test_the_text_methods_match_the_flat_ones() raises:
     var held = Series(String("s"), status())
     var flat = Series(String("s"), status().decoded())
@@ -294,10 +307,10 @@ def test_the_text_methods_match_the_flat_ones() raises:
         flat.chars_replace("at", "AT", -1).values,
     )
     same_text(held.chars_get(1).values, flat.chars_get(1).values)
-    same_numbers[DType.int64](
-        held.chars_length().values, flat.chars_length().values
-    )
-    same_numbers[DType.int64](
+    # The column holds a missing row, so the counts come back float64 with a
+    # NaN there, which is pandas' spelling.
+    same_floats(held.chars_length().values, flat.chars_length().values)
+    same_floats(
         held.chars_find("t", None, None, False).values,
         flat.chars_find("t", None, None, False).values,
     )
