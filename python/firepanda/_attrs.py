@@ -155,6 +155,88 @@ wrapper below calls straight through, so a program that never sets `attrs`
 or `flags` pays one global read for each call."""
 
 
+_FREQ_USED = False
+"""Whether any frame or column has carried an index frequency, the fast path's flag."""
+
+_FREQ_DROPS = frozenset(
+    [
+        "set_index",
+        "reset_index",
+        "reindex",
+        "reindex_like",
+        "set_axis",
+        "T",
+        "transpose",
+        "explode",
+        "stack",
+        "unstack",
+        "melt",
+        "pivot_table",
+        "asfreq",
+        "resample",
+        "to_period",
+        "to_timestamp",
+        "merge",
+        "join",
+        "droplevel",
+        "swaplevel",
+        "reorder_levels",
+        "describe",
+        "sort_values",
+        "nlargest",
+        "nsmallest",
+        "mode",
+        "corr",
+        "cov",
+        "corrwith",
+        "compare",
+        "sample",
+        "value_counts",
+        "dtypes",
+        "memory_usage",
+        "dot",
+        "__matmul__",
+        "__rmatmul__",
+        "align",
+        "combine",
+        "pivot",
+    ]
+)
+"""The methods whose answer has labels of its own, which do not carry the frequency."""
+
+
+def row_freq(obj: Any) -> Any:
+    """The frequency a frame or column holds for its row labels, or None."""
+    try:
+        return obj._row_freq
+    except AttributeError:
+        return None
+
+
+def hold_freq(obj: Any, freq: Any) -> None:
+    """Gives a frame or column a frequency for its row labels, or takes it away."""
+    global _FREQ_USED
+    if freq is None:
+        with contextlib.suppress(AttributeError):
+            del obj._row_freq
+        return
+    _FREQ_USED = True
+    obj._row_freq = freq
+
+
+def _carry_freq(result: Any, source: Any) -> None:
+    """Passes the frequency on from a source to what was made of it.
+
+    Whether the labels still step by it is read when they are asked for, so a
+    filter that broke the run hands it on and the index shows none.
+    """
+    if result is source or type(result) not in _SLOTS:
+        return
+    held = row_freq(source)
+    if held is not None and row_freq(result) is None:
+        result._row_freq = held
+
+
 def carried(obj: Any) -> tuple[dict[Any, Any], bool] | None:
     """The `attrs` and the refusal of duplicate labels a frame or a column holds, or None."""
     read = _SLOTS.get(type(obj))
@@ -309,17 +391,26 @@ def agreed(inputs: list[Any]) -> tuple[dict[Any, Any], bool] | None:
     return (kept, unique_only) if kept or unique_only else None
 
 
-def _keeping(fn: Callable[..., Any], source_of: Callable[[Any], Any], name: str) -> Any:
+def _keeping(
+    fn: Callable[..., Any], source_of: Callable[[Any], Any], name: str, freq: bool = False
+) -> Any:
     """`fn`, with its answer given what its source carries."""
     binary = name in _BINARY
     agreeing = name in _AGREED
+    freq = freq and name not in _FREQ_DROPS
 
     @functools.wraps(fn)
     def method(self: Any, *args: Any, **kwargs: Any) -> Any:
         if not _USED:
-            return fn(self, *args, **kwargs)
+            if not (freq and _FREQ_USED):
+                return fn(self, *args, **kwargs)
+            result = fn(self, *args, **kwargs)
+            _carry_freq(result, source_of(self))
+            return result
         result = fn(self, *args, **kwargs)
         source = source_of(self)
+        if freq and _FREQ_USED:
+            _carry_freq(result, source)
         if agreeing:
             other = _other_of(args, kwargs)
             others = other if isinstance(other, list | tuple) else [other]
@@ -363,15 +454,25 @@ def _grouping(fn: Callable[..., Any], source_of: Callable[[Any], Any]) -> Any:
     return method
 
 
-def _dropping(fn: Callable[..., Any], source_of: Callable[[Any], Any]) -> Any:
-    """`fn`, with its answer carrying nothing, for what pandas does not finalize."""
+def _dropping(fn: Callable[..., Any], source_of: Callable[[Any], Any], freq: bool = False) -> Any:
+    """`fn`, with its answer carrying nothing, for what pandas does not finalize.
+
+    The frequency of the row labels is not part of that, since pandas keeps it
+    on the index rather than the frame, so a window still passes it on.
+    """
 
     @functools.wraps(fn)
     def method(self: Any, *args: Any, **kwargs: Any) -> Any:
         if not _USED:
-            return fn(self, *args, **kwargs)
+            if not (freq and _FREQ_USED):
+                return fn(self, *args, **kwargs)
+            result = fn(self, *args, **kwargs)
+            _carry_freq(result, source_of(self))
+            return result
         result = fn(self, *args, **kwargs)
         _strip(result, source_of(self))
+        if freq and _FREQ_USED:
+            _carry_freq(result, source_of(self))
         return result
 
     return method
@@ -433,6 +534,7 @@ def _install(
     drops: Any,
     drop_all: bool = False,
     grouped: bool = False,
+    freq: bool = False,
 ) -> None:
     """Wraps every public method and property of `cls`, and the operators.
 
@@ -451,11 +553,11 @@ def _install(
         if isinstance(raw, property):
             if raw.fget is None:
                 continue
-            getter = _wrapped(raw.fget, name, source_of, drops, drop_all, grouped)
+            getter = _wrapped(raw.fget, name, source_of, drops, drop_all, grouped, freq)
             setattr(cls, name, property(getter, raw.fset, raw.fdel, raw.__doc__))
         elif inspect.isfunction(raw):
             if raw not in made:
-                made[raw] = _wrapped(raw, name, source_of, drops, drop_all, grouped)
+                made[raw] = _wrapped(raw, name, source_of, drops, drop_all, grouped, freq)
             setattr(cls, name, made[raw])
 
 
@@ -466,6 +568,7 @@ def _wrapped(
     drops: Any,
     drop_all: bool,
     grouped: bool,
+    freq: bool = False,
 ) -> Any:
     """The right wrapper for one method of a class, by the lists above."""
     if name in _ITERATED:
@@ -473,10 +576,40 @@ def _wrapped(
     if name == "groupby" or (grouped and name == "__getitem__"):
         return _grouping(fn, source_of)
     if drop_all or name in drops:
-        return _dropping(fn, source_of)
+        return _dropping(fn, source_of, freq and name not in _FREQ_DROPS)
     if name in ("agg", "aggregate"):
         return _aggregating(fn, source_of, grouped)
-    return _keeping(fn, source_of, name)
+    return _keeping(fn, source_of, name, freq)
+
+
+def _holding_init(fn: Callable[..., Any]) -> Any:
+    """A constructor that takes the frequency of the row labels it was given."""
+
+    @functools.wraps(fn)
+    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
+        fn(self, *args, **kwargs)
+        index = kwargs["index"] if "index" in kwargs else args[1] if len(args) > 1 else None
+        data = kwargs["data"] if "data" in kwargs else args[0] if args else None
+        held = getattr(index, "freq", None) if index is not None else row_freq(data)
+        if held is not None and not isinstance(held, str):
+            hold_freq(self, held)
+
+    return __init__
+
+
+def _holding_axis(fn: Callable[..., Any]) -> Any:
+    """`set_axis`, whose answer takes the frequency of new row labels."""
+
+    @functools.wraps(fn)
+    def set_axis(self: Any, labels: Any, *args: Any, **kwargs: Any) -> Any:
+        result = fn(self, labels, *args, **kwargs)
+        axis = kwargs.get("axis", args[0] if args else 0)
+        held = getattr(labels, "freq", None)
+        if axis in (0, "index", "rows") and held is not None and not isinstance(held, str):
+            hold_freq(result, held)
+        return result
+
+    return set_axis
 
 
 _DUNDERS = frozenset(
@@ -515,14 +648,26 @@ def _dropping_function(fn: Callable[..., Any]) -> Any:
     return function
 
 
-def _agreeing_function(fn: Callable[..., Any], inputs_of: Callable[..., list[Any]]) -> Any:
-    """`concat` or `merge`, which keep what every input holds in common."""
+def _agreeing_function(
+    fn: Callable[..., Any], inputs_of: Callable[..., list[Any]], freq: bool = False
+) -> Any:
+    """`concat` or `merge`, which keep what every input holds in common.
+
+    `concat` also keeps a frequency every input's row labels share, which the
+    labels drop again when they are read if the pieces did not join up.
+    """
 
     @functools.wraps(fn)
     def function(*args: Any, **kwargs: Any) -> Any:
         if not _USED:
-            return fn(*args, **kwargs)
+            if not (freq and _FREQ_USED):
+                return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            _agreed_freq(result, inputs_of(*args, **kwargs), kwargs)
+            return result
         result = fn(*args, **kwargs)
+        if freq and _FREQ_USED:
+            _agreed_freq(result, inputs_of(*args, **kwargs), kwargs)
         held = agreed(inputs_of(*args, **kwargs))
         if held is None:
             _strip(result, None)
@@ -531,6 +676,16 @@ def _agreeing_function(fn: Callable[..., Any], inputs_of: Callable[..., list[Any
         return result
 
     return function
+
+
+def _agreed_freq(result: Any, inputs: list[Any], kwargs: dict[str, Any]) -> None:
+    """Gives a joined answer the frequency all of its inputs' row labels share."""
+    if kwargs.get("ignore_index") or type(result) not in _SLOTS or not inputs:
+        return
+    held = [row_freq(one) for one in inputs]
+    shared = held[0]
+    if shared is not None and all(one == shared for one in held) and row_freq(result) is None:
+        hold_freq(result, shared)
 
 
 def _concat_inputs(objs: Any = None, *args: Any, **kwargs: Any) -> list[Any]:
@@ -561,15 +716,19 @@ def install() -> None:
     def itself(obj: Any) -> Any:
         return obj
 
-    _install(_frame.DataFrame, itself, _FRAME_DROPS)
-    _install(_frame.Series, itself, _FRAME_DROPS)
-    for cls in (_pandas._Positional, _pandas._Labelled):
-        _install(cls, lambda selection: selection._owner, frozenset())
-    _install(_frame.StringAccessor, lambda accessor: accessor._series, frozenset())
+    _install(_frame.DataFrame, itself, _FRAME_DROPS, freq=True)
+    _install(_frame.Series, itself, _FRAME_DROPS, freq=True)
+    for cls in (_frame.DataFrame, _frame.Series):
+        cls.__init__ = _holding_init(cls.__init__)  # type: ignore[method-assign]
+        cls.set_axis = _holding_axis(cls.set_axis)  # type: ignore[method-assign]
+    for cls in (_pandas._Positional, _pandas._Labelled, _pandas._Along):
+        _install(cls, lambda selection: selection._owner, frozenset(), freq=True)
+    _install(_frame.StringAccessor, lambda accessor: accessor._series, frozenset(), freq=True)
     _install(
         _frame.DatetimeProperties,
         lambda accessor: accessor._series,
         frozenset(["isocalendar", "to_pydatetime"]),
+        freq=True,
     )
     _install(_frame.CategoricalAccessor, lambda accessor: accessor._series, frozenset(), True)
     _install(_frame.DataFrameGroupBy, lambda grouped: grouped._frame, _GROUPED_DROPS, grouped=True)
@@ -581,13 +740,15 @@ def install() -> None:
     )
     _install(_resample.Resampler, lambda resampled: resampled._obj, _RESAMPLED_DROPS, grouped=True)
     for cls in (_frame.Rolling, _frame.Expanding):
-        _install(cls, lambda window: window._whole, frozenset(), True)
-    _install(_frame.ExponentialMovingWindow, lambda window: window._data, frozenset(), True)
+        _install(cls, lambda window: window._whole, frozenset(), True, freq=True)
+    _install(
+        _frame.ExponentialMovingWindow, lambda window: window._data, frozenset(), True, freq=True
+    )
 
     for name in ("melt", "pivot", "crosstab", "cut", "qcut", "to_datetime", "to_numeric"):
         for module in (_pandas, firepanda):
             if hasattr(module, name):
                 setattr(module, name, _dropping_function(getattr(module, name)))
     for module in (_pandas, firepanda):
-        module.concat = _agreeing_function(module.concat, _concat_inputs)
+        module.concat = _agreeing_function(module.concat, _concat_inputs, freq=True)
         module.merge = _agreeing_function(module.merge, _merge_inputs)

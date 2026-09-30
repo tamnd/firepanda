@@ -65,8 +65,9 @@ from . import (
     _sparse,
     _xarray,
 )
-from ._attrs import Flags, carried, flags_of, hold
+from ._attrs import Flags, carried, flags_of, hold, hold_freq, row_freq
 from ._expression import applied
+from ._held_freq import HeldFreq, freq_shown
 from ._na import NA
 from ._scalars import NaT, Timedelta, _inward, _outward, _outward_one, _temporal, _zone_name
 from .errors import (
@@ -5306,6 +5307,35 @@ def _other_side(
     return _fallback(printed, other, column)
 
 
+def _moved_labels(obj: Any, periods: Any, freq: Any, axis: Any) -> Any:
+    """The row labels a shift by a frequency moves the rows to, or None to refuse it.
+
+    Shifting by a frequency leaves every value where it is and moves the labels
+    instead, which an index of instants, spans or periods knows how to do, and
+    `"infer"` reads the step off the labels.
+    """
+    from ._period_index import PeriodIndex
+
+    whole = isinstance(periods, int) and not isinstance(periods, bool)
+    if freq is None or not whole or axis not in (0, "index", "rows", None):
+        return None
+    labels = obj.index
+    if not isinstance(labels, (HeldFreq, PeriodIndex)):
+        raise NotImplementedError(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and "
+            f"TimedeltaIndex; Got type {type(labels).__name__}"
+        )
+    if isinstance(freq, str) and freq == "infer":
+        freq = labels.freq if labels.freq is not None else labels.inferred_freq
+        if freq is None:
+            raise InvalidArgumentError("Freq was not set in the index hence cannot be inferred")
+    if not isinstance(freq, str):
+        freq = getattr(freq, "freqstr", freq)
+    if isinstance(labels, PeriodIndex):
+        return labels.shift(periods) if freq == labels.freqstr else None
+    return labels.shift(periods, freq=freq)
+
+
 def _numpy_float(column: Any) -> bool:
     """Whether a column is a plain float column, whose gap pandas spells NaN."""
     printed = column._inner.dtype()
@@ -9931,6 +9961,9 @@ class _Carries:
         if isinstance(labels.name, str) and labels.name.startswith(_names.MARK):
             # Labels that were a column whose name is not text, as `set_index` makes.
             return labels.rename(_names.shown(labels.name))
+        held = row_freq(self)
+        if held is not None and isinstance(labels, HeldFreq):
+            labels._freq = freq_shown(labels, held)
         return labels
 
     def set_flags(
@@ -9951,14 +9984,15 @@ class _Carries:
 class DataFrameMixin(_Carries):
     """The hand written half of `DataFrame`."""
 
-    __slots__ = ("_carried", "_inner")
+    __slots__ = ("_carried", "_inner", "_row_freq")
     """The state, declared here rather than on the generated class.
 
     It has to be here because the constructor is here, and a class cannot assign
     to a slot it does not own. The generated subclass declares an empty
     `__slots__`, so an instance still has no `__dict__` and there is still
     exactly one place the extension object lives. `_carried` is the `attrs` and
-    the flags, which `_attrs.py` explains, and it is unset on most frames."""
+    the flags, which `_attrs.py` explains, and it is unset on most frames.
+    `_row_freq` is the frequency of the row labels, unset unless they had one."""
 
     _inner: _firepanda.DataFrame
 
@@ -15272,6 +15306,9 @@ class DataFrameMixin(_Carries):
 
     def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> DataFrame:
         """Moves every column's rows along, leaving the gap missing."""
+        moved = _moved_labels(self, periods, freq, axis)
+        if moved is not None:
+            return self.set_axis(moved, axis=0)
         _refuse(
             "freq",
             freq,
@@ -15463,9 +15500,10 @@ def _arrow_dtype(dtype: Any) -> Any:
 class SeriesMixin(_Carries):
     """The hand written half of `Series`."""
 
-    __slots__ = ("_carried", "_inner", "_typed_name")
+    __slots__ = ("_carried", "_inner", "_row_freq", "_typed_name")
     """The column the core holds, for the reason `DataFrameMixin` gives, a name
-    given as a number, which `_named_as` explains, and the `attrs` and flags."""
+    given as a number, which `_named_as` explains, the `attrs` and flags, and
+    the frequency of the row labels, which `_attrs.py` passes on."""
 
     _inner: _firepanda.Series
 
@@ -18530,6 +18568,9 @@ class SeriesMixin(_Carries):
 
     def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> Series:
         """Moves the column's rows along, leaving the gap missing."""
+        moved = _moved_labels(self, periods, freq, axis)
+        if moved is not None:
+            return self.set_axis(moved, axis=0)
         _refuse(
             "freq",
             freq,
@@ -27767,7 +27808,10 @@ class IndexMixin:
         from ._frame import _index_to_series
 
         labels = None if index is None else _unwrap(index, "index")
-        return _index_to_series(self._inner, labels, None if name is None else str(name))
+        made = _index_to_series(self._inner, labels, None if name is None else str(name))
+        if index is None and getattr(self, "_freq", None) is not None:
+            hold_freq(made, self._freq)
+        return made
 
     def isna(self) -> Any:
         """Whether each label is missing.

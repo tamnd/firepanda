@@ -96,6 +96,49 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+_SCALE = {"s": 1_000_000_000, "ms": 1_000_000, "us": 1_000, "ns": 1}
+"""Nanoseconds in one stored step of each unit."""
+
+
+def freq_shown(labels: Any, freq: Any) -> Any:
+    """The frequency labels show, given one the frame or column around them carried.
+
+    That frequency while the labels still step by it, a whole multiple of it
+    when they step by that, as taking every other row does, and None otherwise.
+    A fixed step is read off the gaps between the stored numbers in one pass,
+    which is cheap at any length. Any other offset is checked the way the index
+    constructor checks it, and only up to a length where that is quick.
+    """
+    from . import offsets
+    from ._frequency import _conforming
+
+    count = len(labels)
+    if count < 2:
+        return freq
+    if labels.hasnans:
+        return None
+    fixed = isinstance(freq, offsets.Tick) or (
+        isinstance(freq, offsets.Day) and getattr(labels, "tz", None) is None
+    )
+    if fixed:
+        scale = _SCALE.get(labels.unit)
+        if scale is None or freq.nanos % scale:
+            return None
+        step = freq.nanos // scale
+        gaps = labels.to_series().astype("int64").diff().iloc[1:]
+        first = gaps.iloc[0]
+        if first == 0 or first % step or not bool((gaps == first).all()):
+            return None
+        return freq if first == step else freq * int(first // step)
+    if count > 100_000:
+        return None
+    try:
+        _conforming(labels, freq)
+    except ValueError:
+        return None
+    return freq
+
+
 class HeldFreq:
     """The operations of an index of instants or spans that pass the frequency on."""
 
