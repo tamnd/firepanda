@@ -252,19 +252,15 @@ def test_an_empty_column_transforms_to_an_empty_column(firepanda: ModuleType) ->
         assert getattr(firepanda.Series([]), name)().tolist() == [], name
 
 
-@pytest.mark.parametrize(
-    ("owner", "call", "arguments", "expected"),
-    [
-        ("Series", "pct_change", {"fill_method": "pad"}, "fill_method"),
-    ],
-)
-def test_a_declared_argument_that_is_not_implemented_refuses(
-    firepanda: ModuleType, owner: str, call: str, arguments: dict[str, object], expected: str
+@pytest.mark.parametrize("owner", ["Series", "DataFrame"])
+@pytest.mark.parametrize("method", ["pad", "ffill", "bfill"])
+def test_pct_change_takes_fill_method_only_as_none(
+    firepanda: ModuleType, owner: str, method: str
 ) -> None:
-    """Every one of them, by name, with the reason in the message."""
+    """pandas 3 took the fill away, so any method is refused with pandas' own message."""
     holder = firepanda.Series(HOLED) if owner == "Series" else firepanda.DataFrame({"a": HOLED})
-    with pytest.raises(NotImplementedError, match=expected):
-        getattr(holder, call)(**arguments)
+    with pytest.raises(ValueError, match=f"fill_method must be None; got fill_method='{method}'"):
+        holder.pct_change(fill_method=method)
 
 
 def test_a_series_has_only_the_one_axis(firepanda: ModuleType) -> None:
