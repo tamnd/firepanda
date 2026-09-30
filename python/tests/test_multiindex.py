@@ -315,13 +315,9 @@ def test_mistakes_raise_as_pandas_raises(
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: keyed(m).to_frame(),
     lambda m: keyed(m).to_series(),
     lambda m: keyed(m).to_flat_index(),
-    lambda m: keyed(m).value_counts(),
-    lambda m: keyed(m).sort_values(key=lambda level: level),
     lambda m: keyed(m).append(m.Index([1])),
-    lambda m: keyed(m).get_indexer([("a", 1)], method="pad"),
 ]
 
 

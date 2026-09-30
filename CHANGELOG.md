@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: MultiIndex to_frame, value_counts, sort keys, lookups by several levels and filling indexers
+
+`MultiIndex.to_frame()` now labels its rows with the index by default. `value_counts` counts each row. `sort_values(key=)` calls the key on the values of each level. `get_loc_level` looks a key up across several levels at once and drops those levels unless none would be left, as pandas does. `reindex(level=)` takes the rows holding each value of one level in turn, and `get_indexer` fills forward or back along sorted rows.
+
 ### Added: resampling timestamps with a zone
 
 `resample` now takes timestamps that carry a zone, as pandas does. Days and calendar steps are laid on the zone's own clock, so a day around a change of the clocks is 23 or 25 hours long. A fixed step is laid on the instants themselves, counted from midnight of the first day on the zone's clock, or from the epoch on that clock. The labels carry the zone, and upsampling works the same way.
