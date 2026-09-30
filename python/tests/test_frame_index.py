@@ -178,8 +178,6 @@ def test_the_arguments_that_are_not_implemented_say_so(firepanda: ModuleType) ->
     """Each one by name, rather than as an unexpected keyword."""
     with pytest.raises(NotImplementedError, match="level"):
         made(firepanda).reset_index(level=0)
-    with pytest.raises(NotImplementedError, match="allow_duplicates"):
-        made(firepanda).reset_index(allow_duplicates=True)
 
 
 @needs_pandas

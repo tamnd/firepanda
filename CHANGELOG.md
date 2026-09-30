@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: allow_duplicates only refuses a real clash
+
+`DataFrame.reset_index` and `DataFrame.insert` accept `allow_duplicates=True` and answer as pandas does whenever the new column's label is not already there. Only a real clash is refused, since a frame holds each column label once. A nameless index now lands under `level_0` when `index` is already a column, which is pandas' fallback.
+
 ### Added: quantile over a category column
 
 `Series.quantile` and `DataFrame.quantile` read a categorical column through its codes the way pandas does. A picked interpolation answers a category, a blended one answers a float, and a frame's list of quantiles keeps the column a categorical. A group by quantile over categories raises pandas' TypeError instead of answering.
