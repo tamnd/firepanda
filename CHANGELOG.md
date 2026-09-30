@@ -71,6 +71,9 @@ A frame reduced with `axis=1` now answers one value per row for sum, prod, max, 
 ### Added: seven parameters that used to refuse
 
 `shift` fills the rows it opens with `fill_value` on a series and a frame, keeping a column of whole numbers whole. The four scans take `skipna=False`, where every row after the first gap is a gap, and the frame scans take `numeric_only`. `any` and `all` take `skipna=False`, where a gap counts as true and a masked column answers `NA` when the known values do not settle it, and the frame spelling takes `bool_only`. `fillna` stops after `limit` gaps down each column. `DataFrame.sort_index` sorts the columns with `axis=1` and numbers the rows again with `ignore_index`. `replace` with `regex` rewrites the matched part of every text row, for one pattern and one piece of text. Each answer is checked against pandas.
+### Changed: a group by with a coded text key hashes the tuple once
+
+A text key held as codes into its distinct values now goes the fused route beside a fixed width key too wide to table. Its codes group the way its text does, so the fold and the verification read them as an int32 column, and the group by pays for one hash table instead of one over the wide key and another over the packed pair. ClickBench q16 groups a user id with a coded search phrase that way. At 1M rows on a six core machine that was busy with other work, its grouping went from 43 to 28 ms at best and q18's from 79 to 59, with the same groups.
 
 ### Added: `str.partition` and `str.rpartition` with `expand=False`
 
