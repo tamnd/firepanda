@@ -147,6 +147,19 @@ LEVELS: list[Callable[[Any], Any]] = [
         index="r", columns="c", values="v", aggfunc=["sum", "max"], margins=True
     ),
     lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc=["sum"]).columns,
+    lambda m: base(m).pivot_table(index="r", columns="c", values=["w", "v"], margins=True),
+    lambda m: base(m).pivot_table(
+        index="r", columns="c", values=["v", "w"], aggfunc="sum", margins=True
+    ),
+    lambda m: base(m)[["r", "c", "v", "w"]].pivot_table(
+        index="r", columns="c", aggfunc="sum", margins=True, margins_name="T"
+    ),
+    lambda m: base(m)[["r", "c", "v", "w"]].pivot_table(
+        index=["r"], columns="c", aggfunc={"v": "sum", "w": "max"}, margins=True
+    ),
+    lambda m: base(m).pivot_table(
+        index="r", columns="c", values=["v", "w"], aggfunc=["sum", "max"], margins=True
+    ),
 ]
 
 
@@ -173,7 +186,6 @@ def test_columns_of_several_levels_are_pandas(
             .assign(c=[1, 1, 2, 3, 2])
             .pivot_table(index="r", columns="c", values="v", margins=True)
         ),
-        lambda m: base(m).pivot_table(index="r", columns="c", values=["v", "w"], margins=True),
         lambda m: base(m).pivot(index="r", columns="c", values=["v", "t"]),
     ],
 )
@@ -208,3 +220,17 @@ def test_the_signature_is_pandas_signature(firepanda: ModuleType, mine: str, you
     assert [(p.name, p.kind, repr(p.default)) for p in ours.values()] == [
         (p.name, p.kind, repr(p.default)) for p in theirs.values()
     ]
+
+
+def test_totals_pandas_cannot_name_or_find_are_refused_as_pandas(
+    firepanda: ModuleType,
+) -> None:
+    """A value given several functions, or a column the mapping lacks, fails as in pandas."""
+    with pytest.raises(ValueError, match="The name None occurs multiple times"):
+        base(firepanda).pivot_table(
+            index="r", columns="c", aggfunc={"v": "sum", "w": ["min", "max"]}, margins=True
+        )
+    with pytest.raises(KeyError, match="t"):
+        base(firepanda).pivot_table(
+            index="r", columns="c", aggfunc={"v": "sum", "w": "max"}, margins=True
+        )
