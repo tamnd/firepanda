@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: cut and qcut of instants and spans
+
+`cut` and `qcut` now bin a column of instants or spans the way pandas does, by counts of their unit, and answer intervals of instants or spans that keep the unit and the zone, with `retbins` handing back a `DatetimeIndex` or `TimedeltaIndex`. `IntervalIndex.from_breaks` and interval columns take instants and spans as ends, a list, an array or an index binned by `cut` or `qcut` answers a `Categorical` as pandas does, and a category label longer than `display.max_colwidth` is cut with dots under a column.
+
 ### Fixed: nunique with NaN and column level names on reductions
 
 `Series.nunique` and `DataFrame.nunique` no longer count a NaN as a value of its own beside a missing entry, so `Series([1.0, nan]).nunique()` answers 1 as pandas does. A reduction, `dtypes` or `idxmax` over a frame whose columns carry level names now keeps those names on its answer, and `memory_usage` over columns of several levels labels them as pandas does.

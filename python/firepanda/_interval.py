@@ -14,7 +14,8 @@ A list of intervals of numbers that share `closed` is an interval column,
 held as written cells the way document 102 describes, and `IntervalDtype` and
 `IntervalIndex` are pandas' names for its type and for an index of intervals,
 and `interval_range` builds one of evenly spaced numbers. Intervals of instants
-or spans are not written yet.
+or spans are held the same way, their type naming the unit, and the zone of
+the instants when they have one.
 """
 
 from __future__ import annotations
@@ -263,12 +264,42 @@ def _number(value: Any) -> bool:
     return isinstance(value, numbers.Real) and not isinstance(value, bool)
 
 
+_UNITS = ("s", "ms", "us", "ns")
+
+
+def moment_subtype(ends: Any) -> str | None:
+    """The subtype of intervals whose ends are all instants or all spans, or None.
+
+    The unit is the finest any end has, and instants carry their zone, which all of
+    them have to share.
+    """
+    if not ends:
+        return None
+    if all(isinstance(end, Timedelta) for end in ends):
+        unit = max((end.unit for end in ends), key=_UNITS.index)
+        return f"timedelta64[{unit}]"
+    if not all(isinstance(end, Timestamp) for end in ends):
+        return None
+    zones = {None if end.tz is None else str(end.tz) for end in ends}
+    if len(zones) > 1:
+        return None
+    unit = max((end.unit for end in ends), key=_UNITS.index)
+    zone = zones.pop()
+    return f"datetime64[{unit}]" if zone is None else f"datetime64[{unit}, {zone}]"
+
+
+def _moment_kind(kind: str) -> bool:
+    """Whether an interval type's ends are instants or spans."""
+    return kind.startswith(("interval[datetime", "interval[timedelta"))
+
+
 def interval_kind(values: Any) -> str | None:
     """The interval type a list of values makes, or None when it makes an object column.
 
-    Every value that is not a gap has to be an interval of numbers, and all of them
-    closed on the same side. The ends are whole numbers or floats, and one float
-    anywhere makes every end a float, as pandas holds them.
+    Every value that is not a gap has to be an interval of numbers, of instants or
+    of spans, and all of them closed on the same side. The ends of numbers are whole
+    numbers or floats, and one float anywhere makes every end a float, as pandas
+    holds them.
     """
     from ._objects import is_gap
 
@@ -277,7 +308,12 @@ def interval_kind(values: Any) -> str | None:
         return None
     sides = {value.closed for value in found}
     ends = [end for value in found for end in (value.left, value.right)]
-    if len(sides) > 1 or not all(_number(end) for end in ends):
+    if len(sides) > 1:
+        return None
+    moment = moment_subtype(ends)
+    if moment is not None:
+        return f"interval[{moment}, {sides.pop()}]"
+    if not all(_number(end) for end in ends):
         return None
     whole = len(found) == len(values) and all(isinstance(end, numbers.Integral) for end in ends)
     return f"interval[{'int64' if whole else 'float64'}, {sides.pop()}]"
@@ -287,8 +323,29 @@ def interval_pairs(values: Any, kind: str) -> list[Any]:
     """The ends of each interval as the type holds them, None for a gap."""
     from ._objects import is_gap
 
+    if _moment_kind(kind):
+        return [None if is_gap(value) else (value.left, value.right) for value in values]
     cast = int if kind.startswith("interval[int") else float
     return [None if is_gap(value) else (cast(value.left), cast(value.right)) for value in values]
+
+
+def _arrow_ends(subtype: str | None) -> Any:
+    """The Arrow type of an interval type's ends."""
+    import pyarrow as pa
+
+    if subtype is None or subtype.startswith("float"):
+        return pa.float64()
+    if subtype == "int64":
+        return pa.int64()
+    unit, _, zone = subtype[subtype.find("[") + 1 : -1].partition(", ")
+    if subtype.startswith("timedelta"):
+        return pa.duration(unit)
+    return pa.timestamp(unit, tz=zone or None)
+
+
+def _ticks(end: Any, unit: str) -> int:
+    """An instant or a span as a whole count of its unit since the epoch or from nothing."""
+    return end.value // 1000 ** (3 - _UNITS.index(unit))
 
 
 def _kind_parts(kind: str) -> tuple[str | None, str | None]:
@@ -296,8 +353,11 @@ def _kind_parts(kind: str) -> tuple[str | None, str | None]:
     inside = kind[len("interval[") : -1] if kind.startswith("interval[") else ""
     if not inside:
         return None, None
-    subtype, _, closed = inside.partition(", ")
-    return subtype, closed or None
+    subtype, _, closed = inside.rpartition(", ")
+    if closed not in _CLOSED:
+        # No side named, and a zone's comma is not one: `interval[datetime64[us, UTC]]`.
+        return inside, None
+    return subtype, closed
 
 
 _ARROW_TYPE: list[Any] = []
@@ -347,8 +407,13 @@ def interval_arrow(values: Any, kind: str) -> Any:
     import pyarrow as pa
 
     subtype, closed = _kind_parts(kind)
-    ends = pa.int64() if subtype == "int64" else pa.float64()
+    ends = _arrow_ends(subtype)
     pairs = interval_pairs(values, kind)
+    if _moment_kind(kind):
+        unit = ends.unit
+        pairs = [
+            None if pair is None else tuple(_ticks(end, unit) for end in pair) for pair in pairs
+        ]
     gaps = [pair is None for pair in pairs]
     left = pa.array([None if pair is None else pair[0] for pair in pairs], type=ends)
     right = pa.array([None if pair is None else pair[1] for pair in pairs], type=ends)
@@ -371,7 +436,7 @@ class IntervalDtype(str):
             closed = closed or found
         if closed is not None and closed not in _CLOSED:
             raise InvalidArgumentError("closed must be one of 'right', 'left', 'both', 'neither'")
-        if text is not None:
+        if text is not None and not (text.startswith("datetime64[") and "," in text):
             import numpy
 
             text = str(numpy.dtype(text))
@@ -387,9 +452,11 @@ class IntervalDtype(str):
 
     @property
     def subtype(self) -> Any:
-        """The numpy dtype of the ends, or None."""
+        """The numpy dtype of the ends, or None, and the type's text for instants with a zone."""
         if self._subtype is None:
             return None
+        if "," in self._subtype:
+            return self._subtype
         import numpy
 
         return numpy.dtype(self._subtype)
@@ -533,6 +600,9 @@ class IntervalIndex:
         whole = all(isinstance(end, numbers.Integral) and not isinstance(end, bool) for end in ends)
         gaps = any(pair is None or any(is_gap(end) for end in pair) for pair in pairs)
         kind = str(dtype) if dtype is not None else None
+        moment = moment_subtype([end for end in ends if not is_gap(end)])
+        if kind is None and moment is not None:
+            kind = f"interval[{moment}, {closed}]"
         if kind is None:
             kind = f"interval[{'int64' if whole and not gaps else 'float64'}, {closed}]"
         values = [
@@ -555,6 +625,10 @@ class IntervalIndex:
         from ._frame import Index
 
         found = [None if value is None else pick(value) for value in self._values]
+        if _moment_kind(str(self._dtype)):
+            from ._scalars import NaT
+
+            return Index([NaT if end is None else end for end in found])
         if None in found or str(self._dtype.subtype).startswith("float"):
             return Index([float("nan") if end is None else float(end) for end in found])
         return Index(found)
@@ -571,9 +645,11 @@ class IntervalIndex:
 
     @property
     def mid(self) -> Any:
-        """The midpoints, as an index of floats."""
+        """The midpoints, as an index of floats, or of instants or spans."""
         from ._frame import Index
 
+        if _moment_kind(str(self._dtype)):
+            return self._ends(lambda value: value.mid)
         return Index(
             [float("nan") if value is None else float(value.mid) for value in self._values]
         )
@@ -675,7 +751,10 @@ class IntervalIndex:
 
 
 def _plain(value: Any) -> Any:
-    """A numpy number as the Python number it holds."""
+    """A numpy number as the Python number it holds, and a numpy instant or span as ours."""
+    name = type(value).__name__
+    if name in ("datetime64", "timedelta64") and type(value).__module__ == "numpy":
+        return (Timestamp if name == "datetime64" else Timedelta)(value)
     item = getattr(value, "item", None)
     if item is not None and type(value).__module__ == "numpy":
         return item()

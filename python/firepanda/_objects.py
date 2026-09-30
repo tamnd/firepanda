@@ -354,8 +354,9 @@ def cell_like(value: Any, like: Any) -> Any:
     kind = interval_name(like)
     if kind is None or is_gap(value) or not hasattr(value, "closed"):
         return cell(value, "N")
-    cast = int if kind.startswith("interval[int") else float
-    return interval_cells([(cast(value.left), cast(value.right))], kind)[0]
+    from ._interval import interval_pairs
+
+    return interval_cells(interval_pairs([value], kind), kind)[0]
 
 
 def values(texts: list[Any]) -> list[Any]:
