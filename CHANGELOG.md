@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: group nth with a slice
+
+`GroupBy.nth` takes a slice, or a list or tuple mixing slices and places, as in `g.nth[1:]`, `g.nth[-2:]` or `g.nth[0, 2:4]`, keeping the rows pandas' own mask keeps, a step counted from the start. A backwards step and a place of another type are refused in pandas' words.
+
 ### Added: group quantiles at a list of quantiles and under the picking rules
 
 `GroupBy.quantile` takes a list of quantiles, answering one more index level after the keys as pandas does, and takes `interpolation="lower"`, `"higher"`, `"nearest"` and `"midpoint"`, keeping whole numbers whole. A quantile outside zero and one is refused in pandas' words.
