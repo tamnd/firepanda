@@ -192,7 +192,8 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: m.crosstab([keys(m)[0], keys(m)[1]], keys(m)[1]),
+    lambda m: m.crosstab([keys(m)[0], keys(m)[1]], keys(m)[1], dropna=False),
+    lambda m: m.crosstab([keys(m)[0], keys(m)[1]], keys(m)[1], margins=True),
     lambda m: m.crosstab(keys(m)[1], keys(m)[0], dropna=False),
     lambda m: m.crosstab(m.Series([1, 2]), m.Series(["p", "q"]), margins=True),
 ]
@@ -202,7 +203,7 @@ REFUSED: list[Callable[[Any], Any]] = [
 def test_what_firepanda_cannot_hold_is_refused(
     firepanda: ModuleType, build: Callable[[Any], Any]
 ) -> None:
-    """Several keys, a missing or numeric column key, and totals among numeric labels."""
+    """Several keys with every pair or totals, a missing column key, and totals among numbers."""
     with pytest.raises(NotImplementedError, match="crosstab"):
         build(firepanda)
 
