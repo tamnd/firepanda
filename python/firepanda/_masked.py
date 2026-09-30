@@ -28,8 +28,12 @@ _LOWER: dict[str, str] = {
     "Float32": "float32",
     "Float64": "float64",
     "boolean": "bool",
+    "string": "str",
 }
-"""Each masked type's name and the lower case type of the same width."""
+"""Each masked type's name and the lower case type of the same width, `str` for text."""
+
+_STRING_SPELLINGS = ("string", "string[python]", "string[pyarrow]")
+"""The names of pandas' masked text type, with and without where it is stored."""
 
 _UPPER: dict[str, str] = {lower: name for name, lower in _LOWER.items()}
 
@@ -105,15 +109,22 @@ BooleanDtype = _dtype_class("boolean")
 _CLASSES = {cls._name: cls for cls in MaskedDtype.__subclasses__()}
 
 
-def masked_dtype(name: str) -> MaskedDtype:
-    """The dtype object for a masked type's name."""
+def masked_dtype(name: str) -> Any:
+    """The dtype object for a masked type's name, `StringDtype` with `NA` for `string`."""
+    if name == "string":
+        from ._dtypes import StringDtype
+
+        return StringDtype()
     return _CLASSES[name]()
 
 
 def masked_name(dtype: Any) -> str | None:
     """The masked type a dtype argument asks for, in either library's spelling, or None."""
     if isinstance(dtype, str):
-        return str.__str__(dtype) if str.__str__(dtype) in _LOWER else None
+        text = str.__str__(dtype)
+        if text in _STRING_SPELLINGS:
+            return "string"
+        return text if text in _LOWER else None
     if type(dtype).__name__ in {cls.__name__ for cls in _CLASSES.values()}:
         return getattr(dtype, "name", None)
     return None
@@ -145,6 +156,8 @@ def _converted(value: Any, name: str, source: str) -> Any:
         TypeError: For a float with a fraction cast to whole numbers, in pandas' words.
     """
     lower = _LOWER[name]
+    if lower == "str":
+        return value if isinstance(value, str) else str(value)
     if lower == "bool":
         return bool(value)
     if lower.startswith("float"):
@@ -173,6 +186,8 @@ def plain(column: Series) -> Series:
 
     lower = _LOWER[masked_of(column) or "Int64"]
     values = _held_values(column._inner)
+    if lower == "str":
+        return Series(values, dtype="str", index=column.index, name=column.name)
     if all(value is None for value in values):
         answer = Series([0.0] * len(values), index=column.index, name=column.name)
         answer = answer.where(Series([False] * len(values), index=column.index))
@@ -199,10 +214,57 @@ def rewrap(answer: Any, name: str | None = None) -> Any:
 
     if not isinstance(answer, SeriesMixin):
         return answer
-    name = name or _UPPER.get(str(answer._inner.dtype()))
+    name = name or _family(answer)
     if name is None:
         return answer
     values = [_gapless(value) for value in _held_values(answer._inner)]
+    held = [None if value is None else _converted(value, name, "float64") for value in values]
+    cells = _objects.masked_cells(held, name)
+    return Series(cells, dtype="str", index=answer.index, name=answer.name)
+
+
+def _family(answer: Any) -> str | None:
+    """The masked type a lower case column is written back as, or None for another column."""
+    lower = str(answer._inner.dtype())
+    if lower == "string":
+        # The core calls text `string`, and a column of cells is not text.
+        return None if _objects.is_object(answer._inner) else "string"
+    return _UPPER.get(lower)
+
+
+def text_answer(answer: Any, source: Any, method: str) -> Any:
+    """What a `str` method answers on a `string` column, in the masked types pandas answers.
+
+    Text comes back `string`, flags `boolean` and whole numbers `Int64`, and a row
+    that was a gap is `NA` whatever the method made of it, since pandas does not
+    ask the question of a missing row. A frame, from `split` or `extract`, is read
+    a column at a time, and anything else, such as lists or one joined value, is
+    handed back as it is.
+    """
+    from ._frame import DataFrame
+    from ._pandas import DataFrameMixin, SeriesMixin
+
+    if method == "get_dummies":
+        return answer
+    gaps = _gaps(source)
+    if isinstance(answer, SeriesMixin):
+        return _with_gaps(answer, gaps)
+    if isinstance(answer, DataFrameMixin):
+        columns = {name: _with_gaps(answer[name], gaps) for name in answer.columns}
+        return DataFrame(columns, index=answer.index)
+    return answer
+
+
+def _with_gaps(answer: Any, gaps: list[bool]) -> Any:
+    """One answered column in its masked type, with `NA` on the rows that were gaps."""
+    from ._frame import Series
+
+    name = _family(answer)
+    if name is None:
+        return answer
+    values = _held_values_of(answer)
+    if len(values) == len(gaps):
+        values = [None if gap else value for gap, value in zip(gaps, values, strict=True)]
     held = [None if value is None else _converted(value, name, "float64") for value in values]
     cells = _objects.masked_cells(held, name)
     return Series(cells, dtype="str", index=answer.index, name=answer.name)

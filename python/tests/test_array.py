@@ -107,4 +107,5 @@ def test_the_array_classes_are_pandas_classes_but_two() -> None:
 
 
 def test_text_arrays_print_as_a_text_column_prints() -> None:
-    assert repr(fp.array(["a", None])) == "<ArrowStringArray>\n['a', nan]\nLength: 2, dtype: str"
+    assert repr(fp.Series(["a", None]).array) == repr(pd.Series(["a", None]).array)
+    assert repr(fp.array(["a", None])) == repr(pd.array(["a", None]))
