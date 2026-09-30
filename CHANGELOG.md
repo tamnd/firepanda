@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pivot and pivot_table over several columns keys
+
+`pivot` and `pivot_table` take several `columns` keys and answer columns labelled by a MultiIndex, following pandas' recipe of setting or aggregating over the keys and unstacking the columns keys. With it, `fillna`, `dropna(axis=1)`, `astype` with a dict and the reductions of flag frames read a column name that is a tuple.
+
 ### Added: align and combine_first over repeated row labels
 
 `align`, and a frame's `combine_first` and `combine`, line up row labels that differ where one side repeats a label by joining them as `Index.join` does, so every row of a label on one side meets every row of it on the other. As in pandas, a column's `combine_first` over a repeated label, and a frame that repeats a label and must move to meet a column, raise "cannot reindex on an axis with duplicate labels".
