@@ -191,6 +191,11 @@ def plain(column: Series) -> Series:
     if all(value is None for value in values):
         answer = Series([0.0] * len(values), index=column.index, name=column.name)
         answer = answer.where(Series([False] * len(values), index=column.index))
+    elif lower == "bool" and None in values:
+        # Flags beside a gap are objects in pandas, so the gaps go back after.
+        filled = [False if value is None else value for value in values]
+        answer = Series(filled, index=column.index, name=column.name)
+        answer = _gaps_at(answer, Series([value is not None for value in values]))
     else:
         answer = Series(values, index=column.index, name=column.name)
     if str(answer._inner.dtype()) != lower:

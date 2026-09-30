@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Flags beside a gap are objects
+
+A list of `True` and `False` with a gap in it, handed to `Series` or to `DataFrame`, now makes an object column, as pandas makes it, since numpy has no flag that can be missing. Such a column still reads as flags where flags are asked for: `where` takes it as a condition, `astype("boolean")` keeps its values, and `convert_dtypes` turns it into `boolean` unless `convert_boolean=False`. A number now fills its gap as it is, where it was refused before.
+
 ### Added: A group by first or last that does not skip gaps
 
 `first(skipna=False)` and `last(skipna=False)` on a group by or a resample now answer the value in each group's first or last row, gap or not, the way pandas does, and text and flags beside the numbers are blanked too. The first, the last and the extremes of a category column now answer categories rather than the codes they are stored as, and the extremes of a category with no order are refused in pandas' words.
