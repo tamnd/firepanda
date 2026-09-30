@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: A group by first or last that does not skip gaps
+
+`first(skipna=False)` and `last(skipna=False)` on a group by or a resample now answer the value in each group's first or last row, gap or not, the way pandas does, and text and flags beside the numbers are blanked too. The first, the last and the extremes of a category column now answer categories rather than the codes they are stored as, and the extremes of a category with no order are refused in pandas' words.
+
 ### Added: The row labels keep their frequency
 
 A frame or series whose row labels come from `date_range`, `timedelta_range` or a resample now remembers the step, so the repr ends with `Freq: D` the way pandas prints it, and slicing, arithmetic, head, tail and joining keep or drop it by the same rules pandas uses. `shift(freq=)` now moves the labels rather than the values, and `freq="infer"` reads the step off the labels.

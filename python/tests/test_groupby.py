@@ -21,6 +21,7 @@ that is quietly dropped is the failure that takes longest to find.
 from __future__ import annotations
 
 import importlib.util
+from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
@@ -367,6 +368,8 @@ def test_a_grouped_product_of_words_is_refused(firepanda: ModuleType) -> None:
         ("sum", {"min_count": 2}),
         ("sum", {"skipna": False}),
         ("median", {"skipna": False}),
+        ("first", {"skipna": False}),
+        ("last", {"skipna": False}),
         ("sum", {"numeric_only": True}),
         ("mean", {"numeric_only": True}),
     ],
@@ -384,6 +387,43 @@ def test_skipna_min_count_and_numeric_only_answer_as_pandas(
     mine = getattr(firepanda.DataFrame(data).groupby("k")["v"], call)(**arguments)
     theirs = getattr(pd.DataFrame(data).groupby("k")["v"], call)(**arguments)
     assert repr(mine) == repr(theirs)
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda g: g.first(),
+        lambda g: g.last(),
+        lambda g: g.first(skipna=False),
+        lambda g: g["c"].last(skipna=False),
+        lambda g: g["c"].min(),
+        lambda g: g["o"].max(),
+        lambda g: g["o"].min(),
+    ],
+)
+def test_a_picked_category_stays_a_category(
+    firepanda: ModuleType, build: Callable[[Any], Any]
+) -> None:
+    """The first, the last and the extremes of a category answer categories, as in pandas.
+
+    Text beside it is blanked by a first that may not skip, and the extremes of a
+    list with no order are refused with pandas' words.
+    """
+    import pandas as pd
+
+    def grouped(lib: ModuleType) -> Any:
+        c = lib.Series(["u", None, "v", "w"], dtype="category")
+        frame = lib.DataFrame({"k": ["a", "a", "b", "b"], "s": [None, "p", "q", "r"], "c": c})
+        return frame.assign(o=c.cat.as_ordered()).groupby("k")
+
+    def outcome(lib: ModuleType) -> str:
+        try:
+            return repr(build(grouped(lib)))
+        except TypeError as error:
+            return f"TypeError: {error}"
+
+    assert outcome(firepanda) == outcome(pd)
 
 
 def test_a_grouping_computes_nothing_until_it_is_reduced(firepanda: ModuleType) -> None:
