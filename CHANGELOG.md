@@ -51,6 +51,9 @@ With `expand=False` the pair now answers one object column of three element tupl
 ### Changed: A list of integers with a gap reads as float64
 
 `Series`, `Index` and `DataFrame` built from a list of integers with a None in it are float64 with a NaN, as in pandas, rather than int64 with a hole, and so are the same lists given to `DataFrame.from_dict`, `DataFrame.from_records`, `assign` and a column set with `[]`. A mapping read as a series widens the same way when a label finds no value. Only lists that come from outside firepanda widen, since its own layer builds integer columns with gaps on purpose. A float gap stays a null, and flags and text keep their types.
+### Added: PIVOT with no IN list pivots on the values the column holds
+
+`PIVOT t ON c USING sum(x)` without `IN (...)` makes a column for every value `c` holds, nulls left out and smallest first, by running the distinct over the source before the pivot is lowered, which is what DuckDB does. The pivot key also keeps its own name when the query projects it.
 
 ## [0.8.37] - 2026-09-30
 
@@ -80,6 +83,7 @@ A patch release. On the pandas side it brings the readers and writers pandas has
 ### Added: a map's key and value types, and histogram's MAP(K, UBIGINT)
 
 A `MAP` type now carries its key and value types, written `MAP(K, V)` as DuckDB writes them, and two maps are the same type only when both agree. `histogram` answers `MAP(K, UBIGINT)` for a key of any flat type, including the bins form, as DuckDB does, so the differential semantics check now compares its full type rather than the overload alone. A map whose key or value is itself nested is still a bare `MAP`, and says nothing about what it holds.
+
 ### Changed: Rolling.max takes pandas' extra arguments
 
 `Rolling.max` is the one window reduction pandas declares with `*args` before its engine arguments and `**kwargs` after them, and its body never reads either. firepanda declared the same three parameters as the other reductions and refused anything else, which was a registered divergence. The signature now matches pandas, and the extra arguments are dropped as pandas drops them. `Expanding.max` declares neither in pandas and still refuses them here.

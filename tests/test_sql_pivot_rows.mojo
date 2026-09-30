@@ -12,7 +12,7 @@ table `s`, whose blank is a null:
     US    2021  c       3
 """
 
-from std.testing import TestSuite, assert_equal, assert_raises
+from std.testing import TestSuite, assert_equal
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
@@ -186,9 +186,43 @@ def test_the_from_spelling_is_the_same_pivot() raises:
     assert_equal(shown(sql, "2021"), "7,3")
 
 
-def test_a_pivot_column_without_a_list_is_turned_down() raises:
-    with assert_raises(contains="IN (...)"):
-        _ = run("PIVOT s ON yr USING sum(amt) GROUP BY city", session())
+def test_a_pivot_column_without_a_list_pivots_on_its_values() raises:
+    var sql = (
+        "SELECT * FROM (PIVOT s ON yr USING sum(amt) GROUP BY city) ORDER BY"
+        " city"
+    )
+    assert_equal(columns(sql), "city,2020,2021")
+    assert_equal(shown(sql, "2020"), "15,1")
+    assert_equal(shown(sql, "2021"), "7,3")
+
+
+def test_the_values_read_from_data_are_in_order_and_leave_nulls_out() raises:
+    var sql = (
+        "SELECT * FROM (PIVOT s ON prod USING sum(amt) GROUP BY city) ORDER BY"
+        " city"
+    )
+    assert_equal(columns(sql), "city,a,b,c")
+    assert_equal(shown(sql, "a"), "17,1")
+    assert_equal(shown(sql, "b"), "5,null")
+    assert_equal(shown(sql, "c"), "null,3")
+
+
+def test_two_columns_read_from_data_pivot_on_every_pair() raises:
+    var sql = (
+        "SELECT * FROM (PIVOT s ON yr, prod USING count(*) GROUP BY city)"
+        " ORDER BY city"
+    )
+    assert_equal(
+        columns(sql), "city,2020_a,2020_b,2020_c,2021_a,2021_b,2021_c"
+    )
+    assert_equal(shown(sql, "2020_a"), "1,1")
+    assert_equal(shown(sql, "2021_c"), "0,1")
+
+
+def test_a_column_read_from_no_rows_leaves_only_the_groups() raises:
+    var sql = "SELECT * FROM (PIVOT (SELECT * FROM s WHERE yr > 3000) ON yr)"
+    assert_equal(columns(sql), "city,prod,amt")
+    assert_equal(shown(sql, "city"), "")
 
 
 def main() raises:
