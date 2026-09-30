@@ -23684,14 +23684,23 @@ _GROUP_GAPS_ANSWER_NOTHING = frozenset(
 """The group by reductions whose `skipna=False` answers NaN for a group with a gap in it."""
 
 
-def _group_blanked(column: Any, found: Any, test: Callable[[Any], Any]) -> Any:
-    """One column of a group by answer with NaN where `test` of `found` is False."""
+def _group_blanked(
+    column: Any, found: Any, test: Callable[[Any], Any], picked: bool = False
+) -> Any:
+    """One column of a group by answer with NaN where `test` of `found` is False.
+
+    A reduction that combines values leaves text alone, but a first or last that
+    picks one out blanks text too, and a flag that gets a gap becomes an object
+    column holding None, as masking one does.
+    """
     word = _word(column.dtype)
-    if word in ("str", "string", "object") or word.startswith("category"):
+    if not picked and (word in ("str", "string", "object") or word.startswith("category")):
         return column
     kept = test(found)
     if kept.all():
         return column
+    if picked and word == "bool":
+        return column.mask(~kept)
     if word in _SIGNED or word in _UNSIGNED or word == "bool":
         column = column.astype("float64")
     return column.mask(~kept)
@@ -23841,9 +23850,35 @@ class GroupByMixin[Answer]:
             source = self._frame._inner
             if columns is not None:
                 source = source.select(self._by + columns)
-            return self._aggregated(source, kind, param, self._as_index)
+            out = self._aggregated(source, kind, param, self._as_index)
         except Exception as error:
             raise translate(error) from None
+        if kind in ("first", "last", "min", "max"):
+            out = self._picked_categories(out, kind)
+        return out
+
+    def _picked_categories(self, out: DataFrame, kind: str) -> DataFrame:
+        """`out` with the category columns a picking reduction read put back as categories.
+
+        The core picks a category column's codes, so the answer is read back through
+        the column's own list. The smallest and the largest only mean something on
+        an ordered list, and pandas refuses them on any other.
+        """
+        from ._categorical import Categorical
+        from ._frame import Series
+
+        for name in _shown_names(out):
+            if name in self._by or name not in _shown_names(self._frame):
+                continue
+            dtype = self._frame[name].dtype
+            if _word(dtype) != "category":
+                continue
+            if kind in ("min", "max") and not dtype.ordered:
+                raise TypeError(f"Cannot perform {kind} with non-ordered Categorical")
+            codes = out[name].fillna(-1).astype("int64").tolist()
+            picked = Categorical.from_codes(codes, dtype=dtype)
+            out[name] = Series(picked, index=out.index, name=name)
+        return out
 
     def _grouped(self, source: Any, kind: str, as_index: bool) -> DataFrame:
         """One core reduction over the groups of `source`, which carries the keys."""
@@ -23960,7 +23995,7 @@ class GroupByMixin[Answer]:
         Returns:
             The frame or the series pandas answers.
         """
-        if kind not in _GROUP_GAPS_ANSWER_NOTHING:
+        if kind not in _GROUP_GAPS_ANSWER_NOTHING and kind not in ("first", "last"):
             _held_at(
                 "skipna",
                 skipna,
@@ -23988,8 +24023,13 @@ class GroupByMixin[Answer]:
         grouped = self._numeric_only(kind) if _flag("numeric_only", numeric_only) else self
         answer = grouped._shape(kind, param)
         if not _flag("skipna", skipna):
-            flags = grouped._over_flags()._shape("min", 0.0)
-            answer = grouped._blanked(answer, flags, lambda there: there.astype(bool))
+            # A first or last that may not skip is the value in the group's first
+            # or last row, so the flag of that row says whether it is there.
+            picked = kind if kind in ("first", "last") else "min"
+            flags = grouped._over_flags()._shape(picked, 0.0)
+            answer = grouped._blanked(
+                answer, flags, lambda there: there.astype(bool), picked != "min"
+            )
         if min_count is not None and min_count > 0:
             counts = grouped._shape("count", 0.0)
             answer = grouped._blanked(answer, counts, lambda count: count >= min_count)
@@ -24030,7 +24070,9 @@ class GroupByMixin[Answer]:
         over._frame = frame.assign(**flags)
         return over
 
-    def _blanked(self, answer: Any, found: Any, test: Callable[[Any], Any]) -> Any:
+    def _blanked(
+        self, answer: Any, found: Any, test: Callable[[Any], Any], picked: bool = False
+    ) -> Any:
         """`answer` with NaN in each group where `test` of `found`, of the same shape, is False.
 
         Whole numbers and flags that get a gap become floats, as they do in pandas. The key
@@ -24040,12 +24082,12 @@ class GroupByMixin[Answer]:
         if hasattr(answer, "columns"):
             keys = {_names.shown(name) for name in self._by}
             pieces = {
-                name: _group_blanked(answer[name], found[name], test)
+                name: _group_blanked(answer[name], found[name], test, picked)
                 for name in _shown_names(answer)
                 if name not in keys
             }
             return answer.assign(**pieces)
-        return _group_blanked(answer, found, test)
+        return _group_blanked(answer, found, test, picked)
 
     def _spread(
         self,

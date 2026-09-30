@@ -136,6 +136,8 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: numbers(m).resample("h").size(),
     lambda m: frame(m).resample("h").count(),
     lambda m: frame(m).resample("h").first(),
+    lambda m: numbers(m).resample("h").first(skipna=False),
+    lambda m: numbers(m).resample("h").last(skipna=False),
     lambda m: frame(m).resample("h").nunique(),
     lambda m: frame(m).resample("h").sum(numeric_only=True),
     lambda m: frame(m).resample("h").mean(numeric_only=True),
@@ -271,7 +273,6 @@ REFUSED: list[Callable[[Any], Any]] = [
     lambda m: numbers(m).resample("h").agg(lambda x: x.sum()),
     lambda m: numbers(m).resample("h").apply(lambda x: x.sum()),
     lambda m: numbers(m).resample("h").transform(lambda x: x),
-    lambda m: numbers(m).resample("h").first(skipna=False),
 ]
 
 
