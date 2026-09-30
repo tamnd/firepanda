@@ -59,6 +59,30 @@ CASES: dict[str, Callable[[ModuleType], Any]] = {
     "series-cast-truncates": lambda lib: lib.Series(lib.Series([1.7]), dtype="int64"),
     "frame-fraction": lambda lib: lib.DataFrame({"a": [1.5]}, dtype="int64"),
     "frame-whole": lambda lib: lib.DataFrame({"a": [1.0], "b": [2]}, dtype="int64"),
+    "frame-dates": lambda lib: lib.DataFrame(
+        {"a": ["2026-01-01", "2026-01-02"]}, dtype="datetime64[ns]"
+    ),
+    "frame-dates-rows": lambda lib: (
+        lib.DataFrame([["2026-01-01"]], columns=["a"], dtype="datetime64[s]").dtypes
+    ),
+    "frame-spans": lambda lib: lib.DataFrame({"a": ["1D", "2h"]}, dtype="timedelta64[ns]"),
+    "frame-counts-as-dates": lambda lib: lib.DataFrame({"a": [1, 2]}, dtype="datetime64[ns]"),
+    "frame-objects": lambda lib: lib.DataFrame({"a": [1, "x"]}, dtype=object).dtypes,
+    "frame-objects-ints": lambda lib: lib.DataFrame({"a": [1, 2]}, dtype=object),
+    "astype-text-dates": lambda lib: lib.Series(["2026-01-01", None]).astype("datetime64[ns]"),
+    "astype-text-dates-ms": lambda lib: lib.Series(["2026-01-01 10:00:00.5"]).astype(
+        "datetime64[ms]"
+    ),
+    "astype-text-spans": lambda lib: lib.Series(["1D", "2h", None]).astype("timedelta64[s]"),
+    "astype-text-bad": lambda lib: lib.Series(["nope"]).astype("datetime64[ns]"),
+    "astype-frame-dates": lambda lib: (
+        lib.DataFrame({"a": ["2026-01-01"], "b": [1]}).astype({"a": "datetime64[ns]"}).dtypes
+    ),
+    "astype-frame-objects": lambda lib: (
+        lib.DataFrame({"a": [1, 2], "b": ["x", "y"]}).astype(object).dtypes
+    ),
+    "mask-none-flag": lambda lib: lib.Series([1, 2, 3]).mask([True, None, False]),
+    "where-none-flag": lambda lib: lib.Series([1, 2, 3]).where([True, None, False]),
 }
 
 

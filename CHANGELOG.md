@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Text parses to instants and spans through astype, and three smaller gaps
+
+`astype("datetime64[ns]")` and `astype("timedelta64[s]")` on a column of text now parse it as `to_datetime` and `to_timedelta` would, at the unit asked for, where they were refused before. The same goes for a frame's `astype`, for `astype(object)` on a frame, and for `dtype=` on the `DataFrame` constructor with an instant, span or object type. `Index.map` on an index of a masked type answers in a masked type as pandas does, keeping an `Int32` for whole numbers and giving `Float64` for floats. `mask` with a list or a column of objects holding a gap raises pandas' `TypeError`, since pandas turns the condition over with `~` first.
+
 ### Changed: A masked column goes to Arrow at its own width
 
 A column of `Int8`, `Int32`, `UInt16`, `Float32` or another masked type now exports to Arrow as the type of the same width, and a `string` column as `large_string`, as pandas exports them. Before, every masked number went out as the type pyarrow guessed from its values, so an `Int32` column arrived as `int64`.
