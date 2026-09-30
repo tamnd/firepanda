@@ -62,6 +62,31 @@ def test_a_filter_over_a_sort_comes_out_under_it() raises:
     )
 
 
+def test_a_pass_turned_off_by_name_leaves_its_rewrite_undone() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var ordered = plan.sort(
+        scan, [plan.exprs.column("l_extendedprice")], [True], [True]
+    )
+    var root = plan.filter(ordered, _small(plan, "l_partkey", 10))
+    var at = optimize(plan, root, [_lineitem()], [String("filter_pushdown")])
+    var printed = explain(plan, at)
+    assert_true(
+        printed.find("FILTER") < printed.find("SORT"),
+        "the filter stays above the sort it was written over",
+    )
+    # A name that is no pass here turns nothing off.
+    plan = Plan()
+    scan = plan.scan("lineitem", List[String](), 0)
+    ordered = plan.sort(
+        scan, [plan.exprs.column("l_extendedprice")], [True], [True]
+    )
+    root = plan.filter(ordered, _small(plan, "l_partkey", 10))
+    at = optimize(plan, root, [_lineitem()], [String("statistics_propagation")])
+    printed = explain(plan, at)
+    assert_true(printed.find("SORT") < printed.find("FILTER"))
+
+
 def test_the_pipeline_narrows_the_scan_and_pushes_the_filter() raises:
     var plan = Plan()
     var scan = plan.scan("lineitem", List[String](), 0)

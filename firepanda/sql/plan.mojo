@@ -5485,6 +5485,7 @@ def _view(
     ref view = catalog.view_at(found)
     var ast = Ast()
     var statement = rules.parse_statement(view.sql, grammar, ast)
+    catalog.settings.settle(ast)
     var inner = _Scope()
     var root = _statement(
         ast, statement, catalog, grammar, plan, sources, inner, _Bindings()
