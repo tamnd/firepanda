@@ -9073,6 +9073,12 @@ def _object_array(column: Any) -> Any:
     kind = _objects.interval_name_of(column)
     if kind is not None:
         return _interval.interval_arrow(_held_values(column), kind)
+    masked = _objects.masked_name_of(column)
+    if arrow is None and masked is not None:
+        # A masked column goes out at its own width, as pandas exports an Int32 as int32.
+        lower = _masked._LOWER[masked]
+        kind = pa.large_string() if lower == "str" else pa.type_for_alias(lower)
+        return pa.array(_held_values(column), type=kind)
     if arrow is None:
         return pa.array(_held_values(column), from_pandas=True)
     from ._arrowtyped import arrow_values

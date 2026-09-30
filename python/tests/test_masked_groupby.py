@@ -109,3 +109,22 @@ def outcome(build: Callable[[], Any]) -> str:
 @pytest.mark.parametrize("case", CASES.values(), ids=CASES.keys())
 def test_answers_in_the_type_pandas_gives(case: Callable[[ModuleType], Any]) -> None:
     assert outcome(lambda: case(fp)) == outcome(lambda: case(pd))
+
+
+@pytest.mark.parametrize(
+    ("dtype", "values"),
+    [
+        ("Int8", [1, None]),
+        ("Int32", [1, None]),
+        ("UInt16", [1, None]),
+        ("Float32", [1.5, None]),
+        ("boolean", [True, None]),
+        ("string", ["a", None]),
+    ],
+)
+def test_a_masked_column_goes_to_arrow_at_its_width(dtype: str, values: list[Any]) -> None:
+    pa = pytest.importorskip("pyarrow")
+    ours = pa.table(fp.DataFrame({"x": fp.Series(values, dtype=dtype)}))
+    theirs = pa.table(pd.DataFrame({"x": pd.Series(values, dtype=dtype)}))
+    assert ours.schema.field("x").type == theirs.schema.field("x").type
+    assert ours.column("x").to_pylist() == theirs.column("x").to_pylist()
