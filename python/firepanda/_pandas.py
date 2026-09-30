@@ -33838,9 +33838,9 @@ def to_datetime(
     """Reads text or whole numbers as instants, which is `pandas.to_datetime`.
 
     Hand written rather than generated for the reason the top of this file
-    gives: what it does depends on its arguments. Ten of them are declared,
-    five are implemented, one is accepted and has no effect, and four are
-    refused by name, which is the pattern `_refuse` exists for.
+    gives: what it does depends on its arguments. `cache` is accepted and has
+    no effect, and `exact` is refused by name, which is the pattern `_refuse`
+    exists for.
 
     What it answers follows what it is handed, as in pandas: a column for a
     column, a `DatetimeIndex` for a list, a tuple or an index, and a
@@ -33875,7 +33875,8 @@ def to_datetime(
             this parser does not do.
         unit: What whole numbers are counts of, as one of `s`, `ms`, `us` and
             `ns`. Ignored for text, which pandas ignores it for too.
-        origin: Refused at anything other than `unix`.
+        origin: What the numbers count from: `unix` for 1970, `julian` for
+            Julian days, or any instant, which has to carry no zone.
         cache: Accepted and has no effect. pandas caches repeated values to go
             faster and the answer is the same either way, so honouring the
             parameter means not changing the answer.
@@ -33886,14 +33887,16 @@ def to_datetime(
         anything else that holds several values, and one instant for one.
 
     Raises:
-        NotImplementedError: For the four refused arguments and for a format
-            firepanda's guesser does not recognise.
+        NotImplementedError: For `exact` and for a format firepanda's guesser
+            does not recognise.
         ValueError: For a row that does not match the format, for a column
             carrying more than one offset with no `utc`, and for an `errors`
             that is neither of the two words.
     """
     from ._datetime import DatetimeIndex
 
+    if not (isinstance(origin, str) and origin == "unix"):
+        arg, origin = _moved_to_origin(arg, origin, unit), "unix"
     options = (errors, dayfirst, yearfirst, utc, format, exact, unit, origin)
     if isinstance(arg, SeriesMixin):
         return _instants(arg, *options)
@@ -33928,6 +33931,79 @@ def _nanos_of(column: Any, unit: str) -> Any:
     return whole.astype("int64") * scale + _truncated(fraction * scale).astype("int64")
 
 
+_JULIAN_EPOCH = 2440587.5
+"""The Julian date of 1970-01-01 at midnight, which `origin="julian"` counts from."""
+
+
+def _moved_to_origin(arg: Any, origin: Any, unit: str | None) -> Any:
+    """Numbers counted from `origin` restated as counts from 1970, as pandas does.
+
+    `julian` takes Julian days, and anything else is read as an instant whose
+    distance from 1970 in whole units is added to every number. A list stays a
+    list, so what `to_datetime` answers for it does not change.
+
+    Raises:
+        InvalidArgumentError: For `julian` without days, for an origin that is
+            not an instant or carries a zone, and for values that are not numbers.
+        OutOfBoundsDatetime: For a Julian date past the instants nanoseconds reach.
+    """
+    from ._scalars import Timestamp
+    from .errors import OutOfBoundsDatetime
+
+    many = isinstance(arg, (list, tuple))
+    values = list(arg) if many else arg
+
+    def shifted(by: float) -> Any:
+        if many:
+            return [value if value is None else value + by for value in values]
+        return values + by
+
+    if isinstance(origin, str) and origin == "julian":
+        if unit != "D":
+            raise InvalidArgumentError("unit must be 'D' for origin='julian'")
+        try:
+            moved = shifted(-_JULIAN_EPOCH)
+        except TypeError:
+            message = "incompatible 'arg' type for given 'epoch'='julian'"
+            raise InvalidArgumentError(message) from None
+        top = Timestamp.max.to_julian_date() - _JULIAN_EPOCH
+        bottom = Timestamp.min.to_julian_date() - _JULIAN_EPOCH
+        if isinstance(moved, (SeriesMixin, IndexMixin)):
+            seen = moved.dropna().tolist()
+        else:
+            seen = moved if many else [moved]
+        if any(value is not None and not bottom <= value <= top for value in seen):
+            raise OutOfBoundsDatetime(f"{arg} is Out of Bounds for origin='julian'")
+        return moved
+    numeric = isinstance(arg, (int, float)) and not isinstance(arg, bool)
+    if isinstance(arg, (SeriesMixin, IndexMixin)):
+        printed = _word(arg.dtype)
+        numeric = printed.startswith(("int", "uint", "float")) or printed == "bool"
+    elif many:
+        numeric = all(
+            value is None or (isinstance(value, (int, float)) and not isinstance(value, bool))
+            for value in values
+        )
+    if not numeric:
+        shown = list(arg) if many else arg
+        raise InvalidArgumentError(
+            f"'{shown}' is not compatible with origin='{origin}'; it must be numeric with a"
+            " unit specified"
+        )
+    try:
+        if isinstance(origin, (int, float)):
+            offset = Timestamp(origin, unit=unit)
+        else:
+            offset = Timestamp(origin)
+    except OutOfBoundsDatetime:
+        raise OutOfBoundsDatetime(f"origin {origin} is Out of Bounds") from None
+    except (ValueError, TypeError):
+        raise InvalidArgumentError(f"origin {origin} cannot be converted to a Timestamp") from None
+    if offset.tz is not None:
+        raise InvalidArgumentError(f"origin offset {offset} must be tz-naive")
+    return shifted(offset.value // _UNIT_NANOS[unit or "ns"])
+
+
 def _instants(
     arg: Any,
     errors: str,
@@ -33942,7 +34018,6 @@ def _instants(
     """`to_datetime` as a column whatever it was handed, which the public name reshapes."""
     from ._frame import Series
 
-    _held_at("origin", origin, "unix", "an epoch other than 1970 has to move every value")
     if exact is not NO_DEFAULT:
         raise NotImplementedError(
             "exact= is not supported yet, because it asks whether the format may match"

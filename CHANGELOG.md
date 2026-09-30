@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: origin on to_datetime
+
+`to_datetime` takes `origin="julian"` for Julian days and any instant with no zone as the point numbers count from, as pandas does, rather than refusing anything but `unix`. The numbers are moved to counts from 1970 first, so a list still answers an index, a column a column and a number an instant, and pandas' errors for a Julian count not in days, a date out of range, values that are not numbers, an origin that is not an instant and a zoned origin are raised with pandas' words.
+
 ### Changed: count(*) counts the rows without building a column
 
 A SQL `count(*)`, and a count of any constant that is not null, now reads the number of rows off a column the input already has. Before, the constant was built into a column the height of the table and then counted. On ClickBench at 1M rows, `SELECT COUNT(*) FROM hits` went from 7.5 ms to 0.3 ms and q2, which counts beside a sum and a mean, from 9.9 ms to 3.5 ms.
