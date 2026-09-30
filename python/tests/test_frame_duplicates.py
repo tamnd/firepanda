@@ -96,7 +96,7 @@ def test_the_mask_has_no_name(firepanda):
     # pandas leaves it unnamed, because the answer is about the rows rather than
     # a column of the frame. A mask that carried a name would read like a column
     # somebody had added.
-    assert made(firepanda).duplicated().name == ""
+    assert made(firepanda).duplicated().name is None
     assert theirs().duplicated().name is None
 
 

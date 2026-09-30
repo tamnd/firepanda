@@ -18,6 +18,7 @@ import contextlib
 from typing import Any
 
 from . import _names
+from ._attrs import column_names, hold_columns
 from ._frame import DataFrame, Index, Series
 from ._multi import MultiIndex
 from .errors import InvalidArgumentError
@@ -55,6 +56,8 @@ def _set_axis(owner: Any, labels: Any, axis: int) -> None:
     made = owner.set_axis(labels, axis=axis)
     owner._inner = made._inner
     owner._row_freq = getattr(made, "_row_freq", None)
+    if axis == 1:
+        hold_columns(owner, column_names(made))
 
 
 def _owned(getter: Any, axis: int) -> Any:
@@ -77,7 +80,10 @@ def _name_owner(index: Any, names: list[Any]) -> None:
         return
     target, axis = owner
     value: Any = names if isinstance(index, MultiIndex) else names[0]
-    target._inner = target.rename_axis(value, axis=axis)._inner
+    made = target.rename_axis(value, axis=axis)
+    target._inner = made._inner
+    if axis == 1:
+        hold_columns(target, column_names(made))
 
 
 def _series_name(self: Any, value: Any) -> None:
