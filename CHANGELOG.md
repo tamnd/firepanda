@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Group value counts with a dropna of their own
+
+A group by's `value_counts` now takes a `dropna` that differs from the group by's. It groups with every gap kept and then drops the combinations with a gap in the keys, when the group by drops those, or in the values, when `value_counts` does, so the counts match pandas.
+
 ### Changed: Flags cast to text read True and False
 
 `astype(str)` on a flag column, masked or not, in a series or a frame, now writes `True` and `False` as pandas does, where it wrote the lower case words Arrow uses.
