@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: align and combine_first over repeated row labels
+
+`align`, and a frame's `combine_first` and `combine`, line up row labels that differ where one side repeats a label by joining them as `Index.join` does, so every row of a label on one side meets every row of it on the other. As in pandas, a column's `combine_first` over a repeated label, and a frame that repeats a label and must move to meet a column, raise "cannot reindex on an axis with duplicate labels".
+
 ### Added: replace with several patterns
 
 `Series.replace` and `DataFrame.replace` with `regex=True` take a run of patterns with one text or a run of texts, a mapping of patterns to texts, compiled patterns, and the same shapes passed as `regex` itself. As in pandas, each pattern rewrites only the rows it matched in the column as it arrived. A frame reads a mapping of column names to mappings, or to patterns beside one text, column by column, and runs of different lengths raise pandas' ValueError.

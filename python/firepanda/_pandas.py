@@ -9606,19 +9606,28 @@ def _arrow_converted(
 
 
 def _combining_labels(mine: Index, theirs: Index) -> Index | None:
-    """The row labels of a `combine_first`, or None when they are the caller's own.
-
-    Raises:
-        NotImplementedError: When the labels differ and one side repeats a label.
-    """
+    """The row labels of a `combine_first`, or None when they are the caller's own."""
     if mine.equals(theirs):
         return None
-    if not (mine.is_unique and theirs.is_unique):
-        raise NotImplementedError(
-            "combine_first: the row labels differ and one side repeats a label, and"
-            " pandas lines up repeated labels by joining them, which is not written here"
-        )
     return mine.union(theirs).rename(mine.name)
+
+
+def _combining_sides(frame: Any, other: Any) -> tuple[Any, Any, Index]:
+    """Two frames on the rows a `combine_first` or `combine` answers, and those rows.
+
+    pandas aligns the frames with an outer join first, so where one side repeats
+    a label and the labels differ, every row of a label on one side meets every
+    row of it on the other. Otherwise the rows are the sorted union.
+    """
+    repeated = _repeated_rows(frame.index, other.index, "outer")
+    if repeated is not None:
+        labels = repeated[0]
+        this = _taken_rows(frame, labels, repeated[1], None)
+        return this, _taken_rows(other, labels, repeated[2], None), labels
+    labels = _combining_labels(frame.index, other.index)
+    if labels is None:
+        return frame, other, frame.index
+    return frame.reindex(labels), other.reindex(labels), labels
 
 
 def _aligned_labels(mine: Index, theirs: Index, join: Any) -> Index | None:
@@ -10098,6 +10107,40 @@ def _name_range(names: list[Any]) -> Any:
     return RangeIndex(names[0], names[-1] + step, step)
 
 
+def _repeated_rows(mine: Index, theirs: Index, join: Any) -> tuple | None:
+    """The joined labels and each side's positions, when repeated labels need a join.
+
+    pandas lines up two sets of row labels that differ, where one side repeats a
+    label, by joining them the way `Index.join` does, which pairs every row of a
+    label on one side with every row of it on the other. Labels that agree, or
+    that are unique on both sides, answer None and are lined up by label.
+
+    Raises:
+        ValueError: For a join pandas does not know, with its words.
+    """
+    if mine.equals(theirs) or (mine.is_unique and theirs.is_unique):
+        return None
+    if join not in ("outer", "inner", "left", "right"):
+        raise InvalidArgumentError(f"do not recognize join method {join}")
+    return mine.join(theirs, how=join, return_indexers=True)
+
+
+def _taken_rows(side: Any, labels: Index, positions: Any, fill_value: Any) -> Any:
+    """One side of an `align` taken at join positions, where -1 is a row of gaps.
+
+    The rows are numbered first so the take is a reindex onto unique labels,
+    which fills the missing rows and widens the types the way pandas does.
+    """
+    count = len(side)
+    wanted = list(range(count)) if positions is None else [int(at) for at in positions]
+    numbered = side.set_axis(list(range(count)), axis=0)
+    if fill_value is None:
+        moved = numbered.reindex(wanted)
+    else:
+        moved = numbered.reindex(wanted, fill_value=fill_value)
+    return moved.set_axis(labels, axis=0)
+
+
 def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value: Any) -> tuple:
     """Both sides of an `align`, lined up on the axes they share.
 
@@ -10125,6 +10168,14 @@ def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value
     if level is not None and number != 1 and layered == 1:
         return _aligned_by_level(this, other, join, number, level, fill_value)
     _align_level(level)
+    repeated = None if number == 1 else _repeated_rows(this.index, other.index, join)
+    if repeated is not None:
+        moved = repeated[1] is not None and not this.index.is_unique
+        if mine_frame and not isinstance(other, DataFrame) and moved:
+            # pandas moves a frame's rows to meet a column with a checked reindex.
+            raise InvalidArgumentError("cannot reindex on an axis with duplicate labels")
+        this = _taken_rows(this, repeated[0], repeated[1], fill_value)
+        other = _taken_rows(other, repeated[0], repeated[2], fill_value)
     if mine_frame and isinstance(other, DataFrame):
         rows = None if number == 1 else _aligned_labels(this.index, other.index, join)
         joined = None
@@ -15488,9 +15539,7 @@ class DataFrameMixin(_Carries):
         frame = cast("DataFrame", self)
         if not isinstance(other, DataFrame):
             raise AttributeError(f"'{type(other).__name__}' object has no attribute 'columns'")
-        labels = _combining_labels(frame.index, other.index)
-        this = frame if labels is None else frame.reindex(labels)
-        that = other if labels is None else other.reindex(labels)
+        this, that, index = _combining_sides(frame, other)
         mine = _shown_names(frame)
         names = mine + [name for name in _shown_names(other) if name not in mine]
         columns: dict[Any, Series] = {}
@@ -15502,7 +15551,6 @@ class DataFrameMixin(_Carries):
             else:
                 kind = _combined_type(_word(frame[name].dtype), _word(other[name].dtype))
                 columns[name] = _combined(this[name], that[name], kind)
-        index = frame.index if labels is None else labels
         answer = DataFrame(columns) if columns else this.reset_index(drop=True)
         return _with_row_labels(answer, index.tolist()).rename_axis(index.name)
 
@@ -15526,10 +15574,7 @@ class DataFrameMixin(_Carries):
         theirs_names = _shown_names(other)
         if len(frame.index) == 0 or len(_shown_names(frame)) == 0:
             return other.copy()
-        labels = _combining_labels(frame.index, other.index)
-        this = frame if labels is None else frame.reindex(labels)
-        that = other if labels is None else other.reindex(labels)
-        index = frame.index if labels is None else labels
+        this, that, index = _combining_sides(frame, other)
         mine = _shown_names(frame)
         names = mine + [name for name in theirs_names if name not in mine]
         columns: dict[Any, Series] = {}
@@ -20110,6 +20155,10 @@ class SeriesMixin(_Carries):
         column = cast("Series", self)
         if not isinstance(other, Series):
             other = Series(other)
+        same = column.index.equals(other.index) and _word(column.dtype) == _word(other.dtype)
+        if not same and not (column.index.is_unique and other.index.is_unique):
+            # pandas reindexes each side onto the labels it keeps, which a repeat refuses.
+            raise InvalidArgumentError("cannot reindex on an axis with duplicate labels")
         labels = _combining_labels(column.index, other.index)
         this = column if labels is None else column.reindex(labels)
         that = other if labels is None else other.reindex(labels)
