@@ -34,6 +34,7 @@ from ._frame import DataFrame, Index, Series
 from ._frequency import _conforming, _held, _hold, _offset_of
 from ._held_freq import HeldFreq
 from ._pandas import (
+    _NO_ROUND_OK,
     NO_DEFAULT,
     _held_values,
     _label_of,
@@ -238,6 +239,8 @@ class TimedeltaIndex(HeldFreq, Index):
 
     def as_unit(self, unit: str, round_ok: bool = True) -> TimedeltaIndex:
         """The same labels stored at another resolution."""
+        if not round_ok:
+            raise TypeError(_NO_ROUND_OK)
         moved = TimedeltaIndex(self._column().dt.as_unit(unit), name=self.name)
         moved._freq = self.freq
         return moved

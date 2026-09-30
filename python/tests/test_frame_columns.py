@@ -261,6 +261,13 @@ def test_truncate_refuses_a_reversed_pair(firepanda):
     assert "Truncate: 3 must be after 6" in str(raised.value)
 
 
-def test_truncate_refuses_the_copy_keyword(firepanda):
-    with pytest.raises(NotImplementedError):
-        firepanda.DataFrame({"v": [1, 2]}).truncate(before=0, copy=True)
+def test_truncate_warns_of_the_copy_keyword_as_pandas_does(firepanda):
+    from firepanda.errors import Pandas4Warning
+
+    frame = firepanda.DataFrame({"v": [1, 2, 3]})
+    with pytest.warns(Pandas4Warning, match="The copy keyword is deprecated"):
+        kept = frame.truncate(before=1, copy=True)
+    assert kept["v"].tolist() == [2, 3]
+    with pytest.warns(Pandas4Warning, match="The copy keyword is deprecated"):
+        kept = frame["v"].truncate(after=1, copy=False)
+    assert kept.tolist() == [1, 2]
