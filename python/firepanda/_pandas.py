@@ -19842,13 +19842,17 @@ class SeriesMixin(_Carries):
         included, in the order of the categories, which `_category_counts`
         explains. `bins` counts the values in each of that many equal bins, or
         between each pair of edges, as the categories `cut` makes, the lowest
-        edge included. pandas leaves the gaps out of the bins whatever `dropna`
-        says, and the bins unnamed.
+        edge included, labelled by an interval index. pandas leaves the gaps out
+        of the bins whatever `dropna` says, and the bins unnamed.
         """
         if bins is not None:
             binned = cut(self, bins, include_lowest=True)
             counted = binned.value_counts(normalize=normalize, sort=sort, ascending=ascending)
-            return counted.rename_axis(None)
+            from ._interval_index import IntervalIndex
+
+            kind = binned.cat.categories.dtype
+            counted.index = IntervalIndex(counted.index.tolist(), dtype=kind)
+            return counted
         if self._inner.dtype() == "category":
             counts = self._category_counts(dropna)
         else:
@@ -29562,6 +29566,10 @@ class IndexMixin:
             from ._period_index import PeriodIndex
 
             return PeriodIndex
+        if kind == "string" and _objects.interval_name_of(inner) is not None:
+            from ._interval_index import IntervalIndex
+
+            return IntervalIndex
         if kind == "string" and _object_kind(inner) == "object":
             from ._object_index import ObjectIndex
 

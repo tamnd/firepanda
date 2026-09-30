@@ -80,7 +80,8 @@ from ._frequency import infer_freq
 from ._hdf import HDFStore, read_hdf
 from ._html_read import read_html
 from ._iceberg import read_iceberg
-from ._interval import Interval, IntervalDtype, IntervalIndex, interval_range
+from ._interval import Interval, IntervalDtype, interval_range
+from ._interval_index import IntervalIndex
 from ._masked import (
     BooleanDtype,
     Float32Dtype,
