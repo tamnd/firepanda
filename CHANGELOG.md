@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: An index of objects
+
+`Index(["a", 1, None])` and `Index(data, dtype=object)` now make pandas' index of objects rather than refusing or reading the labels as text. Each label keeps the value it was written with, the repr and the dtype read `object`, `get_loc`, `in`, `==` and `isin` find a label by its value, so 1 finds 1.0, and sorting goes the way Python sorts, raising pandas' TypeError on a mix it cannot order. A series or frame keeps these labels through `index=`, `set_axis`, `sort_index` and `reindex`, `concat` of parts whose labels are of two kinds gives the object index pandas gives, and `Series(values, dtype=object)` keeps each value as written, so an integer stays an integer.
+
 ### Fixed: CAST of a date or a timestamp to VARCHAR writes the instant
 
 `CAST(d AS VARCHAR)` of a date or a timestamp with no time zone now writes the value as DuckDB does, `2020-01-01` and `2020-01-01 10:00:00.5`, with a fraction of a second only when there is one and a year before the first written with `(BC)`, where before it wrote the count of days or ticks the value is stored as.

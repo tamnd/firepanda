@@ -375,6 +375,22 @@ def _unmasked_frame(frame: Any) -> Any:
     return frame.assign(**masked) if masked else frame
 
 
+def _object_cells(data: Any) -> list[Any] | None:
+    """A list's values as object cells, each kept as it was written, or None.
+
+    pandas keeps the 1 of `Series([1, 2.5], dtype=object)` an integer, where
+    reading the list as a column first would make it a float. None comes back
+    for a list with nothing but gaps, since cells are known by a value, and for
+    a value that has no written form.
+    """
+    if not isinstance(data, (list, tuple)) or all(_objects.is_gap(value) for value in data):
+        return None
+    try:
+        return _objects.cells(data)
+    except Exception:
+        return None
+
+
 def _objectified(column: Any) -> Any:
     """A series as an object column holding its values, with its labels and its name."""
     from ._frame import Series
@@ -596,18 +612,25 @@ def _objects_sorted(column: Any, ascending: Any, na_position: Any, ignore_index:
     The sort is stable both ways, so equal values keep the order they came in,
     which is what pandas' default sort gives.
     """
+    out = column.take(_objects_order(_values_of(column._inner), ascending, na_position))
+    return out.reset_index(drop=True) if ignore_index else out
+
+
+def _objects_order(values: list[Any], ascending: Any, na_position: Any) -> list[int]:
+    """The positions that put objects in the order Python sorts them, gaps at one end.
+
+    Raises:
+        TypeError: For values Python cannot put in order, as pandas raises.
+    """
     if na_position not in ("first", "last"):
-        raise ValueError(f"invalid na_position: {na_position}")
-    values = _values_of(column._inner)
+        raise InvalidArgumentError(f"invalid na_position: {na_position}")
     held = [at for at, value in enumerate(values) if not _levels_gap(value)]
     gaps = [at for at, value in enumerate(values) if _levels_gap(value)]
     held.sort(key=values.__getitem__)
     if not ascending:
         held.reverse()
         held = _stable_reversed(held, values)
-    order = gaps + held if na_position == "first" else held + gaps
-    out = column.take(order)
-    return out.reset_index(drop=True) if ignore_index else out
+    return gaps + held if na_position == "first" else held + gaps
 
 
 def _stable_reversed(order: list[int], values: list[Any]) -> list[int]:
@@ -1288,8 +1311,17 @@ def _written_index(index: Any) -> Any:
     return index
 
 
-def _core_labels(labels: Any) -> Any:
-    """Labels to reindex on as the core reads them, a period as its cell."""
+def _core_labels(labels: Any, source: Any = None) -> Any:
+    """Labels to reindex on as the core reads them, a period as its cell.
+
+    On a `source` index of objects the labels go as cells written the way its
+    cells are, so a label finds the one it equals.
+    """
+    if _is_object_index(source):
+        if _is_object_index(labels):
+            labels = labels.tolist()
+        spelling = _objects.spelling_of(source._inner) or ""
+        return _objects.cells(list(labels), spelling)
     if isinstance(labels, IndexMixin):
         return labels._inner.to_list() if _objects.period_name_of(labels._inner) else labels
     if isinstance(labels, list | tuple) and (kind := _period.period_kind(labels)):
@@ -1329,8 +1361,20 @@ def _label_values(owner: Any) -> list[Any]:
     return _values_of(owner._inner.labels())
 
 
+def _is_object_index(index: Any) -> bool:
+    """Whether an index is one of objects, its labels cells that are not periods."""
+    inner = getattr(index, "_inner", None)
+    return isinstance(index, IndexMixin) and inner is not None and _object_kind(inner) == "object"
+
+
 def _labels_of(index: Any) -> tuple[list[Any], Any]:
-    """The labels an `index=` argument names, and the level name it carries."""
+    """The labels an `index=` argument names, and the level name it carries.
+
+    An index of objects hands over its cells, so the labels stay objects rather
+    than being read again as one type.
+    """
+    if _is_object_index(index):
+        return list(index._inner.to_list()), index.name
     return list(index), getattr(index, "name", None)
 
 
@@ -9310,6 +9354,9 @@ def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
 
         if isinstance(labels, MultiIndex):
             return _with_row_labels(owner, labels)
+        if _is_object_index(labels):
+            # Objects go on as their cells, so they are not read again as one type.
+            values = list(labels._inner.to_list())
         return _with_row_labels(owner, values).rename_axis(name)
     if len(set(values)) != len(values):
         raise NotImplementedError(
@@ -14712,6 +14759,17 @@ class DataFrameMixin(_Carries):
         inplace = _flag("inplace", inplace)
         if across == 1 and key is not None:
             _refuse("key", key, "running a function over the column labels is not written")
+        if (
+            across == 0
+            and key is None
+            and level is None
+            and not isinstance(ascending, (list, tuple))
+            and _is_object_index(self.index)
+        ):
+            order = _objects_order(self.index.tolist(), ascending, na_position)
+            ordered = self.iloc[order]
+            ordered = ordered.reset_index(drop=True) if ignore_index else ordered
+            return _settled(self, ordered, inplace)
         if across == 0 and (key is not None or na_position != "last" or not sort_remaining):
             first = _na_first(na_position)
             order = _label_order(self.index, level, ascending, first, sort_remaining, key)
@@ -15310,7 +15368,7 @@ class DataFrameMixin(_Carries):
                     DataFrame._wrap(inner), index, method, value, limit, tolerance
                 )
             if index is not None:
-                inner = inner.reindex(_core_labels(index), value)
+                inner = inner.reindex(_core_labels(index, self.index), value)
                 if isinstance(index, IndexMixin):
                     inner = inner.renamed_axis(None if index.name is None else str(index.name))
             return DataFrame._wrap(inner)
@@ -15680,6 +15738,11 @@ class SeriesMixin(_Carries):
         keyed = isinstance(data, collections.abc.Mapping) and len(data) > 0
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         if _is_object_dtype(dtype):
+            held = _object_cells(data)
+            if held is not None:
+                self._inner = type(self)(held, index=index, name=name, dtype="str")._inner
+                _named_as(self, name)
+                return
             self._inner = _objectified(type(self)(data, index=index, name=name))._inner
             _named_as(self, name)
             return
@@ -18876,7 +18939,7 @@ class SeriesMixin(_Carries):
         if _reindex_here(self, index, method):
             return _reindex_by_position(self, index, method, value, limit, tolerance)
         try:
-            inner = self._inner.reindex(_core_labels(index), value, True)
+            inner = self._inner.reindex(_core_labels(index, self.index), value, True)
             if isinstance(index, IndexMixin):
                 inner = inner.renamed_axis(None if index.name is None else str(index.name))
             return Series._wrap(inner)
@@ -26539,6 +26602,27 @@ class IndexStrings:
         return Index(answer.rename(self._index.name))
 
 
+def _object_labels(data: Any, label: Any) -> Any:
+    """The labels of a list that pandas holds as objects, as object cells, or None.
+
+    That is a list whose values share no one type, or flags beside a gap, read
+    the way a series reads them, so the labels are the ones the column would
+    hold.
+    """
+    if not isinstance(data, (list, tuple)):
+        return None
+    try:
+        made = _firepanda.Index(data, label)
+    except Exception:
+        made = None
+    if made is not None and not (made.dtype() == "bool" and made.null_count()):
+        return None
+    column = SeriesMixin._made(list(data), label)
+    if _object_kind(column) != "object":
+        return None
+    return column.to_index(label)
+
+
 def _keep_freq(source: Any, made: Any) -> None:
     """Carries the frequency an index holds onto one made from it with the same labels."""
     held = getattr(source, "_freq", None)
@@ -26651,6 +26735,10 @@ class IndexMixin:
                 # spans with a TimedeltaIndex, so this becomes one.
                 self._inner = moved._inner
                 self.__class__ = type(moved)
+            elif (held := _object_labels(data, label)) is not None:
+                self._inner = held
+                if type(self).__name__ == "Index":
+                    self.__class__ = self._class_of(self._inner)
             else:
                 self._inner = _firepanda.Index(data, label)
                 if (
@@ -26673,16 +26761,16 @@ class IndexMixin:
         a series does, and the index is then made out of that series.
 
         Raises:
-            NotImplementedError: For an object or masked type, since labels hold
-                one plain type and nothing yet holds those as labels.
+            NotImplementedError: For a masked type, since nothing yet holds
+                those as labels.
         """
         from ._frame import Index, Series
         from ._masked import masked_name
 
-        if _is_object_dtype(dtype) or masked_name(dtype) is not None:
+        if masked_name(dtype) is not None:
             raise NotImplementedError(
                 f"dtype={dtype!r} is not supported yet on an index, because row labels"
-                " hold one plain type and not objects or a masked type"
+                " hold one plain type and not a masked type"
             )
         if isinstance(data, (IndexMixin, SeriesMixin)):
             typed = Series(data).astype(dtype)
@@ -27085,6 +27173,10 @@ class IndexMixin:
             from ._period_index import PeriodIndex
 
             return PeriodIndex
+        if kind == "string" and _object_kind(inner) == "object":
+            from ._object_index import ObjectIndex
+
+            return ObjectIndex
         return cls
 
     @property
@@ -29731,11 +29823,24 @@ def _unit_change(printed: str, dtype: Any) -> str:
 
 def _concat_index_units(frames: list[DataFrame]) -> list[DataFrame]:
     """The frames with instant or span labels moved to the finest unit among them."""
+    from ._frame import Index, Series
+    from ._multi import MultiIndex
+
     kinds = {_word(frame.index.dtype) for frame in frames}
     wanted = _temporal_unit_type(kinds) if len(kinds) > 1 else None
     if wanted is None:
-        return frames
-    from ._frame import Index, Series
+        numbers = ("int", "uint", "float")
+        families = {"number" if kind.startswith(numbers) else kind for kind in kinds}
+        if len(families) < 2 or any(isinstance(frame.index, MultiIndex) for frame in frames):
+            return frames
+        # Labels of two kinds meet as objects, each label kept as it was.
+        labels = [frame.index.tolist() for frame in frames]
+        letter = _objects.cells([value for part in labels for value in part])
+        spelling = next((_objects.spelling(cell) for cell in letter if cell is not None), "")
+        return [
+            frame.set_axis(Index(Series(_objects.cells(part, spelling), dtype="str")))
+            for frame, part in zip(frames, labels, strict=True)
+        ]
 
     unit = _unit_of(wanted)
     return [frame.set_axis(Index(Series(frame.index).dt.as_unit(unit))) for frame in frames]
@@ -29788,7 +29893,7 @@ def _concat_rows(
         parts.append(inner)
     if not ignore_index:
         kinds = {_word(frame.index.dtype) for frame in frames}
-        if len(kinds) > 1:
+        if len(kinds) > 1 and "object" not in kinds:
             raise UnsupportedError(
                 f"concat of row labels as {' and '.join(sorted(kinds))} gives pandas' object"
                 " index, and firepanda has no object column"
@@ -32517,7 +32622,10 @@ def _text_labels(index: Any, named: bool, widest: int | None, between: int = 1) 
         header.append("" if index.name is None else _text_plain(index.name))
     dtype = _word(index.dtype)
     if dtype in ("string", "str", "object"):
-        texts = [" NaN" if _missing(v) else " " + _text_plain(v) for v in index.tolist()]
+        gap = " NaN"
+        if dtype == "object" and (held := _objects.gap_of(index._inner)) is not math.nan:
+            gap = " " + str(held)
+        texts = [gap if _missing(v) else " " + _text_plain(v) for v in index.tolist()]
     else:
         texts = _text_fixed(_text_values(index, justify="left"), "left", None, widest)
     if texts:
@@ -33026,13 +33134,14 @@ def _index_text(index: Any) -> str:
         klass = "DatetimeIndex"
     elif dtype.startswith("timedelta64"):
         klass = "TimedeltaIndex"
-    elif dtype.startswith(("int", "uint", "float", "bool", "string", "str")):
+    elif dtype.startswith(("int", "uint", "float", "bool", "string", "str")) or dtype == "object":
         klass = "Index"
     elif dtype == "category":
         klass = "CategoricalIndex"
     else:
         return repr(index._inner)
-    values = index.tolist() if klass == "CategoricalIndex" else _held_values(index._inner)
+    shown = klass == "CategoricalIndex" or dtype == "object"
+    values = index.tolist() if shown else _held_values(index._inner)
     present = [v for v in values if not _missing(v)]
     if klass == "DatetimeIndex":
         dates = "," not in dtype and all(
@@ -33054,13 +33163,17 @@ def _index_text(index: Any) -> str:
 
     else:
         gap = "nan" if dtype.startswith(("float", "str", "category")) else "<NA>"
+        if dtype == "object":
+            gap = str(_objects.gap_of(index._inner))
 
         def formatter(v: Any) -> str:
             return gap if _missing(v) else _pprinted(v)
 
     width = get_option("display.width") or 80
     most = get_option("display.max_seq_items") or len(values)
-    text = dtype.startswith("str")
+    text = dtype.startswith("str") or (
+        dtype == "object" and all(isinstance(v, str) for v in present)
+    )
     summary = _summary(values, formatter, not text, klass, width, most)
     attrs = [f"dtype='{'str' if dtype == 'string' else dtype}'"]
     if klass == "CategoricalIndex":
