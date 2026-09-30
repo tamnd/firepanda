@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: apply answering one value a group with as_index=False
+
+`apply` on a grouped frame with `as_index=False`, when the function answers one value a group, gives a frame of the keys and the values in a column named None, as pandas prints it. The column name reads back as the text `None`, as any column named None does in firepanda.
+
 ### Added: Selecting a key column with as_index=False
 
 A key column selected from a grouping with `as_index=False` is reduced as a value, as pandas does. A key goes in a column of the answer only when no column already has its name, so a reduced key shows its value alone, and a key from outside the frame named after a column is left out.
