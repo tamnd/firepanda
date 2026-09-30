@@ -128,14 +128,19 @@ def _now() -> tuple[Any, ...]:
     return (*moment.timetuple()[:6], f"{moment.microsecond:06d}", None)
 
 
-def _parts(value: str, fmt: str) -> tuple[Any, ...]:
-    """One row's parts under a format, or pandas' error for a row that does not read."""
+def _parts(value: str, fmt: str, exact: bool = True) -> tuple[Any, ...]:
+    """One row's parts under a format, or pandas' error for a row that does not read.
+
+    Under `exact=False` the format may match anywhere in the row, the first
+    place it does, and whatever is either side of it is passed over.
+    """
     if value in ("now", "today"):
         return _now()
-    found = _pattern(fmt).match(value)
+    pattern = _pattern(fmt)
+    found = pattern.match(value) if exact else pattern.search(value)
     if found is None:
         raise _mistake(f'time data "{value}" doesn\'t match format "{fmt}"')
-    if found.end() != len(value):
+    if exact and found.end() != len(value):
         raise _mistake(
             f'unconverted data remains when parsing with format "{fmt}": "{value[found.end() :]}"'
         )
@@ -202,13 +207,16 @@ def _zone_keys() -> frozenset[str]:
     return frozenset(zoneinfo.available_timezones())
 
 
-def rows_by_format(values: list[Any], fmt: str, coerce: bool) -> list[tuple[Any, ...] | None]:
+def rows_by_format(
+    values: list[Any], fmt: str, coerce: bool, exact: bool = True
+) -> list[tuple[Any, ...] | None]:
     """Every row read against one format, the way pandas reads it.
 
     Args:
         values: The rows, text or missing.
         fmt: The format, given or guessed.
         coerce: Whether a row that will not read is missing rather than an error.
+        exact: Whether the format has to match the whole row or may match part of it.
 
     Returns:
         The parts of every row, None where it is missing or did not read.
@@ -224,7 +232,7 @@ def rows_by_format(values: list[Any], fmt: str, coerce: bool) -> list[tuple[Any,
             continue
         if value not in read:
             try:
-                read[value] = _parts(value, fmt)
+                read[value] = _parts(value, fmt, exact)
             except InvalidArgumentError:
                 if not coerce:
                     raise
@@ -429,3 +437,25 @@ def guess(text: str, dayfirst: bool = False) -> str | None:
 def _split(fmt: str) -> list[str]:
     """A format as its directives and the literal text between them."""
     return [piece for piece in re.split(r"(%.)", fmt) if piece]
+
+
+_ISO_MORE = {"%m": re.compile(r"-\d"), "%d": re.compile(r"[ T]\d")}
+"""What pandas reads as more of an ISO 8601 value after a format ending at a month or day."""
+
+
+def iso_runs_on(values: list[Any], fmt: str) -> bool:
+    """Whether pandas' ISO 8601 reader reads some row past the end of the format.
+
+    Under `exact=False` pandas reads a row with its ISO 8601 reader first when
+    the format is one it takes, and a row that goes on past the format with
+    more of a time is read that way and holds the column at nanoseconds.
+    """
+    more = _ISO_MORE.get(fmt[-2:])
+    if more is None or not _iso(fmt):
+        return False
+    pattern = _pattern(fmt)
+    for value in values:
+        found = pattern.match(value) if isinstance(value, str) else None
+        if found is not None and more.match(value, found.end()):
+            return True
+    return False

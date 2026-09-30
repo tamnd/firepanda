@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_datetime with exact=False
+
+`to_datetime(format=..., exact=False)` lets the format match part of each row, the first place it can, the way pandas' search does, where it used to be refused. A row the format matches nowhere raises pandas' own "doesn't match format" error, or is missing under `errors="coerce"`. The unit is microseconds, and nanoseconds where pandas' ISO 8601 reader takes a row past the end of an ISO format, as it does for a time after a day.
+
 ### Added: origin on to_datetime
 
 `to_datetime` takes `origin="julian"` for Julian days and any instant with no zone as the point numbers count from, as pandas does, rather than refusing anything but `unix`. The numbers are moved to counts from 1970 first, so a list still answers an index, a column a column and a number an instant, and pandas' errors for a Julian count not in days, a date out of range, values that are not numbers, an origin that is not an instant and a zoned origin are raised with pandas' words.

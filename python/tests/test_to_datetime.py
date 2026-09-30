@@ -258,27 +258,6 @@ def test_every_row_is_held_to_the_first_row_format(firepanda: ModuleType) -> Non
 
 
 @needs_pandas
-@pytest.mark.parametrize(
-    ("argument", "value"),
-    [
-        ("exact", False),
-    ],
-)
-def test_a_declared_argument_that_is_not_implemented_says_so(
-    firepanda: ModuleType, argument: str, value: Any
-) -> None:
-    """A refusal naming the argument the caller passed.
-
-    It is declared rather than left out for the reason document 18 section 4
-    gives. A caller who passes it gets a message about that argument instead of
-    a TypeError about an unexpected keyword, and the day it is implemented no
-    signature changes.
-    """
-    with pytest.raises(NotImplementedError, match=argument):
-        firepanda.to_datetime(["2026-01-01"], **{argument: value})
-
-
-@needs_pandas
 def test_the_defaults_of_the_refused_arguments_are_accepted(firepanda: ModuleType) -> None:
     """Passing them at their default is not passing them, which is what makes it honest."""
     answer = firepanda.to_datetime(
