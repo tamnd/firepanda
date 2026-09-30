@@ -144,3 +144,14 @@ def test_a_copy_of_an_index_is_renamed_alone(firepanda: ModuleType) -> None:
     taken = copy.copy(f.index)
     taken.names = ["x", "y"]
     assert list(f.index.names) == ["a", "b"]
+
+
+def test_an_attribute_that_names_a_column_writes_the_column(firepanda: ModuleType) -> None:
+    """`df.a = [...]` replaces column `a`, as pandas does."""
+
+    def run(module: Any) -> str:
+        f = module.DataFrame({"a": [1, 2], "b": [3, 4]})
+        f.a = [7, 8]
+        return repr(f)
+
+    assert run(firepanda) == run(pd)

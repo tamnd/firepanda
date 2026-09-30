@@ -121,6 +121,19 @@ def _multi_names(self: Any, names: Any) -> None:
     _name_owner(self, list(self._names))
 
 
+def _frame_setattr(self: Any, name: str, value: Any) -> None:
+    """`df.a = [...]` writes column `a` when the frame has one, as pandas does.
+
+    A private name or anything the class defines, such as `index` or `attrs`,
+    is set as an attribute. A frame has no `__dict__`, so any other name is
+    refused with Python's `AttributeError`.
+    """
+    if name.startswith("_") or hasattr(type(self), name) or name not in self.columns:
+        object.__setattr__(self, name, value)
+    else:
+        self[name] = value
+
+
 Series.name = property(Series.name.fget, _series_name, doc=Series.name.__doc__)
 Series.index = property(_owned(Series.index.fget, 0), _series_index, doc=Series.index.__doc__)
 DataFrame.index = property(
@@ -132,3 +145,4 @@ DataFrame.columns = property(
 Index.name = property(Index.name.fget, _index_name, doc=Index.name.__doc__)
 Index.names = property(Index.names.fget, _index_names, doc=Index.names.__doc__)
 MultiIndex.names = property(MultiIndex.names.fget, _multi_names, doc=MultiIndex.names.__doc__)
+DataFrame.__setattr__ = _frame_setattr
