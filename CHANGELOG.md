@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: limit_area on ffill and bfill
+
+`Series.ffill`, `Series.bfill`, `DataFrame.ffill` and `DataFrame.bfill` take `limit_area`. Under "inside" only the gaps with a present value on both sides are filled, under "outside" only the gaps at either end, and any other word reads as "inside", as in pandas. It works with `limit`, `inplace` and `axis=1`.
+
 ### Added: crosstab with several keys on an axis
 
 `crosstab` takes a list of keys for the rows, the columns or both and labels that axis with a MultiIndex of the pairs it saw, sorted and named by the columns or by `rownames` and `colnames`, with `normalize` and `values` working as before. Several keys with `dropna=False` or `margins` are still refused.

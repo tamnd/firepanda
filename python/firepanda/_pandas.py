@@ -4369,6 +4369,26 @@ def _first_gaps(column: Any, most: int) -> list[bool]:
     return chosen
 
 
+def _fill_area(original: Any, filled: Any, area: Any) -> Any:
+    """Takes back the fills `limit_area` leaves out, down each column.
+
+    A gap is inside when a present value sits above it and another below it.
+    pandas keeps only those under "inside" and only the others under
+    "outside", and it reads any word but "outside" as "inside".
+    """
+    if area is None or len(original) == 0:
+        return filled
+    from ._frame import DataFrame
+
+    present = original.notna()
+    seen = present.cumsum()
+    if isinstance(original, DataFrame):
+        inner = seen.gt(0) & seen.lt(seen.iloc[-1], axis=1)
+    else:
+        inner = seen.gt(0) & seen.lt(seen.iloc[-1])
+    return filled.where(present | (inner if area != "outside" else ~inner))
+
+
 def _limit_wanted(limit: Any) -> int:
     """Reads a fill limit, where the absence of one means as far as it goes.
 
@@ -16350,20 +16370,12 @@ class DataFrameMixin(_Carries):
 
     def _fill(self, kind: str, axis: Any, inplace: bool, limit: Any, limit_area: Any) -> DataFrame:
         """Fills each column's missing values from its neighbours."""
-        _refuse(
-            "limit_area",
-            limit_area,
-            "filling only the gaps between two present values, or only the ones"
-            " outside them, needs the fill to know where the ends are and it"
-            " walks the column without looking",
-        )
         if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
             # pandas fills across the rows by filling down the frame turned on its side.
-            filled = self.T._transformed(kind, _limit_wanted(limit), 0).T
+            filled = self.T._fill(kind, 0, False, limit, limit_area).T
             return _kept(self, filled, _flag("inplace", inplace))
-        return _kept(
-            self, self._transformed(kind, _limit_wanted(limit), axis), _flag("inplace", inplace)
-        )
+        filled = _fill_area(self, self._transformed(kind, _limit_wanted(limit), axis), limit_area)
+        return _kept(self, filled, _flag("inplace", inplace))
 
     def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> DataFrame:
         """Moves every column's rows along, leaving the gap missing.
@@ -19775,16 +19787,8 @@ class SeriesMixin(_Carries):
 
     def _fill(self, kind: str, axis: Any, inplace: bool, limit: Any, limit_area: Any) -> Series:
         """Fills the column's missing values from its neighbours."""
-        _refuse(
-            "limit_area",
-            limit_area,
-            "filling only the gaps between two present values, or only the ones"
-            " outside them, needs the fill to know where the ends are and it"
-            " walks the column without looking",
-        )
-        return _kept(
-            self, self._transformed(kind, _limit_wanted(limit), axis), _flag("inplace", inplace)
-        )
+        filled = _fill_area(self, self._transformed(kind, _limit_wanted(limit), axis), limit_area)
+        return _kept(self, filled, _flag("inplace", inplace))
 
     def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> Series:
         """Moves the column's rows along, leaving the gap missing.

@@ -255,7 +255,6 @@ def test_an_empty_column_transforms_to_an_empty_column(firepanda: ModuleType) ->
 @pytest.mark.parametrize(
     ("owner", "call", "arguments", "expected"),
     [
-        ("Series", "ffill", {"limit_area": "inside"}, "limit_area"),
         ("Series", "pct_change", {"fill_method": "pad"}, "fill_method"),
     ],
 )
