@@ -269,5 +269,5 @@ def test_a_misspelled_quantile_rule_is_a_typo_and_not_a_gap(firepanda: ModuleTyp
         firepanda.Series(VALUES).quantile(0.5, interpolation="hazen")
     with pytest.raises(ValueError, match="Method must be in"):
         firepanda.DataFrame({"a": VALUES}).quantile(0.5, method="tabel")
-    with pytest.raises(NotImplementedError, match="method"):
+    with pytest.raises(ValueError, match="Invalid interpolation: linear"):
         firepanda.DataFrame({"a": VALUES}).quantile(0.5, method="table")
