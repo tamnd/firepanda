@@ -280,20 +280,39 @@ def test_a_frame_refuses_a_scalar_in_pandas_words(firepanda: ModuleType) -> None
     assert str(mine.value) == str(theirs.value)
 
 
-@needs_pandas
-@pytest.mark.parametrize("shape", ["series", "frame"])
-def test_a_frame_refuses_the_two_arguments_that_are_not_sets(
-    firepanda: ModuleType, shape: str
-) -> None:
-    """pandas answers these and it does not answer them as a membership test.
+ALIGNED = {
+    "frame": lambda lib: lib.DataFrame({"a": [1, 0, 3], "c": [1, 1, 1]}, index=[10, 11, 13]),
+    "frame same": lambda lib: lib.DataFrame(
+        {"a": [1, 0, 3], "b": ["x", "q", "z"]}, index=[10, 11, 12]
+    ),
+    "series": lambda lib: lib.Series([1, 5, 3], index=[10, 11, 12]),
+    "series moved": lambda lib: lib.Series([1, 2], index=[11, 10]),
+    "gaps": lambda lib: lib.DataFrame({"a": [float("nan"), 2.0, 3.0]}, index=[10, 11, 12]),
+}
 
-    `df.isin(other)` where the other is a frame or a series is an equality test lined up by label,
-    which is `df == other` wearing this method's name. Reading it as a set would be a wrong answer
-    that looks like a right one, so it is refused until the comparison is written.
-    """
+
+@needs_pandas
+@pytest.mark.parametrize("other", ALIGNED.values(), ids=ALIGNED.keys())
+def test_a_frame_or_series_is_lined_up_by_label(firepanda: ModuleType, other: Any) -> None:
+    """`df.isin(other)` is an equality test lined up by label, as pandas answers it."""
+    import pandas as pd
+
+    def run(lib: Any) -> Any:
+        frame = lib.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]}, index=[10, 11, 12])
+        return frame.isin(other(lib))
+
+    assert repr(run(firepanda)) == repr(run(pd))
+
+
+@pytest.mark.parametrize("shape", ["series", "frame"])
+def test_a_repeated_label_on_the_other_side_is_refused(firepanda: ModuleType, shape: str) -> None:
     frame = firepanda.DataFrame({"a": [1, 2]})
-    other = firepanda.Series([1, 2]) if shape == "series" else firepanda.DataFrame({"a": [1, 2]})
-    with pytest.raises(NotImplementedError, match="cell against cell"):
+    other = (
+        firepanda.Series([1, 2], index=[0, 0])
+        if shape == "series"
+        else firepanda.DataFrame({"a": [1, 2]}, index=[0, 0])
+    )
+    with pytest.raises(ValueError, match="cannot compute isin with a duplicate axis"):
         frame.isin(other)
 
 

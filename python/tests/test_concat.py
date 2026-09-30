@@ -112,7 +112,20 @@ MISTAKES: list[Callable[[Any], Any]] = [
     lambda m: m.concat([m.DataFrame(FIRST)], axis=2),
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(FIRST)], verify_integrity=True),
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(FIRST)], axis=1, verify_integrity=True),
+    lambda m: m.concat(
+        [m.DataFrame(FIRST), m.DataFrame(FIRST)], keys=["x", "x"], verify_integrity=True
+    ),
 ]
+
+
+def test_keys_that_keep_the_labels_apart_pass_verify_integrity(firepanda: ModuleType) -> None:
+    import pandas as pd
+
+    def run(lib: Any) -> Any:
+        parts = [lib.DataFrame(FIRST), lib.DataFrame(FIRST)]
+        return lib.concat(parts, keys=["x", "y"], verify_integrity=True)
+
+    assert repr(run(firepanda)) == repr(run(pd))
 
 
 @pytest.mark.parametrize("build", MISTAKES)

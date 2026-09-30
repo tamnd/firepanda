@@ -211,10 +211,20 @@ def test_dtype_bool_gives_flags_rather_than_counts(firepanda: ModuleType) -> Non
 
 
 @needs_pandas
-def test_a_dtype_that_is_not_written_is_refused(firepanda: ModuleType) -> None:
-    """It says which two are written rather than saying the method is missing."""
-    with pytest.raises(NotImplementedError, match="int64"):
-        made(firepanda).str.get_dummies(dtype=float)
+@pytest.mark.parametrize("dtype", [float, "uint8", "int32", "float32", bool])
+def test_a_numeric_dtype_is_pandas(firepanda: ModuleType, dtype: Any) -> None:
+    """Every numeric or boolean type is taken, as pandas takes it."""
+    import pandas as pd
+
+    def run(lib: Any) -> Any:
+        return lib.Series(["a|b", "b", None]).str.get_dummies(dtype=dtype)
+
+    assert repr(run(firepanda)) == repr(run(pd))
+
+
+def test_a_dtype_that_is_not_a_number_is_refused(firepanda: ModuleType) -> None:
+    with pytest.raises(ValueError, match="Only numeric or boolean dtypes"):
+        made(firepanda).str.get_dummies(dtype=str)
 
 
 @needs_pandas
