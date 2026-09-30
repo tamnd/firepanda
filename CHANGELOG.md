@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Interpolate zoned instants and describe intervals
+
+`interpolate` now fills a column of zoned instants by drawing the line through its UTC instants and handing the answer back in the column's zone, with `limit`, `limit_direction` and `limit_area` counted as before. An interval column with no gaps passes through untouched, and one with gaps or a period column is refused with pandas' own sentence. `describe` counts an interval column the way it counts text, answering count, unique, top and freq.
+
 ### Added: interpolate by labels that do not rise
 
 `interpolate` with `method="index"`, `"values"` or `"time"` now fills gaps when the labels are out of order or repeat, sorting the points of the known values and filling by numpy's `interp` as pandas does, with `limit`, `limit_direction` and `limit_area` still counted by position.
