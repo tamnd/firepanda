@@ -233,10 +233,9 @@ def test_a_declared_argument_that_is_not_implemented_refuses(
         getattr(firepanda.Series(VALUES), call)(**arguments)
 
 
-def test_reducing_across_a_row_is_refused_and_not_transposed(firepanda: ModuleType) -> None:
-    """`axis=1` on a frame is a different kernel rather than the same one."""
-    with pytest.raises(NotImplementedError, match="axis=1"):
-        firepanda.DataFrame({"a": [1.0], "b": [2.0]}).sum(axis=1)
+def test_reducing_across_a_row_gives_one_answer_per_row(firepanda: ModuleType) -> None:
+    """`axis=1` on a frame reduces each row, labelled by the row index."""
+    assert firepanda.DataFrame({"a": [1.0], "b": [2.0]}).sum(axis=1).tolist() == [3.0]
 
 
 def test_a_series_has_only_the_one_axis(firepanda: ModuleType) -> None:
