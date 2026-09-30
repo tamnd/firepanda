@@ -21,13 +21,15 @@ the instants when they have one.
 from __future__ import annotations
 
 import datetime
-import itertools
 import numbers
 import operator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._scalars import Timedelta, Timestamp
 from .errors import InvalidArgumentError
+
+if TYPE_CHECKING:
+    from ._interval_index import IntervalIndex
 
 __all__ = ["Interval", "IntervalDtype", "IntervalIndex", "interval_range"]
 
@@ -506,251 +508,6 @@ def _formatted(value: Any) -> str:
     return "nan" if value is None else str(value)
 
 
-class IntervalIndex:
-    """An index of intervals, which is `pandas.IntervalIndex`.
-
-    It holds its intervals as a list and answers the attributes pandas' does. An
-    index of intervals under a series is a category index the extension holds,
-    and this is what `cat.categories` and the constructors hand back.
-    """
-
-    def __init__(
-        self,
-        data: Any = (),
-        closed: str | None = None,
-        dtype: Any = None,
-        copy: bool = False,
-        name: Any = None,
-        verify_integrity: bool = True,
-    ) -> None:
-        from ._objects import is_gap
-
-        values = [None if is_gap(value) else value for value in data]
-        if any(not isinstance(value, Interval) for value in values if value is not None):
-            raise TypeError("type <class 'object'> with value is not an interval")
-        kind = str(dtype) if dtype is not None else interval_kind(values)
-        if kind is None:
-            sides = {value.closed for value in values if value is not None}
-            if len(sides) > 1:
-                raise InvalidArgumentError("intervals must all be closed on the same side.")
-            kind = f"interval[float64, {closed or 'right'}]" if not sides else None
-            if kind is None:
-                raise NotImplementedError(
-                    "IntervalIndex: intervals of instants or spans are not supported yet"
-                )
-        subtype, side = _kind_parts(kind)
-        side = closed or side or "right"
-        kind = f"interval[{subtype}, {side}]"
-        pairs = interval_pairs(values, kind)
-        self._values = [None if pair is None else Interval(*pair, side) for pair in pairs]
-        self._dtype = IntervalDtype(kind)
-        self.name = name
-
-    @classmethod
-    def from_breaks(
-        cls,
-        breaks: Any,
-        closed: str = "right",
-        name: Any = None,
-        copy: bool = False,
-        dtype: Any = None,
-    ) -> IntervalIndex:
-        """Intervals between each break and the next."""
-        ends = [_plain(end) for end in breaks]
-        return cls._from_pairs(list(itertools.pairwise(ends)), closed, name, dtype, ends)
-
-    @classmethod
-    def from_arrays(
-        cls,
-        left: Any,
-        right: Any,
-        closed: str = "right",
-        name: Any = None,
-        copy: bool = False,
-        dtype: Any = None,
-    ) -> IntervalIndex:
-        """Intervals from a list of left ends and a list of right ends."""
-        lefts, rights = [_plain(end) for end in left], [_plain(end) for end in right]
-        if len(lefts) != len(rights):
-            raise InvalidArgumentError("left and right must have the same length")
-        return cls._from_pairs(
-            list(zip(lefts, rights, strict=True)), closed, name, dtype, lefts + rights
-        )
-
-    @classmethod
-    def from_tuples(
-        cls,
-        data: Any,
-        closed: str = "right",
-        name: Any = None,
-        copy: bool = False,
-        dtype: Any = None,
-    ) -> IntervalIndex:
-        """Intervals from pairs of ends, None for a gap."""
-        pairs = [None if pair is None else tuple(_plain(end) for end in pair) for pair in data]
-        ends = [end for pair in pairs if pair is not None for end in pair]
-        return cls._from_pairs(pairs, closed, name, dtype, ends + [None] * (None in pairs))
-
-    @classmethod
-    def _from_pairs(
-        cls, pairs: list[Any], closed: str, name: Any, dtype: Any, ends: list[Any]
-    ) -> IntervalIndex:
-        from ._objects import is_gap
-
-        whole = all(isinstance(end, numbers.Integral) and not isinstance(end, bool) for end in ends)
-        gaps = any(pair is None or any(is_gap(end) for end in pair) for pair in pairs)
-        kind = str(dtype) if dtype is not None else None
-        moment = moment_subtype([end for end in ends if not is_gap(end)])
-        if kind is None and moment is not None:
-            kind = f"interval[{moment}, {closed}]"
-        if kind is None:
-            kind = f"interval[{'int64' if whole and not gaps else 'float64'}, {closed}]"
-        values = [
-            None if pair is None or any(is_gap(end) for end in pair) else Interval(*pair, closed)
-            for pair in pairs
-        ]
-        return cls(values, closed=closed, dtype=kind, name=name)
-
-    @property
-    def dtype(self) -> IntervalDtype:
-        """The interval type."""
-        return self._dtype
-
-    @property
-    def closed(self) -> str:
-        """Which ends each interval holds."""
-        return str(self._dtype.closed)
-
-    def _ends(self, pick: Any) -> Any:
-        from ._frame import Index
-
-        found = [None if value is None else pick(value) for value in self._values]
-        if _moment_kind(str(self._dtype)):
-            from ._scalars import NaT
-
-            return Index([NaT if end is None else end for end in found])
-        if None in found or str(self._dtype.subtype).startswith("float"):
-            return Index([float("nan") if end is None else float(end) for end in found])
-        return Index(found)
-
-    @property
-    def left(self) -> Any:
-        """The left ends, as an index."""
-        return self._ends(lambda value: value.left)
-
-    @property
-    def right(self) -> Any:
-        """The right ends, as an index."""
-        return self._ends(lambda value: value.right)
-
-    @property
-    def mid(self) -> Any:
-        """The midpoints, as an index of floats, or of instants or spans."""
-        from ._frame import Index
-
-        if _moment_kind(str(self._dtype)):
-            return self._ends(lambda value: value.mid)
-        return Index(
-            [float("nan") if value is None else float(value.mid) for value in self._values]
-        )
-
-    @property
-    def length(self) -> Any:
-        """Each interval's length, as an index."""
-        return self._ends(lambda value: value.length)
-
-    @property
-    def is_non_overlapping_monotonic(self) -> bool:
-        """Whether the intervals increase and none overlaps the next."""
-        found = [value for value in self._values if value is not None]
-        if len(found) < len(self._values):
-            return False
-        both = self.closed == "both"
-        rising = all(
-            a.right < b.left or (a.right == b.left and not both)
-            for a, b in itertools.pairwise(found)
-        )
-        falling = all(
-            b.right < a.left or (b.right == a.left and not both)
-            for a, b in itertools.pairwise(found)
-        )
-        return rising or falling
-
-    @property
-    def is_empty(self) -> Any:
-        """Whether each interval holds no point."""
-        import numpy
-
-        return numpy.array([value is not None and value.is_empty for value in self._values])
-
-    def contains(self, other: Any) -> Any:
-        """Whether each interval holds a point."""
-        import numpy
-
-        return numpy.array([value is not None and other in value for value in self._values])
-
-    def tolist(self) -> list[Any]:
-        """The intervals, NaN for a gap."""
-        return [float("nan") if value is None else value for value in self._values]
-
-    to_list = tolist
-
-    def __arrow_array__(self, type: Any = None) -> Any:
-        """The intervals as the Arrow array pandas exports for them."""
-        return interval_arrow(self._values, str(self._dtype))
-
-    def to_series(self, index: Any = None, name: Any = None) -> Any:
-        """The intervals as an interval column, labelled by themselves unless `index` says."""
-        from ._frame import Series
-
-        index = self if index is None else index
-        return Series(self, index=index, name=self.name if name is None else name)
-
-    def __len__(self) -> int:
-        return len(self._values)
-
-    def __iter__(self) -> Any:
-        return iter(self.tolist())
-
-    @property
-    def size(self) -> int:
-        """How many intervals there are."""
-        return len(self._values)
-
-    @property
-    def shape(self) -> tuple[int]:
-        """The length, as a tuple."""
-        return (len(self._values),)
-
-    def __getitem__(self, key: Any) -> Any:
-        if isinstance(key, slice):
-            return IntervalIndex(self._values[key], dtype=self._dtype, name=self.name)
-        found = self._values[key]
-        return float("nan") if found is None else found
-
-    def equals(self, other: Any) -> bool:
-        """Whether another index of intervals holds the same intervals in the same type."""
-        return (
-            isinstance(other, IntervalIndex)
-            and self._dtype == other._dtype
-            and self._values == other._values
-        )
-
-    def __repr__(self) -> str:
-        from ._config import get_option
-        from ._pandas import _pprinted, _summary
-
-        width = get_option("display.width") or 80
-        most = get_option("display.max_seq_items") or len(self._values)
-        body = _summary(self._values, _formatted, True, "IntervalIndex", width, most)
-        attrs = [f"dtype='{self._dtype}'"]
-        if self.name is not None:
-            attrs.append(f"name={_pprinted(self.name)}")
-        if len(self._values) > most:
-            attrs.append(f"length={len(self._values)}")
-        return f"IntervalIndex({body}{', '.join(attrs)})"
-
-
 def _plain(value: Any) -> Any:
     """A numpy number as the Python number it holds, and a numpy instant or span as ours."""
     name = type(value).__name__
@@ -790,6 +547,8 @@ def _moment_range(
         raise TypeError("start, end, freq need to be type compatible")
     if periods is not None:
         periods += 1
+    from ._interval_index import IntervalIndex
+
     build = timedelta_range if spans[0] else date_range
     breaks = build(start=start, end=end, periods=periods, freq=freq)
     return IntervalIndex.from_breaks(breaks, closed=closed, name=name)
@@ -850,7 +609,18 @@ def interval_range(
         elif end is None:
             end = start + (periods - 1) * freq
         breaks = numpy.linspace(start, end, periods)
+    from ._interval_index import IntervalIndex
+
     whole = all(isinstance(value, numbers.Integral) for value in given)
     if whole and _number(endpoint) and numpy.all(breaks == numpy.round(breaks)):
         breaks = breaks.astype("int64")
     return IntervalIndex.from_breaks(breaks, closed=closed, name=name)
+
+
+def __getattr__(name: str) -> Any:
+    # The index of intervals is an `Index`, whose module imports this one, so it is found late.
+    if name == "IntervalIndex":
+        from ._interval_index import IntervalIndex
+
+        return IntervalIndex
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

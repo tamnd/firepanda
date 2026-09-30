@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: an alias on a table function
 
 `FROM range(5) AS r(i)` names the relation and its column, so `r.i` and `i` both reach it, and `FROM range(3) r` names the relation while the column keeps the function's name, as in DuckDB. A column list longer than the columns the function produces is cut to them, since DuckDB drops the extra names of a table function rather than refusing them, and `unnest([4, 5]) u(x)` names its column the same way. Two aliased table functions join like any two tables.
+### Changed: IntervalIndex is an Index of interval labels
+
+`IntervalIndex` is now an `Index` whose labels are interval cells, so intervals work as row labels the way pandas' do. A series labelled by `interval_range` keeps an `IntervalIndex`, `loc` by an interval finds it and `loc` by a point finds the interval holding it, and slicing, sorting, uniques and appending stay interval indexes. `value_counts(bins=)` answers its counts under an `IntervalIndex` rather than a categorical index of intervals, `IntervalIndex([])` is of int64 ends, and `IntervalIndex.from_tuples` reads NaN as a gap.
 
 ### Fixed: Index classes show pandas' signatures
 
