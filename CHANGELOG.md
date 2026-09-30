@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: column reductions over flags beside numbers or text
+
+A sum or product down a frame that mixes flags with integers is int64, and one over flags alone is int64 rather than uint64, as pandas adds up flags as whole numbers. The largest or smallest value of columns whose answers share no type, such as a number beside a flag or a string, is an object answer holding each as it is, where it was refused before.
+
 ### Fixed: whole numbers kept when a Series covers every column of a MultiIndex
 
 A frame with MultiIndex columns times a Series of integers that has a label for every column now keeps int64, as pandas does. The check for whether the Series covers the columns compared tuples against the flattened column names, so it never matched and the answer was always widened to float64.

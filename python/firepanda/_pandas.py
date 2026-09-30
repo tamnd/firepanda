@@ -714,6 +714,39 @@ def _object_texts(column: Any) -> Any:
 
 _OBJECT_FOLDS = ("min", "max", "sum", "prod")
 
+
+def _flags_counted(frame: Any) -> Any:
+    """A frame with each boolean column without gaps read as int64, for a sum or product.
+
+    pandas adds up flags as whole numbers, so a sum over flags beside integers
+    is int64. The core answers a sum of flags as uint64, which beside an int64
+    answer widens the whole answer to float64.
+    """
+    names = _shown_names(frame)
+    if len(set(names)) != len(names):
+        return frame
+    wanted = {
+        name: "int64"
+        for name, kind in zip(names, frame._inner.dtypes(), strict=True)
+        if kind == "bool" and frame[name]._inner.null_count() == 0
+    }
+    return frame.astype(wanted) if wanted else frame
+
+
+def _folded_as_objects(frame: Any, kind: str, skipna: bool) -> Any:
+    """Each column's largest or smallest value in one object answer, as pandas holds them.
+
+    pandas finds the answer of each column on its own, and when the answers
+    share no type, such as a number beside a flag, it keeps them all as they
+    are in an object answer.
+    """
+    from ._frame import Series
+
+    names = _shown_names(frame)
+    width = len(names)
+    answers = [getattr(frame.iloc[:, at], kind)(skipna=skipna) for at in range(width)]
+    return Series(answers, index=frame.columns, dtype=object)
+
 # The reductions pandas refuses on text, because none of them has a meaning for words.
 _TEXT_REFUSED = ("mean", "prod", "median", "std", "var", "sem", "skew")
 
@@ -14489,7 +14522,15 @@ class DataFrameMixin(_Carries):
 
             totals = [read[name].sum(skipna=skipna, min_count=min_count) for name in names]
             return Series(totals, index=names, dtype=object)
-        return read._voided(read._per_column(kind, param), skipna, min_count)
+        if kind in ("sum", "prod"):
+            read = _flags_counted(read)
+        try:
+            answer = read._per_column(kind, param)
+        except DTypeError:
+            if kind not in ("max", "min"):
+                raise
+            return _folded_as_objects(read, kind, skipna)
+        return read._voided(answer, skipna, min_count)
 
     def _whole(self, kind: str, param: float, skipna: bool, numeric_only: bool) -> Any:
         """One reduction over every cell of the frame, which is `axis=None`.

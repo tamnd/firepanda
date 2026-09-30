@@ -147,15 +147,16 @@ def test_a_mix_of_numbers_reduces_to_float64_as_pandas_does(firepanda: ModuleTyp
     assert mine.tolist() == pytest.approx(theirs.tolist())
 
 
-def test_a_mix_with_nothing_in_common_says_so(firepanda: ModuleType) -> None:
+def test_a_mix_with_nothing_in_common_is_held_as_objects(firepanda: ModuleType) -> None:
     """Rather than picking text, which is what a widening to strings would do.
 
     pandas answers an object series here, holding a number and a string side by
-    side. There is no object column in Arrow, so the honest answer is a refusal
-    with the reason in it.
+    side, and so does firepanda.
     """
-    with pytest.raises(TypeError, match="nothing in common"):
-        firepanda.DataFrame({"a": [1, 2], "b": ["x", "y"]}).min()
+    import pandas as pd
+
+    data = {"a": [1, 2], "b": ["x", "y"]}
+    assert repr(firepanda.DataFrame(data).min()) == repr(pd.DataFrame(data).min())
 
 
 def test_an_empty_frame_reduces_to_an_empty_series(firepanda: ModuleType) -> None:
