@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: melt on columns of several levels, and col_level
+
+`melt` takes `col_level` to melt one level of columns by number or name, as pandas does, rather than refusing anything but 0. On columns of several levels each level gets its own column in the long frame, named for the level, numbered `variable_0` and on when the names do not tell the levels apart, or named by a list given as `var_name`. Before this the labels of every level were spread down one column.
+
 ### Added: every sort_index argument on the column labels
 
 `DataFrame.sort_index(axis=1)` takes `key`, `level`, `sort_remaining`, a direction for each level, `na_position` and `ignore_index`, as pandas does. The column labels sort a level at a time the way the row labels already did, so a `key` over the column labels is no longer refused.
