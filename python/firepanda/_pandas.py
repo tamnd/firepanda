@@ -216,15 +216,18 @@ def _read_as_timed(column: Any, dtype: str) -> Any:
     hand back the counts they are stored as, so the column goes through
     `to_datetime` or `to_timedelta` and then takes the unit. Each instant is
     parsed on its own, as pandas does here, rather than in the format the first
-    one sets. None for any other
-    dtype, or a column that already holds that kind.
+    one sets. A column that already holds that kind in the same zone only
+    takes the unit. None for any other dtype.
     """
     kind, _, rest = dtype.partition("[")
     if kind not in ("datetime64", "timedelta64") or not rest.endswith("]"):
         return None
-    if _word(column.dtype).startswith(kind):
-        return None
     unit, _, zone = rest[:-1].partition(",")
+    held = _word(column.dtype)
+    if held.startswith(kind):
+        if held.partition(",")[2].rstrip("]").strip() != zone.strip():
+            return None
+        return column if held == dtype else column.dt.as_unit(unit.strip())
     if kind == "timedelta64":
         read = to_timedelta(column)
     else:
@@ -897,7 +900,15 @@ def _values_of(inner: Any) -> list[Any]:
     """
     if _objects.is_object(inner):
         return _objects.spelled(_held_values(inner), _objects.gap_of(inner))
-    return _gapped(_held_values(inner), inner.dtype())
+    values = _held_values(inner)
+    if None in values and _written_category(inner):
+        # A gap among categories of instants, spans or periods is NaT in pandas.
+        from ._frame import Series
+
+        levels = _word(Series._wrap(inner).cat.categories.dtype)
+        if levels.startswith(("datetime64", "timedelta64", "period[")):
+            return [NaT if value is None else value for value in values]
+    return _gapped(values, inner.dtype())
 
 
 def _kept_values(column: Any) -> list[Any]:
@@ -8561,7 +8572,9 @@ def _written_category(inner: Any) -> bool:
 
 def _written_categories(printed: str) -> bool:
     """Whether a column of this type becomes a category of written values, spec 97."""
-    return _numeric_kind(printed) is not None or printed in ("bool", "interval")
+    return _numeric_kind(printed) is not None or printed.startswith(
+        ("bool", "interval", "datetime64", "timedelta64")
+    )
 
 
 def _interval_typed(inner: Any, kind: str) -> Any:
@@ -8603,6 +8616,10 @@ def _category_values(column: Any) -> Any:
     if kind.startswith("interval"):
         # A gap among intervals makes their ends floats, which the values decide.
         return Series(values, index=column.index, name=column.name)
+    if kind.startswith(("datetime", "timedelta")):
+        # Instants and spans take their type from the values, and then the unit.
+        made = Series(values, index=column.index, name=column.name)
+        return made if _word(made.dtype) == kind else made.dt.as_unit(_unit_of(kind))
     if None in values and kind.startswith("int"):
         kind = "float64"
     return Series(values, dtype=_plain_text(kind), index=column.index, name=column.name)
@@ -19651,7 +19668,7 @@ class SeriesMixin(_Carries):
                 _category_reduction(kind, self._inner.ordered())
                 answer = self._inner.codes().reduce(kind, param)
                 if kind in ("min", "max") and answer is not None:
-                    answer = self._inner.categories().to_list()[answer]
+                    answer = self.cat.categories.tolist()[answer]
             else:
                 answer = self._inner.reduce(kind, param)
         except (TypeError, NotImplementedError):
@@ -20112,7 +20129,7 @@ class SeriesMixin(_Carries):
             return _number_categories(self)
         if _objects.is_object(self._inner):
             return _from_objects(self, dtype, strictly)
-        if _written_category(self._inner) and _named_dtype(dtype) != "category":
+        if _written_category(self._inner) and str(dtype) != "category":
             return _category_values(self)._astype(dtype, copy, errors)
         if _decided_categories(dtype):
             return _as_decided(self._astype("category", copy, errors), dtype)
@@ -20285,6 +20302,14 @@ class Namespace:
         """Answers the accessor class off the class and an accessor off an instance."""
         if obj is None:
             return self._accessor
+        if (
+            self._accessor.__name__ == "DatetimeProperties"
+            and isinstance(obj, SeriesMixin)
+            and str(obj.dtype) == "category"
+            and _word(obj.cat.categories.dtype).startswith(("datetime64", "timedelta64"))
+        ):
+            # pandas reads the fields of instants held as categories off the instants.
+            return self._accessor(_category_values(obj))
         return self._accessor(obj)
 
 
@@ -34872,7 +34897,8 @@ def _text_values(
 
             levels = Series([*levels.tolist(), None]).iloc[:-1]
         shown = _text_values(levels, formatter, float_format, na_rep, decimal, leading)
-        word = "NaT" if _word(levels.dtype).startswith("period[") and na_rep == "NaN" else na_rep
+        timed = _word(levels.dtype).startswith(("period[", "datetime64", "timedelta64"))
+        word = "NaT" if timed and na_rep == "NaN" else na_rep
         gap = f" {word}" if leading else word
         return [shown[code] if code >= 0 else gap for code in codes]
     values = _held_values(column._inner)
@@ -35018,6 +35044,15 @@ def _text_labels(index: Any, named: bool, widest: int | None, between: int = 1) 
         if dtype == "object" and (held := _objects.gap_of(index._inner)) is not math.nan:
             gap = " " + str(held)
         texts = [gap if _missing(v) else " " + _text_plain(v) for v in index.tolist()]
+    elif dtype == "category" and _word(index.categories.dtype).startswith(
+        ("datetime64", "timedelta64")
+    ):
+        # Labels of instants or spans print as their categories do, midnights as dates.
+        shown = _text_values(index.categories, justify="left")
+        codes = [int(code) for code in index.codes]
+        texts = _text_fixed(
+            [shown[code] if code >= 0 else " NaT" for code in codes], "left", None, widest
+        )
     else:
         texts = _text_fixed(_text_values(index, justify="left"), "left", None, widest)
     if texts:
@@ -35569,6 +35604,11 @@ def _index_text(index: Any) -> str:
     shown = klass == "CategoricalIndex" or dtype == "object"
     values = index.tolist() if shown else _held_values(index._inner)
     present = [v for v in values if not _missing(v)]
+    timed_levels: list[str] = []
+    if klass == "CategoricalIndex" and _word(index.categories.dtype).startswith(
+        ("datetime64", "timedelta64")
+    ):
+        timed_levels = [t.strip() for t in _text_values(index.categories, justify="left")]
     if klass == "DatetimeIndex":
         from . import offsets
 
@@ -35597,6 +35637,13 @@ def _index_text(index: Any) -> str:
                 return "NaT"
             return f"'{v.days} days'" if days else f"'{v}'"
 
+    elif klass == "CategoricalIndex" and timed_levels:
+        # Instants or spans print as their own index prints them, quoted like text.
+        written = dict(zip(index.categories.tolist(), timed_levels, strict=True))
+
+        def formatter(v: Any) -> str:
+            return "NaT" if _missing(v) else f"'{written[v]}'"
+
     else:
         gap = "nan" if dtype.startswith(("float", "str", "category")) else "<NA>"
         if dtype == "object":
@@ -35607,13 +35654,15 @@ def _index_text(index: Any) -> str:
 
     width = get_option("display.width") or 80
     most = get_option("display.max_seq_items") or len(values)
-    text = dtype.startswith("str") or (
+    text = bool(timed_levels) or dtype.startswith("str") or (
         dtype == "object" and all(isinstance(v, str) for v in present)
     )
     summary = _summary(values, formatter, not text, klass, width, most)
     attrs = [f"dtype='{'str' if dtype == 'string' else dtype}'"]
     if klass == "CategoricalIndex":
-        levels = ", ".join(_pprinted(label) for label in index.categories.tolist())
+        levels = ", ".join(
+            timed_levels or [_pprinted(label) for label in index.categories.tolist()]
+        )
         attrs[:0] = [f"categories=[{levels}]", f"ordered={index.ordered}"]
     if index.name is not None:
         attrs.append(f"name={_pprinted(index.name)}")

@@ -346,17 +346,27 @@ class Categorical(FirepandaArray):
 
     def __repr__(self) -> str:
         values = self._column.tolist()
+        held = self.categories.tolist()
+        timed = _kind_of(self.categories).startswith(("datetime64", "timedelta64"))
+        names = [repr(label) for label in held]
+        if timed:
+            # Instants and spans print as their index does, midnights as dates, no quotes.
+            from ._pandas import _text_values
+
+            names = [text.strip() for text in _text_values(self.categories, justify="left")]
+            codes = [int(code) for code in self._column.cat.codes.tolist()]
+            values = [names[code] if code >= 0 else None for code in codes]
 
         def one(value: Any) -> str:
-            return "NaN" if value != value else repr(value)
+            if value is None or value != value:
+                return "NaT" if timed else "NaN"
+            return value if timed else repr(value)
 
         if len(values) > 10:
             shown = ", ".join([*map(one, values[:5]), "...", *map(one, values[-5:])])
         else:
             shown = ", ".join(map(one, values))
-        held = self.categories.tolist()
         link = " < " if self.ordered else ", "
-        names = [repr(label) for label in held]
         if len(names) > 10:
             names = [*names[:4], "...", *names[-4:]]
         levels = link.join(names)
