@@ -521,7 +521,11 @@ from firepanda.kernel.temporal import sql_field_named, trunc_unit_named
 from firepanda.kernel.unary import UnaryOp
 from firepanda.array.value import Value
 from firepanda.join.pairs import JoinKind
+from firepanda.frame.align import value_at
+from firepanda.frame.frame import DataFrame
 from firepanda.plan.bind import bind
+from firepanda.plan.lower import lower as lower_plan
+from firepanda.plan.optimize import optimize
 from firepanda.plan.cse import key_for
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions, agg_kind
 from firepanda.plan.node import (
@@ -529,6 +533,7 @@ from firepanda.plan.node import (
     SET_EXCEPT,
     SET_INTERSECT,
     SET_UNION,
+    SCAN_WORKING,
     NodeKind,
     Plan,
 )
@@ -5651,6 +5656,86 @@ def _unnest_from(
     return _From(at, schema^, origin^)
 
 
+def _pivot_values(
+    ast: Ast,
+    source: UInt32,
+    header: UInt32,
+    catalog: Catalog,
+    grammar: Grammar,
+    ctes: _Bindings,
+) raises -> List[Value]:
+    """The values a pivot column with no `IN` list pivots on.
+
+    Without the list, the columns a `PIVOT` makes depend on the data, so the
+    data is read before the plan has a shape. DuckDB does the same: it runs
+    `SELECT DISTINCT` over the column first and pivots on what comes back.
+    This lowers the source again into a plan of its own, groups it by the
+    column, runs that, and hands back the values that are not null in
+    ascending order, which is DuckDB's order too.
+
+    Args:
+        ast: The arenas.
+        source: The `PIVOT`'s source.
+        header: The pivot column's expression.
+        catalog: What the table names are resolved against.
+        grammar: A loaded grammar.
+        ctes: The CTE names in reach.
+
+    Returns:
+        The distinct values, nulls left out, smallest first.
+
+    Raises:
+        If the source or the column does not lower, or the query fails.
+    """
+    var probe = Plan()
+    var sources = List[Schema]()
+    var scope = _Scope()
+    var from_ = _source(
+        ast, source, catalog, grammar, probe, sources, scope, ctes
+    )
+    var walk = _Walk()
+    var key = _lower_expr(ast, header, probe, walk, scope, False)
+    # A physical group by hands its key through under the name it found it
+    # by, so the column is named in a projection under it rather than by the
+    # aggregate.
+    var at = probe.project(from_.at, [key], [String("__pivot")])
+    var keys = List[Int]()
+    keys.append(probe.exprs.column(String("__pivot")))
+    var names = List[String]()
+    names.append(String("__pivot"))
+    at = probe.aggregate(at, keys^, List[Int](), names^)
+    var by = List[Int]()
+    by.append(probe.exprs.column(String("__pivot")))
+    at = probe.sort(at, by^, [False], [True])
+    _ = bind(probe, at, sources)
+    var root = optimize(probe, at, sources)
+    var held = List[DataFrame]()
+    var stack = List[Int]()
+    stack.append(root)
+    while len(stack) > 0:
+        var node = stack.pop()
+        if probe.nodes[node].kind == NodeKind.SCAN:
+            var rel = probe.nodes[node].table
+            while len(held) <= rel:
+                held.append(DataFrame())
+            if probe.nodes[node].op == SCAN_WORKING:
+                continue
+            var found = catalog.find(probe.nodes[node].source)
+            if found < 0:
+                raise Error(catalog.missing(probe.nodes[node].source))
+            held[rel] = catalog.frame_at(found).copy()
+        for i in range(len(probe.nodes[node].inputs)):
+            stack.append(probe.nodes[node].inputs[i])
+    var pipe = lower_plan(probe, root, held^)
+    var out = pipe^.run()
+    var column = out.columns[0].copy().combine()
+    var found = List[Value]()
+    for i in range(len(column)):
+        if column.is_valid(i):
+            found.append(value_at(column, i))
+    return found^
+
+
 def _pivot(
     ast: Ast,
     statement: UInt32,
@@ -5677,8 +5762,9 @@ def _pivot(
     one there is has an alias, by that too: `2020_total`, or `2020_sum(x)`
     without the alias. Those are DuckDB's names.
 
-    A pivot column with no `IN`, or with an `IN` over an enum or a subquery,
-    needs the data read before the plan has a shape, and is refused.
+    A pivot column with no `IN` pivots on the values it holds, which are read
+    before the plan is built, by `_pivot_values`. An `IN` over an enum or a
+    subquery is refused.
 
     Args:
         ast: The arenas.
@@ -5720,18 +5806,21 @@ def _pivot(
     for c in range(len(on)):
         var column = ast.stmts[Int(on[c])]
         var listed = ast.items(column.children)
-        if len(listed) == 0:
-            raise Error(
-                "firepanda lowers a PIVOT whose every ON column lists its"
-                " values with IN (...) so far, since without the list the"
-                " columns it makes are not known until the data is read"
-            )
         var header = _lower_expr(ast, column.a, plan, walk, scope, False)
         for name in plan.exprs.names(header):
             read.append(fold(name))
         headers.append(header)
         var these = List[Int]()
         var called = List[String]()
+        if len(listed) == 0:
+            for value in _pivot_values(
+                ast, node.a, column.a, catalog, grammar, ctes
+            ):
+                called.append(String(value))
+                these.append(plan.exprs.literal(value.copy()))
+            values.append(these^)
+            labels.append(called^)
+            continue
         for i in range(len(listed)):
             var item = ast.stmts[Int(listed[i])]
             var value = _lower_operand(ast, item.a, plan, walk, scope, False)
@@ -5753,7 +5842,13 @@ def _pivot(
     var cells = List[Int]()
     var cell_names = List[String]()
     var picks = List[Int](length=len(on), fill=0)
-    while True:
+    # A column read from data that holds no value makes no cells at all, and
+    # DuckDB answers with the groups alone.
+    var cells_left = True
+    for c in range(len(on)):
+        if len(values[c]) == 0:
+            cells_left = False
+    while cells_left:
         var when = -1
         var label = String()
         for c in range(len(on)):
