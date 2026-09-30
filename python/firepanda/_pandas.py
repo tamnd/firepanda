@@ -3216,6 +3216,49 @@ def _skewness_in_numpy_order(column: Any) -> float | None:
     return float(values.dtype.type(answer))
 
 
+_NUMPY_ORDER = ("var", "std", "sem", "skew")
+"""The reductions a series answers in pandas' own order of adding when numpy is there."""
+
+
+def _spread_in_numpy_order(column: Any, kind: str, ddof: float) -> float | None:
+    """pandas' `nanvar`, `nanstd` or `nansem` of a column of numbers in numpy, or None without it.
+
+    The squared distances are taken from the mean as numpy sums it and are not
+    corrected for that mean being slightly off, which is pandas' answer. Near
+    two to the fifty two that is 37.25 where exact arithmetic gives 37.2, and
+    agreeing with pandas is the point. Whole numbers are cast to float64 first.
+
+    Args:
+        column: A series of numbers, whose gaps are skipped.
+        kind: `var`, `std` or `sem`.
+        ddof: The degrees of freedom taken out of the count.
+
+    Returns:
+        The answer, NaN when the count is not above `ddof`, or None without numpy.
+    """
+    try:
+        import numpy
+    except ImportError:
+        return None
+    if _word(column.dtype) not in _FLOATING:
+        column = column.astype("float64")
+    values = numpy.array(column.to_numpy(), copy=True)
+    mask = numpy.isnan(values)
+    count = values.size - int(mask.sum())
+    if count <= ddof:
+        return math.nan
+    numpy.putmask(values, mask, 0)
+    mean = values.sum(dtype=numpy.float64) / count
+    squared = (mean - values) ** 2
+    numpy.putmask(squared, mask, 0)
+    answer = values.dtype.type(squared.sum(dtype=numpy.float64) / (count - ddof))
+    if kind == "std":
+        answer = numpy.sqrt(answer)
+    elif kind == "sem":
+        answer = numpy.sqrt(answer) / numpy.sqrt(values.dtype.type(count))
+    return float(answer)
+
+
 def _percentiles_asked(percentiles: Any) -> list[float]:
     """The percentiles `describe` reports, checked and sorted the way pandas does.
 
@@ -17349,8 +17392,14 @@ class SeriesMixin(_Carries):
             " already does, and it says so with the dtype in the message",
         )
         category = self.dtype == "category"
-        if kind == "skew" and _word(self.dtype) in _SIGNED | _UNSIGNED | _FLOATING:
-            answer = None if not skipna and self.hasnans else _skewness_in_numpy_order(self)
+        if kind in _NUMPY_ORDER and _word(self.dtype) in _SIGNED | _UNSIGNED | _FLOATING:
+            if not skipna and self.hasnans:
+                return math.nan
+            answer = (
+                _skewness_in_numpy_order(self)
+                if kind == "skew"
+                else _spread_in_numpy_order(self, kind, param)
+            )
             if answer is not None:
                 return answer
         try:
