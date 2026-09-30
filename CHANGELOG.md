@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: an IntervalIndex goes to Arrow as pandas sends it
+
+An `IntervalIndex`, and a `MultiIndex` level of intervals, now go to Arrow as the `pandas.interval` extension array pandas exports, where they used to go as text. A gap in a level of intervals prints as NaN.
+
 ### Added: bins on a group by's value_counts, and intervals as row labels
 
 `SeriesGroupBy.value_counts` now takes `bins`, where it used to refuse it. A number of bins cuts each group's values on their own and a list of edges cuts every group alike, each group listing every bin, the empty ones too, as pandas does. To label those rows a `MultiIndex` now holds intervals of numbers on a level, and `Index` of a list of intervals answers an `IntervalIndex`, as in pandas.

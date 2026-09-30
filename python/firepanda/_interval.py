@@ -619,6 +619,10 @@ class IntervalIndex:
 
     to_list = tolist
 
+    def __arrow_array__(self, type: Any = None) -> Any:
+        """The intervals as the Arrow array pandas exports for them."""
+        return interval_arrow(self._values, str(self._dtype))
+
     def to_series(self, index: Any = None, name: Any = None) -> Any:
         """The intervals as an interval column."""
         from ._frame import Series

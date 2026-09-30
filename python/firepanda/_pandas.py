@@ -34653,7 +34653,8 @@ def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> l
         if spans:
             # A level of intervals is written as pandas writes each interval.
             heading = [] if not named else ["" if values.name is None else str(values.name)]
-            texts = heading + ["NaN" if v is None else str(v) for v in values.tolist()]
+            spelled = [str(v) if isinstance(v, _interval.Interval) else "NaN" for v in values]
+            texts = heading + spelled
         else:
             texts = _text_labels(values, named, widest)
         if not spans and -1 in codes[number] and all(type(value) is int for value in level):

@@ -57,3 +57,12 @@ def test_an_interval_label_reads_back_as_it_was(firepanda: Any) -> None:
     labels = [("a", firepanda.Interval(0.5, 2.0)), ("b", firepanda.Interval(1, 3, closed="left"))]
     index = firepanda.MultiIndex.from_tuples(labels)
     assert list(index) == labels
+
+
+def test_an_index_of_intervals_goes_to_arrow_as_pandas_sends_it(firepanda: Any) -> None:
+    import pyarrow as pa
+
+    mine = pa.array(firepanda.Index([firepanda.Interval(0.0, 1.0), None]))
+    theirs = pa.array(pd.Index([pd.Interval(0.0, 1.0), None]))
+    assert mine.type == theirs.type
+    assert mine.to_pylist() == theirs.to_pylist()
