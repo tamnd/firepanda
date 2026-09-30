@@ -75,10 +75,12 @@ def test_a_mask_keeps_the_rows_the_condition_says_are_false(firepanda):
 
 
 def test_no_other_side_leaves_those_rows_holding_nothing(firepanda):
-    """And holding nothing in int64, which is the whole argument of the slice."""
+    """And widened to float64, which is where pandas keeps a gap in whole numbers."""
     answered = firepanda.Series([1, 2, 3, 4]).where([True, False, True, False])
-    assert answered.tolist() == [1, nan, 3, nan]
-    assert answered.dtype == "int64"
+    assert str(answered.tolist()) == "[1.0, nan, 3.0, nan]"
+    assert answered.dtype == "float64"
+    kept = firepanda.Series([1, 2], dtype="Int64").where([True, False])
+    assert kept.dtype == "Int64"
 
 
 def test_a_row_the_condition_says_nothing_about_is_not_kept(firepanda):
@@ -294,7 +296,7 @@ def test_one_column_read_across_them_is_a_value_for_each(firepanda):
 def test_a_frame_as_the_other_side_lines_up_on_both_axes(firepanda):
     given = firepanda.DataFrame({"a": [0, 0, 0]})
     answered = frame(firepanda).where(flags(firepanda), given)
-    assert cells(answered) == {"a": [1, 0, 3], "b": [nan, 5, nan]}
+    assert str(cells(answered)) == str({"a": [1, 0, 3], "b": [nan, 5.0, nan]})
 
 
 def test_a_mapping_is_one_object_rather_than_a_value_per_column(firepanda):

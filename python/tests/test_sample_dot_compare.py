@@ -45,6 +45,7 @@ def shown(answer: Any) -> Any:
 
 
 BUILDS: list[Callable[[Any], Any]] = [
+    lambda m: m.Series([True, False]).compare(m.Series([True, True])),
     lambda m: m.Series([1, 2, 3, 4, 5]).sample(3, random_state=1),
     lambda m: m.Series([1, 2, 3, 4, 5]).sample(frac=0.4, random_state=7, ignore_index=True),
     lambda m: m.Series([1, 2, 3]).sample(5, replace=True, random_state=2),
@@ -136,7 +137,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     "build",
     [
         lambda m: m.Series([1, 2]).case_when([(lambda s: s > 1, "x")]),
-        lambda m: m.Series([True, False]).compare(m.Series([True, True])),
         lambda m: m.Series([1, 2]).compare(m.Series([1, 3]), align_axis=0),
     ],
 )
