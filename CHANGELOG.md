@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: categories of instants and spans
+
+`astype("category")` of a datetime or timedelta column keeps the categories as instants or spans, as pandas does, rather than refusing. A gap reads as NaT, the values and a `CategoricalIndex` print as their own index prints them, the column casts back, counts, groups, compares and takes its ordered minimum as the value, and `.dt` reads the fields off the values. A series built with a datetime dtype from instants already of that kind now takes the unit.
+
 ### Added: DataFrame.join with a list of frames
 
 `DataFrame.join` takes a list of frames and series the way pandas does. When every one labels its rows once they are laid side by side, in the order of this frame for a left join, of the last one for a right join and sorted for an outer one. When a label repeats they are merged one after another. `on` and suffixes are refused with pandas' messages.
