@@ -786,14 +786,17 @@ class MultiIndex:
         na_position: str = "last",
         key: Callable[..., Any] | None = None,
     ) -> Any:
-        """The rows sorted, with the positions they came from when asked."""
-        if key is not None:
-            raise NotImplementedError(
-                "key= is not supported yet on a MultiIndex, because it would call the key on"
-                " every level as a column"
-            )
+        """The rows sorted, with the positions they came from when asked.
+
+        A `key` is called on the values of each level, and the rows are sorted by
+        what it answers.
+        """
         levels = list(range(self.nlevels))
-        rows = self._order(levels, [bool(ascending)] * len(levels), na_position == "first")
+        sorting = self
+        if key is not None:
+            mapped = [key(self.get_level_values(at)) for at in levels]
+            sorting = MultiIndex.from_arrays(mapped)
+        rows = sorting._order(levels, [bool(ascending)] * len(levels), na_position == "first")
         ordered = self._taken(rows)
         return (ordered, _array(rows, "int64")) if return_indexer else ordered
 
@@ -1077,9 +1080,7 @@ class MultiIndex:
             KeyError: When no row holds the value.
         """
         if isinstance(level, (list, tuple)):
-            raise NotImplementedError(
-                "get_loc_level over several levels is not supported yet; look up one level"
-            )
+            return self._loc_levels(key, level, drop_level)
         number = self._level_number(level)
         if number == 0:
             found = self.get_loc(key)
@@ -1099,6 +1100,29 @@ class MultiIndex:
             if len(gone) < self.nlevels:
                 picked = picked.droplevel(gone)
         return found, picked
+
+    def _loc_levels(self, key: Any, levels: Any, drop_level: bool) -> Any:
+        """The rows holding a value of each of several levels, and the index they make.
+
+        The levels looked up are dropped from that index, unless that would
+        leave none, as in pandas.
+
+        Raises:
+            KeyError: When no row holds one of the values.
+            ValueError: For a key of another length than the levels.
+        """
+        if len(key) != len(levels):
+            raise InvalidArgumentError("Key for location must have same length as number of levels")
+        mask = [True] * len(self)
+        for level, value in zip(levels, key, strict=True):
+            found, _ = self.get_loc_level(value, level=level, drop_level=False)
+            chosen = set(_rows_of(found, len(self)))
+            mask = [keep and at in chosen for at, keep in enumerate(mask)]
+        picked = self._taken([at for at, keep in enumerate(mask) if keep])
+        numbers = sorted({self._level_number(level) for level in levels})
+        if drop_level and len(numbers) < self.nlevels:
+            picked = picked.droplevel(numbers)
+        return _array(mask, "bool"), picked
 
     def _target_keys(self, target: Any) -> list[tuple[int, ...] | None]:
         """Every row of a target as codes into this index, None for one that cannot match."""
@@ -1122,15 +1146,52 @@ class MultiIndex:
         """
         from .errors import InvalidIndexError
 
-        if method is not None or limit is not None or tolerance is not None:
+        if tolerance is not None:
+            raise NotImplementedError("tolerance not implemented yet for MultiIndex")
+        if method == "nearest":
             raise NotImplementedError(
-                "method=, limit= and tolerance= are not supported yet on a MultiIndex, because"
-                " they need an ordering of the rows to fill along"
+                "method='nearest' not implemented yet for MultiIndex; see GitHub issue 9365"
+            )
+        if limit is not None:
+            raise NotImplementedError(
+                "limit= is not supported yet on a MultiIndex, because it counts the rows"
+                " filled across"
             )
         if not self.is_unique:
             raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
+        if method in ("ffill", "pad", "bfill", "backfill"):
+            return self._filled_indexer(target, method in ("bfill", "backfill"))
+        if method is not None:
+            raise InvalidArgumentError(
+                f"Invalid fill method. Expecting pad (ffill), backfill (bfill) or nearest."
+                f" Got {method}"
+            )
         where = {each: at for at, each in enumerate(self._keys())}
         found = [-1 if each is None else where.get(each, -1) for each in self._target_keys(target)]
+        return _array(found, "int64")
+
+    def _filled_indexer(self, target: Any, backward: bool) -> Any:
+        """Where every target row is, or the row before or after it in sorted order.
+
+        Raises:
+            ValueError: For rows in no order, in pandas' words.
+            NotImplementedError: For rows in descending order.
+        """
+        if not self.is_monotonic_increasing:
+            if self.is_monotonic_decreasing:
+                raise NotImplementedError(
+                    "filling along a MultiIndex in descending order is not supported yet"
+                )
+            raise InvalidArgumentError("index must be monotonic increasing or decreasing")
+        rows = self.tolist()
+        wanted = target.tolist() if isinstance(target, MultiIndex) else _list(target)
+        found = []
+        for row in wanted:
+            if backward:
+                at = bisect.bisect_left(rows, row)
+                found.append(at if at < len(rows) else -1)
+            else:
+                found.append(bisect.bisect_right(rows, row) - 1)
         return _array(found, "int64")
 
     def get_indexer_for(self, target: Any) -> Any:
@@ -1416,9 +1477,19 @@ class MultiIndex:
         limit: Any = None,
         tolerance: Any = None,
     ) -> tuple[Any, Any]:
-        """The target as an index, and where each of its rows is in this one."""
+        """The target as an index, and where each of its rows is in this one.
+
+        With `level=` the target holds values of that level, and the answer is
+        every row holding each of them in turn, as in pandas.
+        """
         if level is not None:
-            raise NotImplementedError("level= is not supported yet on a MultiIndex reindex")
+            number = self._level_number(level)
+            rows = []
+            for value in _list(target):
+                code = self._code_of(number, value)
+                if code is not None:
+                    rows += [at for at, c in enumerate(self._codes[number]) if c == code]
+            return self._taken(rows), _array(rows, "int64")
         wanted = self._other(target)
         wanted = wanted.set_names(self._names) if wanted._names == [None] * self.nlevels else wanted
         if wanted.equals(self):
@@ -1485,17 +1556,13 @@ class MultiIndex:
     def to_frame(
         self, index: bool = True, name: Any = NO_DEFAULT, allow_duplicates: bool = False
     ) -> DataFrame:
-        """A frame with one column per level.
+        """A frame with one column per level, its rows labelled by this index by default.
 
         Raises:
             ValueError: For names that do not fit the levels or repeat.
-            NotImplementedError: For index=True, which labels the rows with this index.
         """
         if index:
-            raise NotImplementedError(
-                "to_frame(index=True) is not supported yet, because it labels the rows of a"
-                " frame with a MultiIndex; pass index=False"
-            )
+            return self.to_frame(False, name, allow_duplicates).set_axis(self)
         if name is NO_DEFAULT:
             labels = [n if n is not None else at for at, n in enumerate(self._names)]
         else:
@@ -1530,11 +1597,16 @@ class MultiIndex:
         bins: Any = None,
         dropna: bool = True,
     ) -> Series:
-        """Refused, since the answer is a column labelled by a MultiIndex."""
-        raise NotImplementedError(
-            "value_counts on a MultiIndex is not supported yet, because the answer is a column"
-            " labelled by a MultiIndex"
-        )
+        """How often each row is there, labelled by the rows.
+
+        Raises:
+            NotImplementedError: For `bins`, which pandas cannot cut rows of tuples into.
+        """
+        if bins is not None:
+            raise NotImplementedError("bins= cannot cut the rows of a MultiIndex")
+        frame = self.to_frame(index=False, name=list(range(self.nlevels)))
+        out = frame.value_counts(normalize=normalize, sort=sort, ascending=ascending, dropna=dropna)
+        return out.rename_axis(list(self._names))
 
     # Reductions and arithmetic, which a row of tuples mostly does not have.
 
