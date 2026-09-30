@@ -455,12 +455,15 @@ def test_text_is_read_every_row_with_its_own_format(firepanda: ModuleType) -> No
         {"copy": True},
     ],
 )
-def test_the_arguments_with_no_implementation_behind_them_are_refused_by_name(
+def test_the_clock_type_and_copy_arguments_are_pandas(
     firepanda: ModuleType, kwargs: dict[str, Any]
 ) -> None:
-    """A declared argument that is not honoured says so rather than being ignored."""
-    with pytest.raises(NotImplementedError):
-        firepanda.DatetimeIndex(STAMPS, **kwargs)
+    """A clock, an ambiguity rule, a type and a copy flag answer what pandas answers."""
+    import pandas as pd
+
+    assert repr(firepanda.DatetimeIndex(STAMPS, **kwargs)) == repr(
+        pd.DatetimeIndex(STAMPS, **kwargs)
+    )
 
 
 @needs_pandas

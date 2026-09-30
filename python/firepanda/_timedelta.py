@@ -26,6 +26,7 @@ resolves.
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any
 
 from ._date_range import _UNITS, _frequency, _points
@@ -77,24 +78,22 @@ class TimedeltaIndex(HeldFreq, Index):
             freq: The frequency the index holds. Left out it comes along from
                 another `TimedeltaIndex`, `infer` takes the one the labels keep,
                 and anything else has to be one they keep.
-            dtype: Refused. The unit comes off the values and `as_unit` changes it.
-            copy: Refused. There is one behaviour and it always copies.
+            dtype: The type of the labels, `timedelta64[unit]`.
+            copy: Read and ignored. The labels are always a copy.
             name: The level name, or the name the data carries.
 
         Raises:
             TypeError: If nothing was passed, in pandas' words.
-            NotImplementedError: If any of the refused arguments was passed.
+            ValueError: For a type that is not one of spans, in pandas' words.
         """
+        unit = None
         if dtype is not None:
-            raise NotImplementedError(
-                "dtype= is not supported yet, because the unit is read off the values and"
-                " as_unit is how it is changed afterwards"
-            )
-        if copy is not None:
-            raise NotImplementedError(
-                "copy= is not supported yet, because there is exactly one behaviour and it"
-                " always copies"
-            )
+            found = re.fullmatch(r"timedelta64\[(s|ms|us|ns)\]", str(dtype))
+            if found is None:
+                raise InvalidArgumentError(
+                    f"dtype '{dtype}' is invalid, should be np.timedelta64 dtype"
+                )
+            unit = found.group(1)
         if data is None:
             raise TypeError(
                 "TimedeltaIndex(...) must be called with a collection of some kind, None was passed"
@@ -106,12 +105,18 @@ class TimedeltaIndex(HeldFreq, Index):
             except Exception as error:
                 raise translate(error) from None
             _hold(self, freq, data)
+            if unit is not None and unit != self.unit:
+                self._inner = self.as_unit(unit)._inner
             return
         values: Any = _held_values(data._inner) if isinstance(data, Index) else data
         if not isinstance(values, Series):
+            # pandas counts spans read out of nothing in seconds.
+            unit = unit or ("s" if hasattr(values, "__len__") and not len(values) else None)
             values = Series(values)
         if not _is_span(values.dtype):
             values = to_timedelta(values)
+        if unit is not None:
+            values = values.dt.as_unit(unit)
         try:
             self._inner = values._inner.to_index(label)
         except Exception as error:
