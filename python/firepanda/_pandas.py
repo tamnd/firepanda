@@ -14077,7 +14077,14 @@ class DataFrameMixin(_Carries):
         if isinstance(other, Series) and other.name is None:
             raise InvalidArgumentError("Other Series must have a name")
         if how == "cross":
-            raise UnsupportedError("join(how='cross') is not written yet")
+            if on is not None:
+                raise MergeError(
+                    "Can not pass on, right_on, left_on or set right_index=True or"
+                    " left_index=True"
+                )
+            return merge(
+                self, other, "cross", sort=sort, suffixes=(lsuffix, rsuffix), validate=validate
+            )
         return merge(
             self,
             other,
@@ -27472,12 +27479,40 @@ def _merge_validated(
             f'"{validate}" is not a valid argument. Valid arguments are:\n{words}'
         )
     kind, left_unique, right_unique = MERGE_VALIDATE[validate]
-    for side, frame, names, unique in (
-        ("left", left, lefts, left_unique),
-        ("right", right, rights, right_unique),
-    ):
-        if unique and bool(frame.duplicated(subset=names).any()):
-            raise MergeError(f"Merge keys are not unique in {side} dataset; not a {kind} merge")
+    left_twice = left_unique and bool(left.duplicated(subset=lefts).any())
+    right_twice = right_unique and bool(right.duplicated(subset=rights).any())
+    if left_twice and right_twice:
+        raise MergeError(
+            "Merge keys are not unique in either left or right dataset; not a one-to-one merge."
+            + _merge_repeats("left", left, lefts)
+            + _merge_repeats("right", right, rights)
+        )
+    if left_twice:
+        raise MergeError(
+            f"Merge keys are not unique in left dataset; not a {kind} merge"
+            + _merge_repeats("left", left, lefts)
+        )
+    if right_twice:
+        # pandas leaves an empty line before the listing in this one message.
+        gap = "\n" if kind == "many-to-one" else ""
+        raise MergeError(
+            f"Merge keys are not unique in right dataset; not a {kind} merge{gap}"
+            + _merge_repeats("right", right, rights)
+        )
+
+
+def _merge_repeats(side: str, frame: DataFrame, names: list[str]) -> str:
+    """The tail of a `validate` complaint, which lists up to five repeated keys as pandas does.
+
+    pandas writes the repeats as a frame of the key columns without its row labels, after
+    a line naming the side and before an ellipsis.
+    """
+    from ._frame import DataFrame
+
+    repeated = frame.duplicated(subset=names)
+    keys = DataFrame._wrap(frame._inner.select(names))
+    listed = keys[repeated].head(5).to_string(index=False)
+    return f"\nDuplicates in {side}:\n {listed} ..."
 
 
 def _merge_suffixed(
@@ -27655,8 +27690,14 @@ def merge(
     from ._frame import DataFrame
 
     left, right = _merge_side(left), _merge_side(right)
+    if how == "cross":
+        return _crossed(left, right, on, left_on, right_on, left_index, right_index, suffixes,
+                        indicator, validate, sort)
+    if how in ("left_anti", "right_anti"):
+        return _anti(left, right, how, on, left_on, right_on, left_index, right_index, sort,
+                     suffixes, indicator, validate)
     if how not in MERGE_HOWS:
-        if how in ("left_anti", "right_anti", "cross", "asof"):
+        if how == "asof":
             raise UnsupportedError(f"merge(how={how!r}) is not written yet")
         raise InvalidArgumentError(
             f"'{how}' is not a valid Merge type: left, right, inner, outer, left_anti,"
@@ -27690,6 +27731,89 @@ def merge(
     if any(out.null_counts()):
         out = _merge_widened(out)
     return DataFrame._wrap(out)
+
+
+def _crossed(
+    left: DataFrame,
+    right: DataFrame,
+    on: Any,
+    left_on: Any,
+    right_on: Any,
+    left_index: Any,
+    right_index: Any,
+    suffixes: Any,
+    indicator: Any,
+    validate: Any,
+    sort: Any,
+) -> DataFrame:
+    """Every left row beside every right row, in left order and right order within it.
+
+    pandas joins the two on a constant column it adds to both and then drops, which is
+    what this does, so the suffixes, the indicator and `validate` behave as they do there.
+
+    Raises:
+        MergeError: For a key of any kind, since a cross join has none.
+    """
+    if on is not None or left_on is not None or right_on is not None or left_index or right_index:
+        raise MergeError(
+            "Can not pass on, right_on, left_on or set right_index=True or left_index=True"
+        )
+    key = "_cross"
+    names = {str(name) for name in [*left.columns, *right.columns]}
+    while key in names:
+        key += "_"
+    out = merge(
+        left.assign(**{key: 1}),
+        right.assign(**{key: 1}),
+        "inner",
+        on=key,
+        sort=sort,
+        suffixes=suffixes,
+        indicator=indicator,
+        validate=validate,
+    )
+    return out.drop(columns=[key])
+
+
+def _anti(
+    left: DataFrame,
+    right: DataFrame,
+    how: str,
+    on: Any,
+    left_on: Any,
+    right_on: Any,
+    left_index: Any,
+    right_index: Any,
+    sort: Any,
+    suffixes: Any,
+    indicator: Any,
+    validate: Any,
+) -> DataFrame:
+    """The rows of one side that found no partner on the other, pandas' two anti joins.
+
+    They are the rows of the outer side's join that only that side had, labelled as that
+    join labels them, and the other side's columns are there and empty, as in pandas.
+    """
+    side = "left" if how == "left_anti" else "right"
+    named = indicator if isinstance(indicator, str) and indicator else "_merge"
+    marked = merge(
+        left,
+        right,
+        side,
+        on=on,
+        left_on=left_on,
+        right_on=right_on,
+        left_index=left_index,
+        right_index=right_index,
+        sort=sort,
+        suffixes=suffixes,
+        indicator=named,
+        validate=validate,
+    )
+    out = marked[marked[named] == f"{side}_only"]
+    if not indicator:
+        out = out.drop(columns=[named])
+    return out
 
 
 def _merge_widened(out: Any) -> Any:
