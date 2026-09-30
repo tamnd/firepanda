@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: value_counts bins and set_index verify_integrity
+
+`Series.value_counts(bins=...)` counts the values in equal-width or given bins, as pandas does, with the bins as an unnamed interval index. `set_index(verify_integrity=True)` checks that the new row labels are each seen once and refuses a repeated one with pandas' message.
+
+### Fixed: a frame of repeated column labels is refused
+
+`DataFrame([[1, 2]], columns=["x", "x"])` used to keep one column and drop the other without a word. It now raises NotImplementedError, since a firepanda frame names each column once.
+
 ### Added: rank, shift, diff, pct_change and fills across the rows of a frame
 
 `rank`, `ffill`, `bfill` and `interpolate` take `axis=1`, worked out down the frame turned on its side as pandas does. `shift(axis=1)` moves whole columns along, each keeping its type, and `diff` and `pct_change` along `axis=1` are the frame against those shifted columns. `pct_change(axis=1)` used to answer down the columns without a word, and now answers across the rows.

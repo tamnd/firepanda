@@ -176,8 +176,6 @@ def test_more_than_one_key_labels_the_rows_by_both(firepanda: ModuleType) -> Non
 @needs_pandas
 def test_the_arguments_that_are_not_implemented_say_so(firepanda: ModuleType) -> None:
     """Each one by name, rather than as an unexpected keyword."""
-    with pytest.raises(NotImplementedError, match="verify_integrity"):
-        made(firepanda).set_index("k", verify_integrity=True)
     with pytest.raises(NotImplementedError, match="level"):
         made(firepanda).reset_index(level=0)
     with pytest.raises(NotImplementedError, match="allow_duplicates"):
@@ -241,3 +239,18 @@ def test_isin_is_not_bothered_by_a_value_it_could_never_hold(firepanda: ModuleTy
     mine = firepanda.Index([10, 20])
     them = pd.Index([10, 20])
     assert mine.isin(["a", 20]) == list(them.isin(["a", 20]))
+
+
+def test_verify_integrity_checks_the_new_labels(firepanda: ModuleType) -> None:
+    """Labels each seen once are kept, and a repeated one is refused in pandas' words."""
+    frame = firepanda.DataFrame({"k": [1, 2, 3], "v": [4, 5, 6]})
+    assert frame.set_index("k", verify_integrity=True).index.tolist() == [1, 2, 3]
+    repeated = firepanda.DataFrame({"k": [1, 1, 3], "v": [4, 5, 6]})
+    with pytest.raises(ValueError, match="Index has duplicate keys"):
+        repeated.set_index("k", verify_integrity=True)
+
+
+def test_a_frame_of_repeated_column_labels_is_refused(firepanda: ModuleType) -> None:
+    """Rather than keeping one of the columns and dropping the other."""
+    with pytest.raises(NotImplementedError, match="column labels repeat"):
+        firepanda.DataFrame([[1, 2]], columns=["x", "x"])
