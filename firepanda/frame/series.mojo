@@ -1069,17 +1069,18 @@ struct Series(Copyable, Movable, Sized, Writable):
         everything else, and this is the pandas answer.
 
         Returns:
-            An int64 series of the same height, null wherever this one is null.
+            An int64 series of the same height, or float64 with a NaN in each
+            row that is null here, as `_counted` explains.
 
         Raises:
             Error: If the series is not text.
         """
         if self.values.is_coded():
-            return self._through(self._distinct().chars_length())
+            return self._through(self._distinct().chars_length())._counted()
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_character_length(self.values.strings())),
-        )
+        )._counted()
 
     def chars_slice(
         self, start: Optional[Int], stop: Optional[Int], step: Int
@@ -1152,7 +1153,8 @@ struct Series(Copyable, Movable, Sized, Writable):
 
         Returns:
             An int64 series holding the character position, or -1 where the
-            substring is not there, and null wherever this one is null.
+            substring is not there, and float64 with a NaN in each row that is
+            null here, as `_counted` explains.
 
         Raises:
             Error: If the series is not text.
@@ -1160,7 +1162,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         if self.values.is_coded():
             return self._through(
                 self._distinct().chars_find(sub, start, stop, from_end)
-            )
+            )._counted()
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1168,7 +1170,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                     self.values.strings(), sub.as_bytes(), start, stop, from_end
                 )
             ),
-        )
+        )._counted()
 
     def chars_slice_replace(
         self, start: Optional[Int], stop: Optional[Int], repl: StringSlice
@@ -1802,17 +1804,18 @@ struct Series(Copyable, Movable, Sized, Writable):
             pattern: The substring to count.
 
         Returns:
-            An int64 series of the same height, null wherever this one is null.
+            An int64 series of the same height, or float64 with a NaN in each
+            row that is null here, as `_counted` explains.
 
         Raises:
             Error: If the series is not text.
         """
         if self.values.is_coded():
-            return self._through(self._distinct().chars_count(pattern))
+            return self._through(self._distinct().chars_count(pattern))._counted()
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_count(self.values.strings(), pattern.as_bytes())),
-        )
+        )._counted()
 
     def chars_replace(
         self, pattern: StringSlice, repl: StringSlice, limit: Int
@@ -1905,17 +1908,20 @@ struct Series(Copyable, Movable, Sized, Writable):
                 it, and compiled with captures when that engine is Python's.
 
         Returns:
-            An int64 series of the same height, null wherever this one is null.
+            An int64 series of the same height, or float64 with a NaN in each
+            row that is null here, as `_counted` explains.
 
         Raises:
             Error: If the series is not text.
         """
         if self.values.is_coded():
-            return self._through(self._distinct().chars_count_regex(program))
+            return self._through(
+                self._distinct().chars_count_regex(program)
+            )._counted()
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_count_regex(self.values.strings(), program)),
-        )
+        )._counted()
 
     def chars_replace_regex(
         self, program: Program, rewrite: Rewrite, limit: Int = -1
@@ -3364,6 +3370,29 @@ struct Series(Copyable, Movable, Sized, Writable):
             The same values and labels, one value a row.
         """
         return self._relabelled(self.name.copy(), self.values.decoded())
+
+    def _counted(self) raises -> Self:
+        """Spells a count over text the way pandas does when a row is missing.
+
+        A length, a position or a count is an int64 in pandas while every row
+        has one, and float64 with NaN in the missing rows as soon as one does
+        not, because its text methods answer through numpy and numpy has no
+        missing integer. So a count with no gap stays int64 and one with a gap
+        becomes float64, and the values that are there are small enough to
+        survive the float exactly.
+
+        Returns:
+            This series, or the same rows as float64 with a NaN in every null.
+
+        Raises:
+            Error: Only what the cast raises.
+        """
+        if self.values.null_count() == 0 or self.values.type.is_float():
+            return self.copy()
+        return self._relabelled(
+            self.name.copy(),
+            nan_over_nulls(cast_any(self.values, DType.float64)),
+        )
 
     def _relabelled(
         self, var name: Optional[String], var values: AnyArray

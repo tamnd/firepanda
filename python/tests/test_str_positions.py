@@ -91,22 +91,33 @@ def by_hand(rows: list[Any], call: Any) -> list[Any]:
 @needs_pandas
 def test_length_counts_characters_and_not_bytes(firepanda: ModuleType) -> None:
     """The whole reason the kernel exists, on the two rows that can tell."""
-    assert made(firepanda).str.len().tolist() == [5, 5, 0, 6, nan, 5]
+    assert like(made(firepanda).str.len().tolist(), [5, 5, 0, 6, nan, 5])
     assert like(made(firepanda).str.len().tolist(), by_hand(ROWS, len))
 
 
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: s.str.len(),
+        lambda s: s.str.find("é"),
+        lambda s: s.str.rfind("e"),
+        lambda s: s.str.count("e"),
+        lambda s: s.str.count("[aeiou]"),
+        lambda s: s.str.index(""),
+        lambda s: s.str.rindex(""),
+    ],
+    ids=["len", "find", "rfind", "count", "count-regex", "index", "rindex"],
+)
 @needs_pandas
-def test_length_is_an_integer_column_where_pandas_widens_to_float(
-    firepanda: ModuleType,
-) -> None:
-    """The asserted difference, and the one place in this file it is visible in a dtype.
-
-    pandas has nowhere to put a missing count in an int64 numpy array, so a
-    column with one missing row comes back float64 and every count in it is a
-    float. Arrow has a validity bitmap, so the count stays a count.
-    """
-    assert str(made(firepanda).str.len().dtype) == "int64"
-    assert str(theirs().str.len().dtype) == "float64"
+def test_a_count_with_a_missing_row_is_pandas_float(firepanda: ModuleType, call: Any) -> None:
+    """pandas has nowhere to put a missing count in an int64 numpy array, so a
+    column with one missing row comes back float64 with a NaN there, and a
+    column with none stays int64. Both are answered the same way here."""
+    for rows in (ROWS, [row for row in ROWS if row is not None]):
+        mine = call(made(firepanda, rows))
+        them = call(theirs(rows).astype("str"))
+        assert str(mine.dtype) == str(them.dtype)
+        assert like(mine.tolist(), them.tolist())
 
 
 @needs_pandas

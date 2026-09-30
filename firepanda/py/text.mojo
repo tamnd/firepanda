@@ -960,7 +960,8 @@ def number(
             four.
 
     Returns:
-        An int64 column, as tall as the one it read.
+        An int64 column, as tall as the one it read, or float64 with a NaN in
+        each missing row when it has one, which is pandas' spelling.
 
     Raises:
         Error: Tagged `value` if the name is not one that answers a number or
