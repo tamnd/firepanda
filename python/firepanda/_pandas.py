@@ -7854,10 +7854,9 @@ class _Cell:
         column = _names.held(column)
         found = self._owner.index.get_loc(row)
         if not isinstance(found, int):
-            raise NotImplementedError(
-                "at on a repeated label is not supported yet, because pandas"
-                " answers several values there and this answers one"
-            )
+            # pandas answers a label that is there more than once as `loc`
+            # does, with the values under it as a series.
+            return self._owner.loc[row, column]
         try:
             return _cell_of(inner, found, names.index(column))
         except Exception as error:
@@ -8003,10 +8002,7 @@ class _Point:
         except KeyError:
             raise KeyError(key) from None
         if not isinstance(found, int):
-            raise NotImplementedError(
-                "at on a repeated label is not supported yet, because pandas"
-                " answers several values there and this answers one"
-            )
+            return self._owner.loc[key]
         try:
             return _cell_of(inner, found)
         except Exception as error:

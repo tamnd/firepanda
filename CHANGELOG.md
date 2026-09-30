@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: at on a repeated label
+
+`DataFrame.at` and `Series.at` answer a label that is there more than once as pandas does, with every value under it as a series, where they used to refuse it.
+
 ### Added: unstack of several levels at once
 
 `Series.unstack` and `DataFrame.unstack` take a list of levels, as pandas does. The pairs of the levels handed in become columns of several levels, in the order they first appear, named after the levels, and the levels left over stay as the row labels. A frame puts its own column names on top.
