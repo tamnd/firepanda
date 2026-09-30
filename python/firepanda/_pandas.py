@@ -5306,6 +5306,45 @@ def _other_side(
     return _fallback(printed, other, column)
 
 
+def _numpy_float(column: Any) -> bool:
+    """Whether a column is a plain float column, whose gap pandas spells NaN."""
+    printed = column._inner.dtype()
+    return printed in ("float32", "float64") and not _masked.masked_of(column)
+
+
+def _gaps_at(column: Any, kept: Any) -> Any:
+    """The column with a gap in its own type in every row the flags do not keep."""
+    return column._chosen(kept, NO_DEFAULT, False, None, None, False, widen=False)
+
+
+def _where_widened(printed: str, other: Any) -> str | None:
+    """The type pandas widens a column to before `where` puts the other side in it.
+
+    A numpy column has nowhere to keep a missing value, so pandas moves whole
+    numbers to float64 and flags to object when a row takes nothing, and moves
+    whole numbers to float64 when a row takes a fraction. The nullable types keep
+    their own type, and so does every other pairing, which the pick settles.
+
+    Args:
+        printed: The column's type as `dtype` spells it.
+        other: What the rows that were not kept take, or `NO_DEFAULT`.
+
+    Returns:
+        The type to cast the column to first, or None to leave it.
+    """
+    missing = other is NO_DEFAULT or other is None
+    if isinstance(other, float) and not isinstance(other, bool):
+        missing = missing or math.isnan(other)
+        fraction = not math.isnan(other) and not other.is_integer()
+    else:
+        fraction = False
+    if printed.startswith(("int", "uint")) and (missing or fraction):
+        return "float64"
+    if printed == "bool" and missing:
+        return "object"
+    return None
+
+
 def _positional(value: Any) -> bool:
     """Whether a value is a run of values to be read against the rows in order.
 
@@ -10434,7 +10473,8 @@ class DataFrameMixin(_Carries):
             for name, kind in zip(names, self._inner.dtypes(), strict=True)
         ]
         made = _labelled(names, kinds)
-        return Series._wrap(made._inner.relabel(None).renamed_axis(None))
+        # pandas' answer is an object column, and it prints as one.
+        return Series._wrap(made._inner.relabel(None).renamed_axis(None)).astype(object)
 
     def memory_usage(self, index: Any = True, deep: Any = False) -> Series:
         """How many bytes each column weighs, labelled by column name.
@@ -12003,6 +12043,24 @@ class DataFrameMixin(_Carries):
             # described without it, which are a missing value in this column's
             # own type and a category, whose list of categories is part of it.
             side = wanted[name]
+            if side is None and types[name] != "object":
+                side = NO_DEFAULT
+            widened = _where_widened(types[name], side)
+            if widened is not None and _masked.masked_of(self[name]):
+                widened = None
+            floats = (widened or types[name]) in ("float32", "float64")
+            if side is NO_DEFAULT and floats and not _masked.masked_of(self[name]):
+                side = math.nan
+            if widened is not None:
+                # An object column is not one the frame can pick in, so the
+                # widened column is picked on its own and put back.
+                base = Series._wrap(answer._inner.column(name)).astype(widened)
+                taken = _other_side(side, widened, labels, replaced, base, shape)
+                try:
+                    answer[name] = Series._wrap(base._inner.pick(kept, taken))
+                except Exception as error:
+                    raise translate(error) from None
+                continue
             looked = None
             if side is NO_DEFAULT or types[name] == "category":
                 looked = Series._wrap(answer._inner.column(name))
@@ -15228,6 +15286,12 @@ class DataFrameMixin(_Carries):
             )
         shifted = self._transformed("shift", periods, axis)
         if fill_value is NO_DEFAULT:
+            if periods and len(self):
+                # The flags columns go through the column's shift, which makes them object.
+                names = self._inner.names()
+                for name, kind in zip(names, self._inner.dtypes(), strict=True):
+                    if kind == "bool" and not _masked.masked_of(self[name]):
+                        shifted[name] = self[name]._shift(periods, None, 0, NO_DEFAULT, None)
             return shifted
         for name in shifted._inner.names():
             shifted[name] = self[name]._shift(periods, None, 0, fill_value, None)
@@ -16924,7 +16988,14 @@ class SeriesMixin(_Carries):
         return self._chosen(cond, other, inplace, axis, level, True)
 
     def _chosen(
-        self, cond: Any, other: Any, inplace: bool, axis: Any, level: Any, flip: bool
+        self,
+        cond: Any,
+        other: Any,
+        inplace: bool,
+        axis: Any,
+        level: Any,
+        flip: bool,
+        widen: bool = True,
     ) -> Series:
         """The body `where` and `mask` share.
 
@@ -16936,6 +17007,8 @@ class SeriesMixin(_Carries):
             level: Refused.
             flip: Whether the condition picks out the rows to replace rather
                 than the rows to keep.
+            widen: Whether to widen the column the way pandas does first, which
+                the helpers that build a column of their own type turn off.
 
         Returns:
             A new column of the same height and the same type.
@@ -16965,9 +17038,19 @@ class SeriesMixin(_Carries):
         # the column over there and is the column here.
         if not bool(replaced.reduce("max", 0.0)):
             return _kept(self, self.copy(), inplace)
-        taken = _other_side(other, self._inner.dtype(), labels, replaced, self)
+        base = self
+        if other is None and self._inner.dtype() != "object":
+            other = NO_DEFAULT
+        widened = None
+        if widen and not _masked.masked_of(self):
+            widened = _where_widened(self._inner.dtype(), other)
+        if widened is not None:
+            base = self.astype(widened)
+        if widen and other is NO_DEFAULT and _numpy_float(base):
+            other = math.nan
+        taken = _other_side(other, base._inner.dtype(), labels, replaced, base)
         try:
-            return _kept(self, Series._wrap(self._inner.pick(kept, taken)), inplace)
+            return _kept(self, Series._wrap(base._inner.pick(kept, taken)), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -18459,9 +18542,14 @@ class SeriesMixin(_Carries):
                 "periods has to be a single number for now, because a list of them"
                 " answers a frame with one column per period"
             )
-        shifted = self._transformed("shift", periods, axis)
         rows = len(self)
         moved = min(abs(periods), rows)
+        base = self
+        flags = self._inner.dtype() == "bool" and not _masked.masked_of(self)
+        if fill_value is NO_DEFAULT and moved and flags:
+            # A column of flags has nowhere to keep the gap, so pandas makes it object.
+            base = self.astype(object)
+        shifted = base._transformed("shift", periods, axis)
         if fill_value is NO_DEFAULT or moved == 0:
             return shifted
         # The rows the shift opened are filled by joining a column of the value

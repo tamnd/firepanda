@@ -182,7 +182,7 @@ def as_masked(column: Series, name: str) -> Series:
 def plain(column: Series) -> Series:
     """A masked column as the lower case column of the same width, its gaps the extension's."""
     from ._frame import Series
-    from ._pandas import _held_values
+    from ._pandas import _gaps_at, _held_values
 
     lower = _LOWER[masked_of(column) or "Int64"]
     values = _held_values(column._inner)
@@ -198,7 +198,7 @@ def plain(column: Series) -> Series:
         present = answer.notna()
         answer = Series._wrap(answer.fillna(0)._inner.cast(lower, False))
         if not all(present.tolist()):
-            answer = answer.where(present)
+            answer = _gaps_at(answer, present)
     return answer
 
 

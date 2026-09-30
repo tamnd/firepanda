@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: where, mask and shift widen the way pandas does
+
+`where` and `mask` on a column of whole numbers now answer float64 when a row takes nothing or takes a fraction, and a column of flags becomes object when a row takes nothing, which is what pandas does because a numpy column has nowhere to keep a gap. The nullable types keep their own type as before. `shift` on a column of flags, alone or in a frame, now answers object with NaN in the gap, and `DataFrame.dtypes` is an object column, so it prints `dtype: object` as pandas does. `where(cond, None)` reads the None as a missing value outside an object column, and a plain float column takes NaN in the rows it does not keep, which is how pandas spells a gap there.
+
 ### Added: skipna, min_count and numeric_only on group by reductions
 
 The group by reductions now take pandas 3's `skipna=False`, which answers NaN for a group with a gap in it, `min_count`, which answers NaN for a group with fewer values, and `numeric_only=True`, which keeps the number and flag columns. Whole numbers and flags that get a gap become floats, and text is answered whatever the two say, as in pandas. `skipna=False` on `first`, `last`, `any` and `all`, where it means something other than a gap, is still refused.
