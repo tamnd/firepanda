@@ -9510,13 +9510,29 @@ def _function_name(func: Any) -> Any:
 def _method_named(owner: Any, func: str, kind: str) -> Any:
     """The method a function is named for, with pandas' words for no such method.
 
+    A name the owner has no method for is looked up in numpy, as pandas does, so
+    `"sqrt"` is `numpy.sqrt` on the owner when numpy is installed.
+
     Raises:
-        AttributeError: When the owner has no method of that name.
+        AttributeError: When neither the owner nor numpy has a function of that name.
     """
     found = getattr(owner, func, None)
-    if found is None or not callable(found):
-        raise AttributeError(f"'{func}' is not a valid function for '{kind}' object")
-    return found
+    if found is not None and callable(found):
+        return found
+    if kind == "Series" and importlib.util.find_spec("numpy") is not None:
+        import numpy
+
+        named = getattr(numpy, func, None)
+        if callable(named):
+
+            def through_numpy(*args: Any, **kwargs: Any) -> Any:
+                answer = named(owner.to_numpy(), *args, **kwargs)
+                if getattr(answer, "shape", None) == (len(owner),):
+                    return type(owner)(answer, index=owner.index, name=owner.name)
+                return answer
+
+            return through_numpy
+    raise AttributeError(f"'{func}' is not a valid function for '{kind}' object")
 
 
 def _gathered(results: list[Any], labels: list[Any], stack: Any, name: Any = None) -> Any:
@@ -9561,6 +9577,67 @@ def _sequences_framed(frame: Any, results: list[Any], names: list[Any]) -> Any:
     if len(pieces[0]) == len(frame.index):
         return DataFrame(data, index=frame.index)
     return DataFrame(data)
+
+
+def _applied_raw(frame: Any, func: Any, axis: int, args: Any, kwargs: dict[str, Any]) -> Any:
+    """`apply` with `raw=True`, which runs the function on numpy arrays as pandas does.
+
+    The frame's values are one numpy array, of the type the columns share, and
+    each column or row of it goes to the function through `apply_along_axis`. An
+    answer of the frame's shape is a frame, and one value for each is a column.
+    """
+    from ._frame import DataFrame, Series
+
+    np = _numpy()
+
+    def wrapper(values: Any, *more: Any, **named: Any) -> Any:
+        result = func(values, *more, **named)
+        return np.array(result, dtype=object) if isinstance(result, str) else result
+
+    result = np.apply_along_axis(wrapper, axis, frame.to_numpy(), *args, **kwargs)
+    names = _shown_names(frame)
+    if result.ndim == 2:
+        return DataFrame(result, index=frame.index, columns=names)
+    return Series(result.tolist(), index=frame.index.tolist() if axis else names)
+
+
+def _broadcast(frame: Any, results: list[Any], axis: int) -> Any:
+    """`apply` with `result_type="broadcast"`: each answer spread over its column or row.
+
+    A value fills the whole column or row, and a list or a column must be as long
+    as it. The answer keeps the frame's labels and the type its values share.
+
+    Raises:
+        ValueError: When an answer is a list of a different length.
+    """
+    from ._frame import DataFrame
+
+    np = _numpy()
+    names = _shown_names(frame)
+    values = frame.to_numpy().copy()
+    width = len(names) if axis else len(frame.index)
+    for position, result in enumerate(results):
+        if hasattr(result, "index") and hasattr(result, "reindex"):
+            result = result.reindex(names if axis else frame.index).tolist()
+        elif _sequence_answer(result):
+            result = list(result)
+            if len(result) != width:
+                raise InvalidArgumentError("cannot broadcast result")
+        else:
+            result = [result] * width
+        if axis:
+            values[position, :] = np.array(result, dtype=values.dtype)
+        else:
+            values[:, position] = np.array(result, dtype=values.dtype)
+    return DataFrame(values, index=frame.index, columns=names)
+
+
+def _expanded(results: list[Any], labels: list[Any]) -> Any:
+    """`apply` with `result_type="expand"`: the lists answered for each row as columns 0, 1, ..."""
+    from ._frame import DataFrame
+
+    rows = [result.tolist() if _is_numpy(result) else list(result) for result in results]
+    return DataFrame(rows, index=labels)
 
 
 def _sequence_answer(result: Any) -> bool:
@@ -10818,32 +10895,50 @@ class DataFrameMixin(_Carries):
         that answers a column for each gives a frame. A name, a list of names or
         a dict is `agg`. The function runs in Python, as it does in pandas.
 
+        `raw=True` hands the function numpy arrays of the frame's values, which
+        needs numpy. `result_type` says how list answers are put together:
+        `expand` makes them columns, `broadcast` makes them the frame's own
+        shape, and `reduce` keeps them whole.
+
         Raises:
-            ValueError: For an axis a frame does not have.
-            NotImplementedError: For `raw`, `result_type` and `engine`, which
-                are numpy and JIT paths.
+            ValueError: For an axis a frame does not have, and for a
+                `result_type`, `engine` or `by_row` pandas does not know.
+            NotImplementedError: For a JIT engine, which is numba's.
         """
         number = _align_axis(axis, "DataFrame", (0, 1))
-        if raw or result_type is not None or engine is not None:
-            raise NotImplementedError(
-                "apply: raw, result_type and engine are numpy and JIT paths, and firepanda"
-                " calls the function on a column or a row"
+        if result_type not in (None, "reduce", "broadcast", "expand"):
+            raise InvalidArgumentError(
+                "invalid value for result_type, must be one of "
+                "{None, 'reduce', 'broadcast', 'expand'}"
             )
+        if by_row not in (False, "compat"):
+            raise InvalidArgumentError(f"by_row={by_row} not allowed")
+        if isinstance(engine, str) and engine not in ("python", "numba"):
+            raise InvalidArgumentError(f"Unknown engine '{engine}'")
+        if engine not in (None, "python"):
+            raise NotImplementedError("apply: engine is numba's JIT, and firepanda runs Python")
         if isinstance(func, (str, list, dict)):
             return self.agg(func, number, *args, **kwargs)
+        if raw:
+            return _applied_raw(self, func, number, args, kwargs)
+        names = _shown_names(self)
         if number == 1:
             from ._frame import Series
 
-            names = _shown_names(self)
             columns = [self[name].tolist() for name in names]
             labels = self.index.tolist()
             results = [
                 func(Series(list(row), index=names, name=label), *args, **kwargs)
                 for label, row in zip(labels, zip(*columns, strict=True), strict=True)
             ]
+            if result_type == "broadcast":
+                return _broadcast(self, results, 1)
+            if result_type == "expand" and results and all(map(_sequence_answer, results)):
+                return _expanded(results, labels)
             return _gathered(results, labels, names)
-        names = _shown_names(self)
         results = [func(self[name], *args, **kwargs) for name in names]
+        if result_type == "broadcast":
+            return _broadcast(self, results, 0)
         framed = _sequences_framed(self, results, names)
         if framed is not None:
             return framed
@@ -10869,13 +10964,18 @@ class DataFrameMixin(_Carries):
         if callable(func):
             return self.apply(func, number, args=args, **kwargs)
         if number == 1:
-            raise NotImplementedError("agg: a list or a dict of functions goes down the columns")
+            return self.T.agg(func, 0, *args, **kwargs).T
         from ._frame import DataFrame, Series
 
         if isinstance(func, list):
             answers = {
                 name: self[name].agg(func, 0, *args, **kwargs) for name in _shown_names(self)
             }
+            if any(isinstance(answer, DataFrame) for answer in answers.values()):
+                raise NotImplementedError(
+                    "agg: functions that answer a column label the answer by column and function,"
+                    " in two levels, and a firepanda column name is text"
+                )
             labels = [_function_name(one) for one in func]
             return DataFrame(
                 {name: answer.tolist() for name, answer in answers.items()}, index=labels
@@ -10907,11 +11007,25 @@ class DataFrameMixin(_Carries):
             ValueError: When a function answers something else, with pandas' words.
         """
         if _align_axis(axis, "DataFrame", (0, 1)) == 1:
-            raise NotImplementedError("transform: axis=1 is the transform of the transpose")
-        pieces = {
-            name: self[name].transform(func, 0, *args, **kwargs) for name in _shown_names(self)
-        }
-        return type(self)(pieces, index=self.index)
+            return self.T.transform(func, 0, *args, **kwargs).T
+        names = _shown_names(self)
+        if isinstance(func, (list, dict)) and not func:
+            raise InvalidArgumentError("No transform functions were provided")
+        if isinstance(func, dict):
+            missing = [name for name in func if name not in names]
+            if missing:
+                raise KeyError(f"Label(s) {missing} do not exist")
+            asked = list(func.items())
+        else:
+            asked = [(name, func) for name in names]
+        if not any(isinstance(one, list) for _, one in asked) and not isinstance(func, list):
+            pieces = {name: self[name].transform(one, 0, *args, **kwargs) for name, one in asked}
+            return type(self)(pieces, index=self.index)
+        framed = [
+            self[name].transform(one if isinstance(one, list) else [one], 0, *args, **kwargs)
+            for name, one in asked
+        ]
+        return concat(framed, axis=1, keys=[name for name, _ in asked])
 
     def mode(self, axis: Any = 0, numeric_only: bool = False, dropna: bool = True) -> DataFrame:
         """The most common values of each column, NaN where a column has fewer."""
@@ -15914,6 +16028,13 @@ class SeriesMixin(_Carries):
             for label, one in pairs:
                 labels.append(_function_name(label))
                 results.append(self.agg(one, 0, *args, **kwargs))
+            columns = [isinstance(result, type(self)) for result in results]
+            if any(columns) and not all(columns):
+                raise InvalidArgumentError("cannot combine transform and aggregation operations")
+            if results and all(columns):
+                from ._frame import DataFrame
+
+                return DataFrame(dict(zip(labels, results, strict=True)))
             return type(self)(_readable(results), index=labels, name=self.name)
         return func(self, *args, **kwargs)
 
@@ -15927,7 +16048,16 @@ class SeriesMixin(_Carries):
         """
         _align_axis(axis, "Series", (0,))
         if isinstance(func, (list, dict)):
-            raise NotImplementedError("transform: a list or a dict of functions answers a frame")
+            if not func:
+                raise InvalidArgumentError("No transform functions were provided")
+            from ._frame import DataFrame
+
+            pairs = func.items() if isinstance(func, dict) else ((one, one) for one in func)
+            pieces = {
+                _function_name(label): self.transform(one, 0, *args, **kwargs)
+                for label, one in pairs
+            }
+            return DataFrame(pieces, index=self.index)
         if isinstance(func, str):
             answer = _method_named(self, func, "Series")(*args, **kwargs)
         else:
