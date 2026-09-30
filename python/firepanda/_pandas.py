@@ -30,6 +30,7 @@ import bisect
 import codecs
 import collections
 import contextlib
+import copy
 import datetime
 import functools
 import importlib.util
@@ -23548,6 +23549,25 @@ class _GroupedResampler:
         return call
 
 
+_GROUP_GAPS_ANSWER_NOTHING = frozenset(
+    ["sum", "prod", "min", "max", "mean", "median", "std", "var", "sem", "skew", "kurt"]
+)
+"""The group by reductions whose `skipna=False` answers NaN for a group with a gap in it."""
+
+
+def _group_blanked(column: Any, found: Any, test: Callable[[Any], Any]) -> Any:
+    """One column of a group by answer with NaN where `test` of `found` is False."""
+    word = _word(column.dtype)
+    if word in ("str", "string", "object") or word.startswith("category"):
+        return column
+    kept = test(found)
+    if kept.all():
+        return column
+    if word in _SIGNED or word in _UNSIGNED or word == "bool":
+        column = column.astype("float64")
+    return column.mask(~kept)
+
+
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
@@ -23811,34 +23831,20 @@ class GroupByMixin[Answer]:
         Returns:
             The frame or the series pandas answers.
         """
-        _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "dropping the columns a reduction cannot read is a decision about"
-            " which columns come back, and firepanda reduces the ones it was"
-            " given or says which one it could not",
-        )
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a group's answer is computed from the values that are there, and"
-            " taking one missing value as a reason to answer nothing at all is a"
-            " second pass the kernels do not make",
-        )
+        if kind not in _GROUP_GAPS_ANSWER_NOTHING:
+            _held_at(
+                "skipna",
+                skipna,
+                True,
+                f"skipna=False on {kind} says what a gap means for that reduction, and"
+                " firepanda gives it that meaning only for the ones that answer NaN",
+            )
         if min_count is not None:
             # pandas defaults this to zero for the two that combine values with
             # an operator and to minus one for the four that pick one out, so
             # the value that means "nobody asked for anything" depends on the
             # reduction.
-            _held_at(
-                "min_count",
-                min_count,
-                0 if kind in ("sum", "prod") else -1,
-                "answering nothing for a group that is too small is a check on"
-                " the count after the reduction, and the count is not kept",
-            )
+            min_count = operator.index(min_count)
         _refuse(
             "engine",
             engine,
@@ -23850,7 +23856,67 @@ class GroupByMixin[Answer]:
             engine_kwargs,
             "there is nothing to configure while there is nothing to choose",
         )
-        return self._shape(kind, param)
+        grouped = self._numeric_only(kind) if _flag("numeric_only", numeric_only) else self
+        answer = grouped._shape(kind, param)
+        if not _flag("skipna", skipna):
+            flags = grouped._over_flags()._shape("min", 0.0)
+            answer = grouped._blanked(answer, flags, lambda there: there.astype(bool))
+        if min_count is not None and min_count > 0:
+            counts = grouped._shape("count", 0.0)
+            answer = grouped._blanked(answer, counts, lambda count: count >= min_count)
+        return answer
+
+    def _numeric_only(self, kind: str) -> Any:
+        """This group by over its number and flag columns, for `numeric_only=True`.
+
+        Raises:
+            TypeError: For a column of something else, in pandas' words.
+        """
+        keys = set(self._by)
+        column = getattr(self, "_column", None)
+        numbers = set(_shown_names(self._frame._numeric_part()))
+        if column is not None:
+            if column not in numbers:
+                raise TypeError(
+                    f"Cannot use numeric_only=True with SeriesGroupBy.{kind} and non-numeric"
+                    " dtypes."
+                )
+            return self
+        kept = [name for name in _shown_names(self._frame) if name in keys or name in numbers]
+        narrowed = copy.copy(self)
+        narrowed._frame = self._frame[kept]
+        selection = getattr(self, "_selection", None)
+        if selection is not None:
+            narrowed._selection = [name for name in selection if name in numbers]
+        return narrowed
+
+    def _over_flags(self) -> Any:
+        """This group by over whether each value is there, which `skipna=False` reduces."""
+        keys = set(self._by)
+        frame = self._frame
+        flags = {
+            name: frame[name].notna() for name in _shown_names(frame) if name not in keys
+        }
+        over = copy.copy(self)
+        over._frame = frame.assign(**flags)
+        return over
+
+    def _blanked(self, answer: Any, found: Any, test: Callable[[Any], Any]) -> Any:
+        """`answer` with NaN in each group where `test` of `found`, of the same shape, is False.
+
+        Whole numbers and flags that get a gap become floats, as they do in pandas. The key
+        columns an `as_index=False` answer carries are left alone, and so is text, which
+        pandas answers whatever `skipna` and `min_count` say.
+        """
+        if hasattr(answer, "columns"):
+            keys = {_names.shown(name) for name in self._by}
+            pieces = {
+                name: _group_blanked(answer[name], found[name], test)
+                for name in _shown_names(answer)
+                if name not in keys
+            }
+            return answer.assign(**pieces)
+        return _group_blanked(answer, found, test)
 
     def _spread(
         self,
