@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pivot_table margins
+
+`pivot_table(margins=True)` adds the row of totals, and under a columns key the column of totals, labelled `margins_name`, for one row key of text and a function named by text. As in pandas the totals come from the rows with no gap in any key or value, though the body keeps those rows. A list of value columns is now sorted when `sort=True`, and with `dropna=True` a row whose aggregates are all missing is dropped, both as pandas does.
+
 ### Added: to_datetime counts days, hours, minutes and floats, and align fills every gap
 
 `to_datetime` with `unit="D"`, `"h"` or `"m"` reads the counts as seconds and holds the answer at seconds, as pandas does. Floats that are all whole are read as integers are, a float with a fraction makes the column nanoseconds with the fraction cut the way pandas cuts it, and a gap stays a gap. A format that parses nothing under `errors="coerce"` now gives `datetime64[s]` like pandas rather than microseconds. With `utc=True` the counts come back marked as UTC. `Series.align` with a `fill_value` now fills the gaps each side already had as well as the new labels, as pandas does for two columns.

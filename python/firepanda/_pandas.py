@@ -10820,16 +10820,19 @@ class DataFrameMixin(_Carries):
         missing or `fill_value`, and whole numbers with a gap become floats.
 
         Raises:
-            NotImplementedError: For margins, several columns keys or values
-                with a columns key, and a list or dict of functions, which
-                pandas answers with columns of several levels, and for a
-                columns key whose values are not text.
+            NotImplementedError: For several columns keys or values with a
+                columns key, and a list or dict of functions, which pandas
+                answers with columns of several levels, for a columns key whose
+                values are not text, and for margins beside row keys that are
+                not text or under several of them.
         """
         if margins:
-            raise NotImplementedError(
-                "pivot_table: margins adds a row and a column of totals, which firepanda"
-                " does not add yet"
-            )
+            table = self.pivot_table(
+                values, index, columns, aggfunc, fill_value, False, dropna, margins_name,
+                observed, sort, **kwargs,
+            )  # fmt: skip
+            wanted = (index, columns, values, aggfunc, margins_name, kwargs)
+            return _pivot_margins(self, table, *wanted)
         if isinstance(aggfunc, list | tuple | dict):
             raise NotImplementedError(
                 "pivot_table: a list or dict of functions labels the columns with a"
@@ -10855,6 +10858,11 @@ class DataFrameMixin(_Carries):
                 grouped = DataFrame(values, index=pieces[0].index)
             else:
                 grouped = self.groupby(down, sort=sort, dropna=dropna)[names].agg(aggfunc, **kwargs)
+            if sort and isinstance(values, list | tuple):
+                # pandas sorts the value columns along with the keys.
+                grouped = grouped[sorted(names)]
+            if dropna:
+                grouped = grouped.dropna(how="all")
             if fill_value is not None:
                 grouped = grouped.fillna(fill_value)
             return grouped
@@ -10888,6 +10896,9 @@ class DataFrameMixin(_Carries):
         if dropna:
             names = [
                 name for name in names if not all(_missing(cells.get((row, name))) for row in rows)
+            ]
+            rows = [
+                row for row in rows if not all(_missing(cells.get((row, name))) for name in names)
             ]
         return _pivoted(rows, names, cells, printed, row_name=down, fill_value=fill_value)
 
@@ -29587,6 +29598,59 @@ def _grouped_by_hand(
     else:
         labels = Index(keys, name=down)
     return Series(_readable(readable), index=labels, name=measured)
+
+
+def _pivot_margins(
+    frame: Any,
+    table: Any,
+    index: Any,
+    columns: Any,
+    values: Any,
+    aggfunc: Any,
+    margins_name: Any,
+    kwargs: dict[str, Any],
+) -> Any:
+    """A pivot table with its row of totals, and its column of totals under a columns key.
+
+    pandas works the totals out from the rows with no gap in any key or value,
+    though the body keeps those rows, so a total can be less than its row.
+
+    Raises:
+        NotImplementedError: For totals labelled with text beside row keys that
+            are not text, which pandas holds as objects, for several row keys,
+            and for a function rather than a name.
+    """
+    from ._frame import DataFrame, Index
+
+    rows = table.index.tolist()
+    if (
+        isinstance(index, list | tuple)
+        or callable(aggfunc)
+        or not isinstance(margins_name, str)
+        or not all(isinstance(row, str) for row in rows)
+    ):
+        raise NotImplementedError(
+            "pivot_table: the totals are labelled with text beside the row keys, which"
+            " firepanda holds only for one key of text and a function named by text"
+        )
+    names = [str(name) for name in table.columns]
+    cells = {name: table[name].tolist() for name in names}
+    if columns is None:
+        data = frame[[index, *names]].dropna()
+        for name in names:
+            cells[name].append(data[name].agg(aggfunc, **kwargs))
+    else:
+        data = frame[[index, columns, values]].dropna()
+        across = data.groupby(columns)[values].agg(aggfunc, **kwargs)
+        heads = dict(zip(across.index.tolist(), across.tolist(), strict=True))
+        for name in names:
+            cells[name].append(heads.get(name))
+        down = data.groupby(index)[values].agg(aggfunc, **kwargs)
+        per_row = dict(zip(down.index.tolist(), down.tolist(), strict=True))
+        whole = data[values].agg(aggfunc, **kwargs)
+        cells[margins_name] = [*(per_row.get(row) for row in rows), whole]
+    labels = Index([*rows, margins_name], name=table.index.name)
+    return DataFrame({name: _readable(got) for name, got in cells.items()}, index=labels)
 
 
 def _pivoted(
