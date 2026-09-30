@@ -15677,8 +15677,6 @@ class DataFrameMixin(_Carries):
 
         across = _axis_number(axis, "DataFrame", 0, (0, 1))
         inplace = _flag("inplace", inplace)
-        if across == 1 and key is not None:
-            _refuse("key", key, "running a function over the column labels is not written")
         labels = self.index if across == 0 else self.columns
         if isinstance(ascending, (list, tuple)) and not isinstance(labels, MultiIndex):
             # On labels of one level pandas leaves them be when every flag
@@ -15713,12 +15711,15 @@ class DataFrameMixin(_Carries):
             ordered = self.iloc[order]
             ordered = ordered.reset_index(drop=True) if ignore_index else ordered
             return _settled(self, ordered, inplace)
-        if across == 1 and level is None and not isinstance(ascending, (list, tuple)):
-            # The column labels are text, so their order is the order of the
-            # names, and the sort is stable, so a repeated name keeps its place.
-            names = list(self.columns)
-            order = sorted(range(len(names)), key=names.__getitem__, reverse=not ascending)
-            return _settled(self, self.iloc[:, order], inplace)
+        if across == 1:
+            # The column labels sort a level at a time as the row labels do,
+            # and the sort is stable, so a repeated name keeps its place.
+            first = _na_first(na_position)
+            order = _label_order(self.columns, level, ascending, first, sort_remaining, key)
+            ordered = self.iloc[:, order]
+            if ignore_index:
+                ordered = ordered.set_axis(list(range(len(order))), axis=1)
+            return _settled(self, ordered, inplace)
         _axis_number(axis, "DataFrame", 0, (0,))
         _held_at(
             "na_position",
