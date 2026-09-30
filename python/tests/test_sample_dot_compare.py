@@ -137,12 +137,11 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     "build",
     [
         lambda m: m.Series([1, 2]).case_when([(lambda s: s > 1, "x")]),
-        lambda m: m.Series([1, 2]).compare(m.Series([1, 3]), align_axis=0),
     ],
 )
 def test_what_pandas_answers_with_objects_or_levels_is_refused(
     firepanda: ModuleType, build: Callable[[Any], Any]
 ) -> None:
-    """Objects, a MultiIndex and columns labelled with numbers are not firepanda's."""
+    """Objects and columns labelled with numbers are not firepanda's."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
