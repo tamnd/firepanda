@@ -21119,11 +21119,8 @@ class _ReadingMixin:
                 pairwise = True
         if not isinstance(other, (Series, DataFrame)):
             raise InvalidArgumentError("other must be a DataFrame or Series")
-        if isinstance(data, DataFrame) and pairwise:
-            raise NotImplementedError(
-                "pairwise=True over a frame is not supported yet, because the answer has two"
-                " levels of row labels; pass pairwise=False to pair the columns by name"
-            )
+        if isinstance(data, DataFrame) and isinstance(other, DataFrame) and pairwise:
+            return self._every_pair(data, other, settings)
         if isinstance(data, Series) and isinstance(other, DataFrame):
             return self._over(other)._paired(data, False, numeric_only, *settings)
         if isinstance(data, Series):
@@ -21140,6 +21137,41 @@ class _ReadingMixin:
             for label in _shown_names(left)
         }
         return _float_frame(parts, left)
+
+    def _every_pair(self, data: DataFrame, other: DataFrame, settings: Any) -> DataFrame:
+        """Every column of `data` against every column of `other`, row by row.
+
+        This is pandas' answer to `pairwise=True`: each row label comes once for
+        every column of `other`, under a second level of row labels, and the
+        columns of `data` go across.
+        """
+        from ._frame import DataFrame
+        from ._multi import MultiIndex
+
+        mine, theirs = _shown_names(data), _shown_names(other)
+        moments = {
+            (left, right): self._moment(data[left], other[right], *settings)
+            for left in mine
+            for right in theirs
+        }
+        first = next(iter(moments.values()), None)
+        index = data.index if first is None else first.index
+        held = {key: moment.tolist() for key, moment in moments.items()}
+        several = isinstance(index, MultiIndex)
+        rows = [
+            (*label, right) if several else (label, right)
+            for label in index.tolist()
+            for right in theirs
+        ]
+        names = [*index.names, other.columns.name]
+        columns = {
+            left: [held[left, right][at] for at in range(len(index)) for right in theirs]
+            for left in mine
+        }
+        labels = MultiIndex.from_tuples(rows, names=names)
+        answer = DataFrame(columns, index=labels, dtype="float64")
+        answer.columns.name = data.columns.name
+        return answer
 
 
 class WindowMixin(_ReadingMixin):

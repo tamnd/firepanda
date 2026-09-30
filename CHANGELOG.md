@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: corr and cov of every pair of columns over a window
+
+`corr` and `cov` on a rolling, expanding or ewm window of a frame answer `pairwise=True`, the default with no other frame, as pandas does: each row label once for every column of the other frame, under a second level of row labels, with the columns of the first frame across.
+
 ### Added: A list of reductions over a window of a frame
 
 `agg` with a list on a rolling, expanding or ewm window of a frame, or with a dict that holds a list, answers under two levels of column labels, the column and then the reduction, as pandas does. A window read along a column named by `on` is refused in pandas' words, and a mapping inside the dict raises `SpecificationError`.
