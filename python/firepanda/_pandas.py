@@ -3819,7 +3819,9 @@ def _named_dtype(dtype: Any) -> str:
         # importable here.
         name = named if named is not None else getattr(dtype, "__name__", "")
     elif isinstance(dtype, str):
-        name = dtype
+        # A dtype object that is a str, like `StringDtype`, hashes as itself rather than as its
+        # text, so it is read back to plain text before the lookup.
+        name = dtype if type(dtype) is str else str(dtype)
     else:
         # A numpy dtype object carries its spelling on `.name`, and so does a
         # pandas extension dtype. Anything else is rendered and will fail the
@@ -16361,15 +16363,11 @@ class DataFrameMixin(_Carries):
         written twice is read once, all as `duplicated` does it. An empty list
         is an empty frame with the columns kept, which is pandas' answer and
         is not obviously right but is not ours to change. More than one name
-        is a refusal: pandas ranks by the first column and breaks its ties with
-        the second, and the kernel here holds one value per slot and has no
-        second value to break anything with.
+        is read as pandas reads it, one column at a time, in `_top_stepped`.
 
-        `keep="all"` is the other refusal. It answers more than `n` rows when
-        the `n`th value is tied, and a fixed table of `n` slots per group
-        cannot hold an answer whose height depends on the data in it. It needs
-        a second pass that finds the cut value and then takes every row equal
-        to it, which is a different piece of work rather than a flag.
+        `keep="all"` answers more than `n` rows when the `n`th value is tied,
+        and is answered in `_top_all` by finding that value and then taking
+        every row that reaches it.
 
         Args:
             n: How many rows to keep.
@@ -16385,12 +16383,6 @@ class DataFrameMixin(_Carries):
         wanted = operator.index(n)
         if keep not in ("first", "last", "all"):
             raise InvalidArgumentError('keep must be either "first", "last" or "all"')
-        who = "nlargest" if largest else "nsmallest"
-        if keep == "all":
-            raise UnsupportedError(
-                f"{who} with keep='all' answers more than n rows when the last"
-                " value is tied, which the kernel underneath cannot express"
-            )
 
         if isinstance(columns, str) or not hasattr(columns, "__iter__"):
             written = [columns]
@@ -16402,14 +16394,67 @@ class DataFrameMixin(_Carries):
             if not names:
                 return DataFrame._wrap(self._inner.slice_rows(0, 0))
             if len(names) > 1:
-                raise UnsupportedError(
-                    f"{who} ranks by one column here, and {len(names)} were"
-                    " given, because breaking a tie with a second column is"
-                    " work the kernel underneath does not do"
-                )
+                return self._top_stepped(wanted, names, keep, largest)
+            if keep == "all":
+                return self._top_all(wanted, names[0], largest)
             return DataFrame._wrap(self._inner.top_rows(names[0], wanted, largest, keep))
+        except FirepandaError:
+            raise
         except Exception as error:
             raise translate(error) from None
+
+    def _top_all(self, n: int, name: Any, largest: bool) -> DataFrame:
+        """The `n` best rows of one column and every row tied with the last of them.
+
+        The first `n` rows are found as `keep="first"` finds them, and the value
+        of the last one is the edge. Every row that reaches the edge is then
+        counted, and the kernel is asked again for that many, which keeps
+        pandas' order: best first, and ties in the order the rows came in.
+        """
+        from ._frame import DataFrame
+
+        first = DataFrame._wrap(self._inner.top_rows(name, n, largest, "first"))
+        if n <= 0 or len(first) < n:
+            return first
+        if bool(first[name].isna().iloc[-1]):
+            # The cut fell among the gaps, and pandas then keeps every gap.
+            return DataFrame._wrap(self._inner.top_rows(name, len(self), largest, "first"))
+        edge = first[name].iloc[-1]
+        column = self[name]
+        reached = int(((column >= edge) if largest else (column <= edge)).sum())
+        return DataFrame._wrap(self._inner.top_rows(name, reached, largest, "first"))
+
+    def _top_stepped(self, n: int, names: list[Any], keep: Any, largest: bool) -> DataFrame:
+        """The `n` best rows ranked by several columns, the way pandas ranks them.
+
+        pandas takes every row of the first column that is strictly inside the
+        cut, keeps the rows tied at the edge, and ranks only those by the next
+        column, until the last column settles the rest with `keep`. The kept
+        rows are then sorted by all the columns, stably. Rows are followed by
+        position here so repeated labels cannot mix them up.
+        """
+        numbered = self.reset_index(drop=True)
+        current = numbered
+        left = n
+        taken: list[int] = []
+        for step, name in enumerate(names):
+            last = step == len(names) - 1
+            if last:
+                best = current._top_rows(left, name, keep, largest)
+            else:
+                best = current._top_all(left, name, largest)
+            places = [int(place) for place in best.index.tolist()]
+            if last or len(best) <= left:
+                taken.extend(places)
+                break
+            values = best[name].tolist()
+            edge = values[-1]
+            paired = list(zip(places, values, strict=True))
+            taken.extend(place for place, value in paired if value != edge)
+            current = numbered.iloc[[place for place, value in paired if value == edge]]
+            left = n - len(taken)
+        answer = self.iloc[taken]
+        return answer.sort_values(names, ascending=not largest, kind="mergesort")
 
     def _reindex(
         self,
@@ -24035,23 +24080,35 @@ class StringMixin:
     def _repeated(self, repeats: Any) -> Series:
         """Every row written out several times, end to end.
 
-        pandas also takes one count per row here, which is a second method
-        wearing the same name: it answers a different column for every row and
-        needs a column of counts crossing rather than a number. That form is not
-        written yet and says so, rather than quietly repeating by the first count
-        it can find.
+        pandas also takes one count per row here, read by position rather than
+        by label, and a missing row stays missing whatever its count. That form
+        is answered row by row in Python, since each row answers a different
+        width.
         """
         if isinstance(repeats, (str, bytes)) or not isinstance(repeats, int):
             try:
-                iter(repeats)
+                counts = list(repeats)
             except TypeError:
                 pass
             else:
-                raise UnsupportedError(
-                    "firepanda:unsupported: str.repeat takes one count for the"
-                    " whole column, and a count per row is not written yet"
-                )
+                return self._repeated_each(counts)
         return self._text("repeat", "", self._width(repeats, "repeats"))
+
+    def _repeated_each(self, counts: list[Any]) -> Series:
+        """Every row written out as many times as its own count says."""
+        from ._frame import Series
+
+        column = self._series
+        values = column.tolist()
+        if len(values) != len(counts):
+            raise InvalidArgumentError(
+                f"Arrays were different lengths: {len(values)} vs {len(counts)}"
+            )
+        written = [
+            value if not isinstance(value, str) else value * operator.index(count)
+            for value, count in zip(values, counts, strict=True)
+        ]
+        return Series(written, index=column.index, name=column.name, dtype=column.dtype)
 
     @staticmethod
     def _width(value: Any, name: str = "width") -> int:

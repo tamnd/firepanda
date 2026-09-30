@@ -237,14 +237,21 @@ def test_a_side_that_is_not_one_of_three_words_is_refused(firepanda: ModuleType)
 
 
 @needs_pandas
-def test_one_repeat_count_per_row_says_that_it_is_not_written_yet(
-    firepanda: ModuleType,
-) -> None:
-    """A second method wearing the same name, and it answers a column per row.
+@needs_pandas
+@pytest.mark.parametrize(
+    "counts", [[1, 2, 0], (3, 1, 2), "series"], ids=["list", "tuple", "series"]
+)
+def test_one_repeat_count_per_row_is_pandas(firepanda: ModuleType, counts: Any) -> None:
+    """A count per row is read by position, and a missing row stays missing."""
+    import pandas as pd
 
-    Refusing it is better than repeating by whichever count happens to be first,
-    and `NotImplementedError` says which of the two it is rather than reading as
-    a bad argument.
-    """
-    with pytest.raises(NotImplementedError, match="count per row"):
-        made(firepanda).str.repeat([1, 2, 3, 1, 1, 1, 1, 1, 1])
+    def run(lib: Any) -> Any:
+        column = lib.Series(["a", None, "cd"], index=[5, 6, 7], name="k")
+        return column.str.repeat(lib.Series([2, 1, 0]) if counts == "series" else counts)
+
+    assert repr(run(firepanda)) == repr(run(pd))
+
+
+def test_a_repeat_count_per_row_of_the_wrong_length_is_refused(firepanda: ModuleType) -> None:
+    with pytest.raises(ValueError, match="different lengths: 3 vs 2"):
+        firepanda.Series(["a", "b", "c"]).str.repeat([1, 2])
