@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pct_change with a freq
+
+`Series.pct_change`, `DataFrame.pct_change` and a group by's `pct_change` now take `freq`, where they used to refuse it. As in pandas, each value is worked out over the one `freq` earlier by label and read back onto the labels it started with, and a group by does that group by group, putting the rows back in their first order.
+
 ### Added: skipna=False on group by any, all, idxmax and idxmin
 
 A group by's `any` and `all` now take `skipna=False` and count a gap as true, the way pandas and numpy read NaN, where they used to refuse the flag. `idxmax` and `idxmin` with `skipna=False` now raise pandas' "encountered an NA value" error when a group holds a gap, rather than refusing the flag.
