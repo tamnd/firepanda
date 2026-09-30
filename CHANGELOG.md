@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Group answers over masked columns keep pandas' masked types
+
+A group reduction over a column of a masked type now answers in the type pandas gives. Sums, minimums, maximums, firsts, lasts and running totals keep the column's type, with sums of flags as `Int64`. Means, medians, spreads, quantiles and ranks are `Float64`, or `Float32` over a 32 bit float column. Counts are `Int64`, and `any` and `all` are `boolean`. This covers `agg` with a name, a list or a dict, `transform`, `describe`, a group taken with `get_group` or by looping, and a series grouped by another. `nunique`, `cumcount`, `ngroup`, `idxmax` and `apply` stay plain, as they do in pandas.
+
 ### Changed: A masked key keeps its type on the answer
 
 `groupby` on a key of a masked type, `Int64`, `Float64`, `boolean` or `string`, now labels its answer in that type, on the row labels or in the key column with `as_index=False`, rather than in the lower case type it was grouped as. `Series.value_counts` on a masked column labels the counts in the column's type too, as pandas does.
