@@ -20747,6 +20747,46 @@ class _ReadingMixin:
 
     _data: Series | DataFrame
 
+    def _window_ready(self, kind: str) -> Series | DataFrame:
+        """The data a reduction reads, or pandas' refusal of a column that is not numbers.
+
+        pandas counts the values of any column, so under `count` a column of
+        another kind is read as one where each value is present, and every
+        other reduction refuses it with pandas' `DataError`.
+
+        Raises:
+            DataError: For a column that is not numbers under any reduction but `count`.
+        """
+        from ._frame import DataFrame
+
+        data = self._data
+        frame = isinstance(data, DataFrame)
+        dtypes = list(data.dtypes) if frame else [data.dtype]
+        other = [
+            at
+            for at, dtype in enumerate(dtypes)
+            if not _word(dtype).lower().startswith(("int", "uint", "float", "bool"))
+        ]
+        if not other:
+            return data
+        if kind != "count":
+            if not frame:
+                raise DataError("No numeric types to aggregate")
+            word = _word(dtypes[other[0]])
+            shown = {"string": "str", "String": "string"}.get(word, word)
+            raise DataError(f"Cannot aggregate non-numeric type: {shown}")
+
+        def present(column: Series) -> Series:
+            marks = column.notna()
+            return marks.astype("float64").where(marks)
+
+        if not frame:
+            return present(data)
+        ready = data.copy()
+        for at in other:
+            ready.isetitem(at, present(data.iloc[:, at]))
+        return ready
+
     def _numbers(self, column: Series) -> list[float | None]:
         """A column's values as floats with None for a gap, or pandas' refusal."""
         from ._frame import DataFrame
@@ -21182,6 +21222,9 @@ class WindowMixin(_ReadingMixin):
             engine_kwargs,
             "it configures the numba engine, and there is no numba engine here for it to configure",
         )
+        ready = self._window_ready(kind)
+        if ready is not self._data:
+            return self._over(ready)._reduce(kind, numeric_only, engine, engine_kwargs, settings)
         # The one default `_hold` did not apply is applied here. `right` is
         # pandas' word for a window that keeps the row it is answering and not
         # the one that fell off the far end. The absent `min_periods` is left
@@ -22164,6 +22207,7 @@ class EwmMixin(_ReadingMixin):
             engine_kwargs,
             "it configures the numba engine, and there is no numba engine here for it to configure",
         )
+        self._window_ready(kind)
         if kind == "sum" and not self._adjust:
             raise NotImplementedError("sum is not implemented with adjust=False")
         unadjusted = not self._adjust and not self._ignore_na and self._factor == 0.5

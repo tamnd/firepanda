@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Windows refuse a column that is not numbers with pandas' DataError
+
+A rolling, expanding or exponentially weighted reduction over text, instants or categories now raises `firepanda.errors.DataError` with pandas' sentence, `No numeric types to aggregate` on a column and `Cannot aggregate non-numeric type: <type>` on a frame, instead of a `DTypeError` naming the column. `count` over such a column now counts the values present in each window, as pandas does.
+
 ### Added: Pivot table totals beside several values
 
 `pivot_table(margins=True)` now works with several values, no values, a dict of functions, and several values under a list of functions, as pandas lays them out: each value's block ends with its own total column, and integer columns beside a float come out as floats while the totals keep their type. A dict that gives one value several functions, or that lacks a column, fails with pandas' error. A single row key given as a one item list now works with totals too.
