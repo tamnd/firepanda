@@ -304,7 +304,8 @@ class Resampler:
         if _bins is not None:
             (self._times, self._codes, self._first, self._count, self._origin, self._step,
              self._time_unit, self._right_label, self._name, self._dropped,
-             self._right_closed, self._chosen, self._rule, self._marks) = _bins  # fmt: skip
+             self._right_closed, self._chosen, self._rule, self._marks,
+             self._zone, self._wall) = _bins  # fmt: skip
             return
         from ._frame import DataFrame
 
@@ -341,12 +342,11 @@ class Resampler:
             kind = "RangeIndex" if obj.index._inner.is_range() else "Index"
         dtype = str(times.dtype)
         unit = _unit(dtype)
+        zoned = re.fullmatch(r"datetime64\[(s|ms|us|ns), .+\]", dtype)
+        self._zone = times.dt.tz if zoned else None
+        if zoned:
+            unit = zoned.group(1)
         if not unit:
-            if dtype.startswith("datetime64["):
-                raise NotImplementedError(
-                    "resample: a timestamp with a zone is not supported yet, because a day"
-                    " in a zone is not always 24 hours long"
-                )
             raise TypeError(
                 "Only valid with DatetimeIndex, TimedeltaIndex or PeriodIndex, but got an"
                 f" instance of '{kind}'"
@@ -367,7 +367,16 @@ class Resampler:
             self._obj = self._obj.iloc[kept]
             times = times.iloc[kept].reset_index(drop=True)
         step = length // per
-        counts = times.astype("int64")
+        # Days and calendar steps count a zone's own clock, whose days are not
+        # all 24 hours long; a fixed step counts the instants themselves.
+        self._wall = bool(days or calendar is not None)
+        self._time_unit = unit
+        if self._zone is None:
+            counts = times.astype("int64")
+        elif self._wall:
+            counts = times.dt.tz_localize(None).astype("int64")
+        else:
+            counts = times.dt.tz_convert("UTC").dt.tz_localize(None).astype("int64")
         right = closed == "right"
         day = _NANOS["D"] // per
         self._marks: list[int] | None = None
@@ -382,6 +391,12 @@ class Resampler:
             start = int(counts.min()) // day * day
         else:
             start = _anchor(origin, counts, step, day, per, right) + _counted(shift, per)
+            if self._zone is not None and origin == "start_day":
+                # The first day starts at midnight on the zone's clock.
+                clock = times.dt.tz_localize(None).astype("int64")
+                start += self._midnight(int(clock.min()) // day * day) - counts.min() // day * day
+            elif self._zone is not None and origin == "epoch":
+                start += self._midnight(0)
         if self._marks is None:
             # Closed on the left a bin holds [edge, edge + step), and closed on the
             # right (edge, edge + step], which is the ceiling less one.
@@ -410,7 +425,8 @@ class Resampler:
         """The bins, handed to a resampler over a part of the same rows."""
         return (self._times, self._codes, self._first, self._count, self._origin, self._step,
                 self._time_unit, self._right_label, self._name, self._dropped,
-                self._right_closed, self._chosen, self._rule, self._marks)  # fmt: skip
+                self._right_closed, self._chosen, self._rule, self._marks,
+                self._zone, self._wall)  # fmt: skip
 
     # ------------------------------------------------------------------
     # Selection
@@ -520,7 +536,21 @@ class Resampler:
             counts = [self._marks[code - self._first + extra] for code in codes]
         else:
             counts = [self._origin + (code + extra) * self._step for code in codes]
-        return to_datetime(Series(counts, dtype="int64"), unit=self._time_unit)
+        stamps = to_datetime(Series(counts, dtype="int64"), unit=self._time_unit)
+        if self._zone is None:
+            return stamps
+        if self._wall:
+            return stamps.dt.tz_localize(self._zone)
+        return stamps.dt.tz_localize("UTC").dt.tz_convert(self._zone)
+
+    def _midnight(self, clock: int) -> int:
+        """The instant, counted from the epoch, of a midnight on the zone's clock."""
+        from ._frame import Series
+        from ._pandas import to_datetime
+
+        stamp = to_datetime(Series([clock], dtype="int64"), unit=self._time_unit)
+        stamp = stamp.dt.tz_localize(self._zone).dt.tz_convert("UTC").dt.tz_localize(None)
+        return int(stamp.astype("int64").iloc[0])
 
     def _edges(self, shift: int | None = None) -> Index:
         """The labels of every bin, holding the rule as their frequency, as pandas' do."""
