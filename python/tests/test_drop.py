@@ -233,6 +233,7 @@ MISSING = {
     "series": lambda lib: lib.Series([1, 2], index=["x", "y"]).drop("z"),
     "index": lambda lib: lib.Index(["x", "y"]).drop("z"),
     "repeated": lambda lib: lib.DataFrame({"a": [1, 2]}, index=["x", "x"]).drop("z"),
+    "other type": lambda lib: lib.DataFrame({"a": [1, 2]}).drop(index=["x", 1]),
 }
 
 
@@ -243,3 +244,29 @@ def test_a_missing_row_label_is_named_in_pandas_words(firepanda, make):
     with pytest.raises(KeyError) as theirs:
         make(pd)
     assert str(mine.value) == str(theirs.value)
+
+
+OTHER_TYPES = {
+    "skipped": lambda lib: lib.DataFrame({"a": [1, 2]}).drop(index=["x", 1], errors="ignore"),
+    "float for int": lambda lib: lib.Index([1, 2]).drop(1.0),
+    "int for float": lambda lib: lib.Index([1.0, 2.5]).drop(1),
+}
+
+
+@pytest.mark.parametrize("make", OTHER_TYPES.values(), ids=OTHER_TYPES.keys())
+def test_a_label_of_another_type_is_read_as_pandas_reads_it(firepanda, make):
+    assert repr(make(firepanda)) == repr(make(pd))
+
+
+CONTAINS = {
+    "text in numbers": lambda lib: "x" in lib.Index([1, 2]),
+    "number in text": lambda lib: 1 in lib.Index(["a"]),
+    "float in ints": lambda lib: 1.0 in lib.Index([1, 2]),
+    "int in floats": lambda lib: 1 in lib.Index([1.0, 2.5]),
+    "text in a column": lambda lib: "x" in lib.Series([1, 2]),
+}
+
+
+@pytest.mark.parametrize("make", CONTAINS.values(), ids=CONTAINS.keys())
+def test_in_answers_for_a_label_of_any_type(firepanda, make):
+    assert make(firepanda) == make(pd)

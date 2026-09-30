@@ -27611,10 +27611,23 @@ class IndexMixin:
             except KeyError:
                 return False
             return True
+        hash(key)
         try:
-            return self._inner.contains(key)
-        except Exception as error:
-            raise translate(error) from None
+            return self._inner.contains(self._number_as_labels(key))
+        except Exception:
+            # The core refuses a label of a type it cannot compare with the labels.
+            return False
+
+    def _number_as_labels(self, key: Any) -> Any:
+        """A number as the type of the labels, so 1.0 finds 1 and 1 finds 1.0 as in pandas."""
+        if isinstance(key, bool) or not isinstance(key, (int, float)):
+            return key
+        kind = self._inner.dtype()
+        if kind.startswith(("int", "uint")) and isinstance(key, float) and key.is_integer():
+            return int(key)
+        if kind.startswith("float") and isinstance(key, int):
+            return float(key)
+        return key
 
     def __bool__(self) -> bool:
         """Refuses, in the same words pandas refuses in.
@@ -28707,14 +28720,19 @@ class IndexMixin:
             if missing and errors == "raise":
                 raise KeyError(f"{[wanted[at] for at in missing]} not found in axis")
             return self.delete([at for at in found if at != -1])
+        wanted = [self._number_as_labels(label) for label in wanted]
         try:
-            return Index._wrap(self._inner.drop(list(wanted), errors))
+            return Index._wrap(self._inner.drop(wanted, errors))
         except Exception as error:
-            if "not found in axis" in str(error):
-                # The core prints the labels as text; pandas lists them as they were given.
-                missing = [label for label in wanted if label not in self]
+            # The core prints missing labels as text and refuses a label of another
+            # type outright; pandas lists them as they were given, or skips them.
+            missing = [label for label in wanted if label not in self]
+            if not missing:
+                raise translate(error) from None
+            if errors == "raise":
                 raise KeyError(f"{missing} not found in axis") from None
-            raise translate(error) from None
+            kept = [label for label in wanted if label in self]
+            return Index._wrap(self._inner.drop(kept, errors))
 
     def putmask(self, mask: Any, value: Any) -> Index:
         """The index with the labels a mask picks out replaced.

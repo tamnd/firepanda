@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: A label of another type in `in` and drop
+
+`"x" in Index([1, 2])` raised the core's refusal to compare a text label with numbers, where pandas answers False, and `drop` of such a label raised the same error rather than pandas' `KeyError`, or skipping it under `errors="ignore"`. Both now answer as pandas does, and a whole float finds an integer label, and an integer a float one, as it does in pandas.
+
 ### Fixed: A missing row label in drop is named as pandas names it
 
 Dropping a row label that is not there raised `index: [z] not found in axis`, the core's words with the labels printed as text. It now raises pandas' `KeyError: "['z'] not found in axis"`, listing the missing labels as they were given, for frames, columns and indexes alike.
