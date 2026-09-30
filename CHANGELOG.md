@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: every sort_index argument on the column labels
+
+`DataFrame.sort_index(axis=1)` takes `key`, `level`, `sort_remaining`, a direction for each level, `na_position` and `ignore_index`, as pandas does. The column labels sort a level at a time the way the row labels already did, so a `key` over the column labels is no longer refused.
+
 ### Added: method, limit and tolerance on Index.get_indexer and Index.reindex
 
 `Index.get_indexer` and `Index.reindex` take `method="pad"`, `"ffill"`, `"backfill"`, `"bfill"` or `"nearest"`, with `limit` and `tolerance`, the way pandas does. A label the index does not hold reads from the label before it, after it or nearest it, on numbers, words and dates, on a rising or a falling index. A repeated index, an index in no order, an unknown method and a limit or tolerance with no method are refused with pandas' own errors.

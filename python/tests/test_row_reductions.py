@@ -103,11 +103,6 @@ def test_a_row_of_text_says_the_operation_is_not_supported() -> None:
         words(fp).mean(axis=1)
 
 
-def test_a_key_on_the_column_axis_is_refused() -> None:
-    with pytest.raises(NotImplementedError, match="key"):
-        numbers(fp).sort_index(axis=1, key=lambda labels: labels)
-
-
 @needs_pandas
 @pytest.mark.parametrize("name", ["sum", "prod", "product", "mean", "max", "var", "kurt", "all"])
 def test_a_positional_axis_warns_and_is_used_as_pandas_does(name: str) -> None:
