@@ -4626,6 +4626,16 @@ FUNCTIONS = (
         params=(("column", "object"), ("name", "object")),
         returns="DataFrame",
     ),
+    # The one door SQL comes in by. The Python side decides which frames are
+    # in scope, which is the caller's locals and globals behind any it was
+    # handed, and this side runs the statement over them.
+    Binding(
+        mojo="run_sql",
+        name="_sql",
+        doc="Runs one SQL statement over the frames named for it.",
+        params=(("query", "str"), ("names", "list[str]"), ("frames", "list[object]")),
+        returns="DataFrame",
+    ),
     # Not a user entry point. Every row of the error table in
     # `python/firepanda/errors.py` has to be exercised from Python, and five
     # bound methods cannot reach most of them, so the Mojo side offers a way to

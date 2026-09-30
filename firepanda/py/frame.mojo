@@ -59,6 +59,9 @@ from firepanda.py.convert import (
     take_schema,
     take_stream,
 )
+from firepanda.sql.catalog import Catalog
+from firepanda.sql.ddl import execute
+from firepanda.sql.run import Dialect
 from firepanda.py.errors import (
     CANCELLED,
     COLUMN,
@@ -2727,3 +2730,61 @@ def raise_for_test(kind: PythonObject) raises -> PythonObject:
     if which == "untagged":
         raise Error("something went wrong a long way down")
     raise tagged(VALUE, String("no such kind ", kind.__repr__()))
+
+
+def run_sql(
+    query: PythonObject, names: PythonObject, frames: PythonObject
+) raises -> PythonObject:
+    """Runs one SQL statement over frames named for it, in DuckDB's dialect.
+
+    The frames are the whole catalog. Which ones are in it is the Python side's
+    decision, since it is the side that can read the caller's names, and this
+    side only puts each under the name it was handed and runs the statement
+    against them. The catalog is thrown away afterwards, so a `CREATE` in the
+    statement changes nothing the next call sees.
+
+    Args:
+        query: The statement.
+        names: The name each frame is registered under, a list of strings.
+        frames: The frames, a list as long as `names`.
+
+    Returns:
+        What the statement answers, as a new frame.
+
+    Raises:
+        Error: Tagged `unsupported` for a statement firepanda refuses by name,
+            and `value` for one that does not parse or does not bind.
+    """
+    var text = words(query, "query")
+    if len(names) != len(frames):
+        raise tagged(
+            VALUE,
+            String(
+                "sql was given ",
+                len(names),
+                " names and ",
+                len(frames),
+                " frames, which have to come in pairs",
+            ),
+        )
+    var catalog = Catalog()
+    for i in range(len(names)):
+        var name = words(names[i], "name")
+        var frame = PyDataFrame._other(frames[i], name)
+        try:
+            catalog.register(name, DataFrame(copy=frame[]))
+        except cause:
+            raise retagged(VALUE, cause)
+    var answer: DataFrame
+    try:
+        answer = execute(Dialect(), text, catalog)
+    except cause:
+        var message = String(cause)
+        # A refusal names firepanda as what cannot do it, which is the one
+        # thing that tells it from a statement that is wrong.
+        if message.startswith("firepanda ") or message.startswith(
+            "Not Implemented Error"
+        ):
+            raise tagged(UNSUPPORTED, message)
+        raise tagged(VALUE, message)
+    return PythonObject(alloc=PyDataFrame(ArcPointer(answer^)))

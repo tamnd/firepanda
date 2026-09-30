@@ -19,6 +19,7 @@ from firepanda.py.frame import (
     open_arrow,
     open_csv,
     raise_for_test,
+    run_sql,
     series_to_frame,
 )
 from firepanda.py.index import PyIndex
@@ -56,6 +57,9 @@ def register(mut module: PythonModuleBuilder) raises:
     module.def_function[series_to_frame](
         "_series_to_frame",
         docstring="A column, as a frame of one column under a chosen name.",
+    )
+    module.def_function[run_sql](
+        "_sql", docstring="Runs one SQL statement over the frames named for it."
     )
     module.def_function[raise_for_test](
         "_raise_for_test",

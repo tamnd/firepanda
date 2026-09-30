@@ -136,6 +136,7 @@ from ._scalars import NaT, Timedelta, Timestamp
 from ._sparse import SparseDtype
 from ._spss import read_spss
 from ._sql import read_sql, read_sql_query, read_sql_table
+from ._sql_query import register, sql, unregister
 from ._stata import read_stata
 from ._tester import test
 from ._textread import read_fwf, read_table
@@ -249,10 +250,12 @@ __all__ = [
     "read_stata",
     "read_table",
     "read_xml",
+    "register",
     "reset_option",
     "set_eng_float_format",
     "set_option",
     "show_versions",
+    "sql",
     "test",
     "testing",
     "timedelta_range",
@@ -262,6 +265,7 @@ __all__ = [
     "to_timedelta",
     "tseries",
     "unique",
+    "unregister",
     "util",
     "wide_to_long",
 ]
