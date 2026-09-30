@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Cross sections across columns of several levels
+
+`xs(key, axis=1, level=...)` now crosses the column labels the way it crosses row labels, keeping the columns that hold the key on the given levels and dropping those levels unless `drop_level` is False. Flat columns refuse with pandas' TypeError. `df.loc[rows, key]` with a label of the first column level now names the columns under it, as `df[key]` does, and both keep the names of the levels that stay.
+
 ### Added: Correlate instants, spans and categories
 
 `corr`, `corrwith`, `autocorr` and `Series.cov` now read an instant or a span as a count of its unit and a column of categories by its values, where they used to refuse. A frame reads NaT as missing, while a column read against a column counts a NaT with no zone as the smallest int64, as pandas hands numpy the raw count. `DataFrame.cov` refuses instants and spans with pandas' TypeError, and text categories refuse as text does.
