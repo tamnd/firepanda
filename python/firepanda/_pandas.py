@@ -7731,12 +7731,16 @@ def _first_text(columns: list[Series]) -> Any:
     return None if best is None else columns[best[1]].iloc[best[0]]
 
 
-def _as_floats(columns: list[Series]) -> list[Series]:
+def _as_floats(columns: list[Series], raw_gaps: bool = False) -> list[Series]:
     """The columns as float64, the way pandas reads them for a correlation.
 
     Integers and flags become floats. A text column holding a value raises
     pandas' ValueError, and one holding nothing reads as missing, as numpy
-    reads it. Anything else, a date or a category, is refused.
+    reads it. Instants and spans read as counts of their unit, and a column of
+    categories by its values. A frame reads NaT as missing, but a column read
+    against a column hands numpy its raw count, so with `raw_gaps` a NaT with
+    no zone reads as the smallest int64, as pandas reads it. Anything else is
+    refused.
 
     Raises:
         ValueError: For a text column with a value in it.
@@ -7753,6 +7757,14 @@ def _as_floats(columns: list[Series]) -> list[Series]:
             out.append(column.isna().astype("float64") * math.nan)
         elif _counts_as_numeric(kind):
             out.append(column if kind == "float64" else column.astype("float64"))
+        elif str(kind).startswith(("timedelta64[", "datetime64[")):
+            spans = str(kind)[0] == "t"
+            counts = _span_counts(column, _unit_of(str(kind))) if spans else _instant_counts(column)
+            raw = raw_gaps and "," not in str(kind)
+            out.append(counts.fillna(-(2.0**63)) if raw else counts)
+        elif kind == "category":
+            # pandas reads a column of categories by its values, so text ones refuse as text does.
+            out.extend(_as_floats([column.astype(column.cat.categories.dtype)], raw_gaps))
         else:
             raise NotImplementedError(
                 f"a correlation over a {kind} column is not supported yet, because pandas"
@@ -15797,6 +15809,11 @@ class DataFrameMixin(_Carries):
         """
         read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
         names = list(read._inner.names())
+        if any(str(read[name].dtype).startswith(("datetime64[", "timedelta64[")) for name in names):
+            raise TypeError(
+                "DataFrame contains columns with dtype datetime64 or timedelta64, which are"
+                " not supported for cov."
+            )
         columns = _as_floats([read[name] for name in names])
         if any(int(column.isna().sum()) for column in columns):
             return _square(names, lambda a, b: _covariance(columns[a], columns[b], min_periods, 1))
@@ -20192,7 +20209,7 @@ class SeriesMixin(_Carries):
         mine, theirs = self._aligned_with(other)
         if len(mine) == 0:
             return math.nan
-        mine, theirs = _as_floats([mine, theirs])
+        mine, theirs = _as_floats([mine, theirs], raw_gaps=True)
         _correlation_method(method)
         return _pearson(mine, theirs, method, min_periods)
 
@@ -20201,7 +20218,7 @@ class SeriesMixin(_Carries):
         mine, theirs = self._aligned_with(other)
         if len(mine) == 0:
             return math.nan
-        mine, theirs = _as_floats([mine, theirs])
+        mine, theirs = _as_floats([mine, theirs], raw_gaps=True)
         return _covariance(mine, theirs, min_periods, ddof)
 
     def _autocorr(self, lag: int) -> float:
