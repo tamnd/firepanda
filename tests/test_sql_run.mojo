@@ -1343,6 +1343,32 @@ def test_a_values_column_of_nulls_alone_is_nulls() raises:
     same(read_back(out, "k"), [0], "none of them there")
 
 
+def test_a_count_of_a_constant_counts_rows_past_a_null() raises:
+    # A count of a constant is answered from the height of the input rather
+    # than from a column of the constant, and the column it reads the height
+    # off holds a null, which a count of that column would skip.
+    var out = run(
+        (
+            "SELECT count(*) AS n, count(1) AS o, count(NULL) AS z, count(x)"
+            " AS k FROM (VALUES (NULL, 1), (2, 2), (NULL, 3)) t(x, y)"
+        ),
+        session(),
+    )
+    same(read_back(out, "n"), [3], "every row")
+    same(read_back(out, "o"), [3], "every row again")
+    same(read_back(out, "z"), [0], "a null is never counted")
+    same(read_back(out, "k"), [1], "the one row x holds")
+    var grouped = run(
+        (
+            "SELECT y % 2 AS g, count(*) AS n FROM (VALUES (NULL, 1), (2, 2),"
+            " (NULL, 3)) t(x, y) WHERE y > 0 GROUP BY 1 ORDER BY 1"
+        ),
+        session(),
+    )
+    same(read_back(grouped, "g"), [0, 1], "both groups")
+    same(read_back(grouped, "n"), [1, 2], "the rows of each")
+
+
 def test_a_query_with_no_from_answers_a_constant() raises:
     # A statement with no FROM lowers to a literal table of one row, and the
     # projection above it needs a column for the constant to land in. The column

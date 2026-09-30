@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: count(*) counts the rows without building a column
+
+A SQL `count(*)`, and a count of any constant that is not null, now reads the number of rows off a column the input already has. Before, the constant was built into a column the height of the table and then counted. On ClickBench at 1M rows, `SELECT COUNT(*) FROM hits` went from 7.5 ms to 0.3 ms and q2, which counts beside a sum and a mean, from 9.9 ms to 3.5 ms.
+
 ### Added: reset_index names on row labels of one level
 
 `DataFrame.reset_index(names=...)` names the column the old row labels land in when the labels have one level, as pandas does: a name, or the first name of a list, with an empty list keeping the labels' own name. It was refused unless the labels had several levels.
@@ -55,6 +59,7 @@ A series reduction and `Series.kurt` take `numeric_only=True` and read the colum
 ### Fixed: the join refusal no longer names POSITIONAL, which runs
 
 The `join-form` refusal, and the README table generated from it, said POSITIONAL joins were not run. They are, and so are ASOF joins. The refusal now names only what it refuses: NEAREST, and the mark, single, right_semi and right_anti types JOIN BY can name. The module notes in `firepanda/sql/plan.mojo` also said a recursive CTE was refused by name. It lowers to the fixed point it asks for, and only a `WITH` inside one or a union by name as its body is refused.
+
 ### Added: shift by a frequency across columns and on periods
 
 `DataFrame.shift(freq=..., axis=1)` moves the column labels, a period index accepts any offset that names its own frequency, such as `MonthEnd(1)` on monthly periods, and refuses any other frequency with pandas' "Given freq ... does not match PeriodIndex freq ..." error. A range index is named RangeIndex in the refusal on plain labels, as in pandas.
@@ -162,6 +167,7 @@ A level of a MultiIndex that holds whole numbers and a gap keeps them as int64, 
 ### Added: firepanda.sql runs a query over the frames in scope
 
 `firepanda.sql("SELECT ... FROM orders")` runs one statement in DuckDB's dialect and answers a frame. A table name is looked for among the frames given to `firepanda.register`, then the caller's local variables, then its globals, and only a `DataFrame` or a `Series` is taken, so a variable of another kind hides nothing. SQL folds names to lower case, so `Orders` reaches a variable called `orders`, and two variables whose names differ only in case are refused as ambiguous. `capture=False` leaves the caller's variables out. Each call runs over a catalog of its own, so a table one call creates is gone in the next. A statement firepanda does not run yet raises NotImplementedError and one that does not parse or bind raises ValueError with DuckDB's message.
+
 ### Added: shift by a list of periods
 
 `DataFrame.shift`, `Series.shift` and a group by's `shift` take a list of periods and answer a frame of a shift by each side by side, each column named after the column and the period with `suffix` between them, as pandas does. An empty list, a period that is not a whole number, a list across the rows and a suffix beside one period are refused in pandas' words.
@@ -503,9 +509,11 @@ A `MAP` type now carries its key and value types, written `MAP(K, V)` as DuckDB 
 ### Changed: Rolling.max takes pandas' extra arguments
 
 `Rolling.max` is the one window reduction pandas declares with `*args` before its engine arguments and `**kwargs` after them, and its body never reads either. firepanda declared the same three parameters as the other reductions and refused anything else, which was a registered divergence. The signature now matches pandas, and the extra arguments are dropped as pandas drops them. `Expanding.max` declares neither in pandas and still refuses them here.
+
 ### Changed: an infinity in a window is a missing value
 
 Rolling, expanding and exponentially weighted windows now treat both infinities as missing values, as pandas does in `BaseWindow._prep_values`, where before they were kept as values. `count` still counts an infinity, and `sem` divides the spread of the finite values by that count, which is how pandas composes it. So `rolling(3).sum()` over `[1, 2, inf, 3, 4, 5, 6]` is `[nan, nan, nan, nan, nan, 12, 15]`, and `rolling(2).max()` over `[1, inf, 2, 3]` is `[nan, nan, nan, 3]`.
+
 ### Changed: text counts with a missing row are float64
 
 `str.len`, `str.find`, `str.rfind`, `str.index`, `str.rindex` and `str.count` now answer float64 with NaN in the missing rows when the column has one, as pandas does, where before they answered int64 holding NaN. A column with no missing row still answers int64.

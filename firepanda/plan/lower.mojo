@@ -2423,6 +2423,22 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         var kind = agg_kind(plan.exprs.nodes[held[i]].op)
         var empty = folds_empty_to_null(plan.exprs.nodes[held[i]].op)
 
+        # A count of a constant that is not null is a count of the rows, which
+        # is what `count(*)` lowers to, and the rows are there to be counted
+        # in any column the input already has. Lowering the constant instead
+        # builds a column of ones the height of the chunk for the count to
+        # walk, which on ClickBench q0 was most of the query.
+        if (
+            kind == AggKind.COUNT
+            and base > 0
+            and plan.exprs.nodes[over].kind == ExprKind.LITERAL
+            and not plan.exprs.nodes[over].value.is_null()
+        ):
+            aggs.append(
+                GroupAgg(0, AggKind.SIZE, names[i], empty_is_null=empty)
+            )
+            continue
+
         if count == 0 and plan.exprs.nodes[over].kind == ExprKind.BINARY:
             var op = BinaryOp(UInt8(plan.exprs.nodes[over].op))
             var left = plan.exprs.nodes[over].children[0]
