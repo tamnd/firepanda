@@ -25495,25 +25495,45 @@ class GroupByMixin[Answer]:
         return self._shape("nunique", 0.0)
 
     def _quantile(self, q: Any, interpolation: str, numeric_only: bool) -> Answer:
-        """The value at one quantile within each group.
+        """The value at a quantile, or at each of a list of them, within each group.
 
-        `_quantile_wanted` reads one quantile and refuses every interpolation
-        but `linear`. The whole column reductions answer a list and the four
-        rules in `_PICKED` now, and a group does not yet, because a list answers
-        one more index level per group and picking a value means sorting every
-        group on its own.
+        One quantile under `linear` is a kernel reduction. A list of them, or a
+        rule that picks one of the two values either side, is each group's own
+        `quantile` stacked under its key, which is pandas' shape: a list adds a
+        level of the quantiles after the keys, and one quantile under a picking
+        rule answers one row a group, keeping whole numbers whole as pandas does.
 
         Args:
-            q: The quantile, between zero and one.
+            q: One quantile or a list of them, each between zero and one.
             interpolation: How to land between two values.
             numeric_only: Declared and held at False.
 
         Returns:
             The frame or the series pandas answers.
         """
-        return self._reduce(
-            "quantile", _quantile_wanted(q, interpolation), numeric_only=numeric_only
+        for one in q if isinstance(q, (list, tuple)) else [q]:
+            if isinstance(one, (int, float)) and not 0.0 <= one <= 1.0:
+                raise InvalidArgumentError(
+                    f"Each 'q' must be between 0 and 1. Got '{one}' instead"
+                )
+        wanted, alone = _quantiles_asked(q)
+        if alone and interpolation == "linear":
+            return self._reduce(
+                "quantile", _quantile_wanted(q, interpolation), numeric_only=numeric_only
+            )
+        _interpolation_written(interpolation)
+        _held_at(
+            "numeric_only",
+            numeric_only,
+            False,
+            "each group's own quantile reads every column it holds",
         )
+        if not self._members():
+            return self._reduce("quantile", 0.5, numeric_only=numeric_only)
+        answer = self._each_keyed(lambda rows: rows.quantile(wanted, interpolation=interpolation))
+        if alone:
+            answer = answer.droplevel(-1)
+        return answer if self._as_index else answer.reset_index()
 
     def _transform(self, kind: str, periods: int = 1) -> DataFrame:
         """Runs one transform over the groups and hands back the frame it makes.

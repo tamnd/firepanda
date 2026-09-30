@@ -270,8 +270,6 @@ def test_a_key_and_a_level_together_refuse(firepanda: ModuleType) -> None:
         ("min", {"engine": "numba"}, "engine"),
         ("std", {"engine": "numba"}, "engine"),
         ("nunique", {"dropna": False}, "dropna"),
-        ("quantile", {"interpolation": "lower"}, "interpolation"),
-        ("quantile", {"q": [0.1, 0.9]}, "single quantile"),
         ("any", {"skipna": False}, "skipna"),
         ("all", {"skipna": False}, "skipna"),
     ],

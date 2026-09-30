@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: group quantiles at a list of quantiles and under the picking rules
+
+`GroupBy.quantile` takes a list of quantiles, answering one more index level after the keys as pandas does, and takes `interpolation="lower"`, `"higher"`, `"nearest"` and `"midpoint"`, keeping whole numbers whole. A quantile outside zero and one is refused in pandas' words.
+
 ### Added: value_counts bins and set_index verify_integrity
 
 `Series.value_counts(bins=...)` counts the values in equal-width or given bins, as pandas does, with the bins as an unnamed interval index. `set_index(verify_integrity=True)` checks that the new row labels are each seen once and refuses a repeated one with pandas' message.
