@@ -3004,6 +3004,8 @@ def _row_reduced(frame: Any, kind: str, param: float, skipna: bool, min_count: i
     whole = bool(columns) and all(not kind.startswith("float") for kind in printed)
     flags = bool(columns) and all(kind == "bool" for kind in printed)
     if not flags and "bool" in printed:
+        if kind in _ROW_OBJECT_FOLDS:
+            return _row_objects(columns, kind, skipna, min_count).set_axis(index)
         raise NotImplementedError(
             f"{kind}(axis=1) is not supported yet over flags beside numbers, because pandas"
             " reads such a row as objects and answers in Python's own arithmetic"
@@ -3044,6 +3046,42 @@ def _row_reduced(frame: Any, kind: str, param: float, skipna: bool, min_count: i
     if kind in ("sum", "prod") and min_count > 0:
         voided = voided | (present < min_count)
     return answer.mask(voided, math.nan).set_axis(index)
+
+
+_ROW_OBJECT_FOLDS = ("sum", "prod", "max", "min", "mean")
+"""The reductions across a row of flags beside numbers that pandas answers in
+Python's own arithmetic, over a row it reads as objects."""
+
+
+def _row_objects(columns: list[Any], kind: str, skipna: bool, min_count: int) -> Any:
+    """Each row of flags beside numbers reduced as Python objects, as pandas does.
+
+    pandas holds such a row as objects, so a flag is 1 or 0 in a sum and a
+    product, `max` and `min` keep whichever value wins as it is, and the mean
+    is the sum over how many values there are. A gap is skipped, or makes the
+    answer NaN under `skipna=False`, and a sum or product with fewer than
+    `min_count` values is None, which is what pandas writes there.
+    """
+    from ._frame import Series
+
+    answers: list[Any] = []
+    for row in zip(*(column.tolist() for column in columns), strict=True):
+        held = [value for value in row if value is not None and value == value]
+        if kind in ("sum", "prod") and len(held) < min_count:
+            answers.append(None)
+        elif not skipna and len(held) < len(row):
+            answers.append(math.nan)
+        elif kind == "sum":
+            answers.append(sum(held, 0))
+        elif kind == "prod":
+            answers.append(math.prod(held))
+        elif not held:
+            answers.append(math.nan)
+        elif kind == "mean":
+            answers.append(sum(held, 0) / len(held))
+        else:
+            answers.append(max(held) if kind == "max" else min(held))
+    return Series(answers, dtype=object)
 
 
 def _row_text(frame: Any, kind: str, skipna: bool, min_count: int) -> Any:
