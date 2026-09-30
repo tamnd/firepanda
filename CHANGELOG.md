@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a map's key and value types, and histogram's MAP(K, UBIGINT)
+
+A `MAP` type now carries its key and value types, written `MAP(K, V)` as DuckDB writes them, and two maps are the same type only when both agree. `histogram` answers `MAP(K, UBIGINT)` for a key of any flat type, including the bins form, as DuckDB does, so the differential semantics check now compares its full type rather than the overload alone. A map whose key or value is itself nested is still a bare `MAP`, and says nothing about what it holds.
+
 ### Added: Styler.to_excel
 
 `Styler.to_excel` now writes a styled frame to a workbook as pandas does. Each cell's CSS goes through pandas' `CSSToExcelConverter`, ported without numpy along with its CSS reader, and the openpyxl, xlsxwriter and odf writers turn the result into the same fonts, fills, borders, alignments and number formats pandas writes, including across merged cells. `firepanda.io.formats.excel` and `firepanda.io.formats.css` hold the converter and the reader where pandas keeps them. A `loc` key on rows labelled by several levels that holds a slice or a list for fewer levels than there are, such as `loc[(slice(None),)]`, now keeps every level as pandas does, rather than dropping the ones it named.
