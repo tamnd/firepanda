@@ -36923,6 +36923,67 @@ def _warns_by_position(fn: Callable[..., Any], shown: str) -> Callable[..., Any]
     return method
 
 
+_AXIS_NONE_REFUSED = {
+    "DataFrame": (
+        "rank",
+        "diff",
+        "shift",
+        "pct_change",
+        "sort_values",
+        "sort_index",
+        "dropna",
+        "mode",
+        "apply",
+        "drop",
+        "take",
+        "corrwith",
+        "set_axis",
+        "interpolate",
+        "idxmin",
+        "idxmax",
+    ),
+    "Series": (
+        "rank",
+        "shift",
+        "sort_values",
+        "sort_index",
+        "drop",
+        "take",
+        "set_axis",
+        "interpolate",
+        "idxmin",
+        "idxmax",
+    ),
+}
+"""The methods pandas refuses `axis=None` on, where it names no axis rather than the default."""
+
+
+def _axis_none_refused(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """`fn` refusing an `axis` of None with pandas' error, by name or by position.
+
+    A method that takes `axis` only among its keywords, as `pct_change` does, is
+    read by name alone.
+    """
+    params = list(inspect.signature(fn).parameters)
+    at = params.index("axis") - 1 if "axis" in params else len(params)
+
+    @functools.wraps(fn)
+    def method(self: Any, *args: Any, **kwargs: Any) -> Any:
+        given = kwargs["axis"] if "axis" in kwargs else args[at] if len(args) > at else 0
+        if given is None:
+            raise InvalidArgumentError(f"No axis named None for object type {type(self).__name__}")
+        return fn(self, *args, **kwargs)
+
+    return method
+
+
+def _refuse_axis_none(*classes: type) -> None:
+    """Makes the methods of each class that read no default into a None axis refuse one."""
+    for cls in classes:
+        for name in _AXIS_NONE_REFUSED[cls.__name__]:
+            setattr(cls, name, _axis_none_refused(inspect.getattr_static(cls, name)))
+
+
 def _allow_positional(*classes: type) -> None:
     """Lets each class's reductions take their arguments by position, as pandas 3 still does."""
     for cls in classes:
