@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: ambiguous="infer", align by a level of a MultiIndex, and quantiles as an array
+
+`tz_localize(ambiguous="infer")` on a Series, a DatetimeIndex and through `dt.round` now works out which side of a repeated hour each reading is on from where the readings go back, and refuses what cannot be inferred in pandas' words. `align(level=)` lines a flat index up with one level of a MultiIndex for every join, and `quantile` takes an Index or a Series of quantiles as well as a list.
+
+### Fixed: Timestamps compare by the instant
+
+Two aware Timestamps in the same zone were compared by the wall clock, so the two sides of a repeated hour were equal and nanoseconds were ignored. They now compare by the instant, as in pandas.
+
 ### Added: MultiIndex to_frame, value_counts, sort keys, lookups by several levels and filling indexers
 
 `MultiIndex.to_frame()` now labels its rows with the index by default. `value_counts` counts each row. `sort_values(key=)` calls the key on the values of each level. `get_loc_level` looks a key up across several levels at once and drops those levels unless none would be left, as pandas does. `reindex(level=)` takes the rows holding each value of one level in turn, and `get_indexer` fills forward or back along sorted rows.

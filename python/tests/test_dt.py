@@ -372,7 +372,6 @@ def test_a_duration_column_answers_its_own_two_parts(firepanda: ModuleType) -> N
 @pytest.mark.parametrize(
     ("call", "expected"),
     [
-        (lambda s: zoned(s).dt.round("h", ambiguous="infer"), "ambiguous="),
         (lambda s: s.dt.as_unit("s", round_ok=False), "round_ok="),
         (lambda s: s.dt.floor(1), "freq has to be a string"),
     ],
@@ -380,17 +379,12 @@ def test_a_duration_column_answers_its_own_two_parts(firepanda: ModuleType) -> N
 def test_a_declared_argument_that_is_not_written_says_so(
     firepanda: ModuleType, call: Any, expected: str
 ) -> None:
-    """Four refusals, one test each, so none of them can be dropped by a tidy up.
+    """Refusals, one test each, so none of them can be dropped by a tidy up.
 
     The argument document 26 makes for the reductions and document 27 repeats
     for the transformations. A parameter that is accepted and ignored is right at
     its default and wrong everywhere else, and where it is wrong is where a real
     program uses it.
-
-    The `infer` row puts a zone on the column before it calls, because pandas
-    reads the two daylight saving policies there only when there is one, and a
-    naive column comes back rounded with them unread. That is what the test
-    below this one is about.
     """
     with pytest.raises(NotImplementedError, match=expected):
         call(stamps(firepanda))

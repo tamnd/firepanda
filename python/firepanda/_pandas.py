@@ -2846,8 +2846,8 @@ def _on_the_clock[Answer](
     tell the difference. That is twice the work for the one case that needs it,
     against a third kind of argument crossing the boundary for every other call.
 
-    `infer` is still refused, since it reads the order of the rows to decide
-    where the clock went back rather than being told.
+    `infer` asks both ways too, and reads where the clock went back from the
+    order of the repeated readings, as pandas does.
 
     Args:
         place: Makes the call, given the fold word, the gap word and the shift.
@@ -2865,7 +2865,6 @@ def _on_the_clock[Answer](
         InvalidArgumentError: If `nonexistent` is not one pandas takes, if a
             list of flags is the wrong length, or if a shift out of a gap lands
             back in the same hour.
-        NotImplementedError: For `ambiguous="infer"`.
     """
     if isinstance(nonexistent, datetime.timedelta):
         gap, shift = "timedelta", _nanoseconds(nonexistent)
@@ -2883,12 +2882,8 @@ def _on_the_clock[Answer](
 
     if isinstance(ambiguous, str):
         if ambiguous == "infer":
-            raise NotImplementedError(
-                "ambiguous='infer' is not supported yet, because it reads the"
-                " order of the rows to find where the clock went back rather"
-                " than being told, and True, False, 'NaT' and a list of flags"
-                " are the ones written"
-            )
+            early, late = placed("True"), placed("False")
+            return pick(_inferred_folds(early.tolist(), late.tolist()), early, late)
         return placed("NaT" if ambiguous == "NaT" else "raise")
     if not hasattr(ambiguous, "__iter__"):
         return placed("True" if ambiguous else "False")
@@ -2900,6 +2895,46 @@ def _on_the_clock[Answer](
     if not any(flags):
         return placed("False")
     return pick(flags, placed("True"), placed("False"))
+
+
+def _inferred_folds(early: list[Any], late: list[Any]) -> list[bool]:
+    """Which rows are on the summer side of a repeated hour, read from their order.
+
+    `early` is every reading placed as summer time and `late` as winter time,
+    so the rows that differ are the repeated ones. Each run of them has to go
+    back once, the rows before that on summer time and the rest on winter
+    time, as pandas infers it.
+
+    Raises:
+        ValueError: For a run that never goes back or goes back more than once,
+            in pandas' words.
+    """
+    repeated = [
+        at for at, (a, b) in enumerate(zip(early, late, strict=True)) if not _missing(a) and a != b
+    ]
+    flags = [True] * len(early)
+    runs: list[list[int]] = []
+    for at in repeated:
+        if runs and runs[-1][-1] == at - 1:
+            runs[-1].append(at)
+        else:
+            runs.append([at])
+    for run in runs:
+        falls = [n for n in range(len(run) - 1) if early[run[n + 1]] <= early[run[n]]]
+        if not falls:
+            wall = early[run[0]].tz_localize(None)
+            if len(repeated) == 1:
+                raise InvalidArgumentError(
+                    f"Cannot infer dst time from {wall} as there are no repeated times"
+                )
+            raise InvalidArgumentError(f"{wall} is an ambiguous time and cannot be inferred.")
+        if len(falls) > 1:
+            raise InvalidArgumentError(
+                f"There are {len(falls)} dst switches when there should only be 1."
+            )
+        for at in run[falls[0] + 1 :]:
+            flags[at] = False
+    return flags
 
 
 def _keyed_order(columns: list[Any], key: Any, ascending: Any, na_position: str) -> list[int]:
@@ -3423,7 +3458,7 @@ def _category_reduction(kind: str, ordered: bool) -> None:
 def _quantiles_asked(q: Any) -> tuple[list[float], bool]:
     """Reads the quantiles a series or a frame was asked for.
 
-    pandas takes one quantile or a list of them. One answers a value for a
+    pandas takes one quantile or a list, an array or an Index of them. One answers a value for a
     series and a series for a frame, and a list answers a series labelled by
     the quantiles for a series and a frame for a frame, so what comes back is
     the list and whether it arrived as one number, and the caller picks the
@@ -3438,16 +3473,20 @@ def _quantiles_asked(q: Any) -> tuple[list[float], bool]:
     Raises:
         InvalidArgumentError: If any of them is outside zero and one, with
             pandas' own sentence.
-        NotImplementedError: If it is neither a number nor a list of numbers.
+        NotImplementedError: If it is neither a number nor numbers.
     """
     alone = isinstance(q, (int, float)) and not isinstance(q, bool)
     asked = [q] if alone else q
+    if not alone and hasattr(q, "tolist") and not isinstance(q, (list, tuple)):
+        # An Index, a Series or an array of quantiles is read as its values.
+        asked = q.tolist()
+        asked = asked if isinstance(asked, list) else [asked]
     if not isinstance(asked, (list, tuple)) or not all(
         isinstance(one, (int, float)) and not isinstance(one, bool) for one in asked
     ):
         raise NotImplementedError(
-            "q has to be a number or a list of numbers for now, because an array or"
-            " an Index of quantiles is read through numpy upstream"
+            "q has to be a number or numbers, because a quantile is a number between"
+            " zero and one"
         )
     wanted = [float(one) for one in asked]
     if not all(0.0 <= one <= 1.0 for one in wanted):
@@ -9735,10 +9774,10 @@ def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value
         ValueError: For an axis the call cannot line up, with pandas' words.
     """
     from ._frame import DataFrame, Series
+    from ._multi import MultiIndex
 
     if not isinstance(other, (DataFrame, Series)):
         raise TypeError(f"unsupported type: {type(other)}")
-    _align_level(level)
     mine_frame = isinstance(this, DataFrame)
     owner = "DataFrame" if mine_frame else "Series"
     number = _align_axis(axis, owner, (0, 1) if mine_frame else (0,))
@@ -9746,6 +9785,10 @@ def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value
         raise InvalidArgumentError("Must specify axis=0 or 1")
     if not mine_frame and isinstance(other, DataFrame):
         number = 0
+    layered = isinstance(this.index, MultiIndex) + isinstance(other.index, MultiIndex)
+    if level is not None and number != 1 and layered == 1:
+        return _aligned_by_level(this, other, join, number, level, fill_value)
+    _align_level(level)
     if mine_frame and isinstance(other, DataFrame):
         rows = None if number == 1 else _aligned_labels(this.index, other.index, join)
         joined = None
@@ -9769,6 +9812,35 @@ def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value
         return pair
     # Two columns are filled everywhere, so a gap each side already had goes too.
     return pair[0].fillna(fill_value), pair[1].fillna(fill_value)
+
+
+def _aligned_by_level(
+    this: Any, other: Any, join: Any, number: Any, level: Any, fill_value: Any
+) -> tuple:
+    """Both sides of an `align` whose rows line up a flat index with one level of the other.
+
+    As in pandas, the join only picks which rows of the MultiIndex are kept:
+    all of them when its side leads the join or the join is outer, else those
+    whose value at the level the flat side has. The flat side is then spread
+    over those rows by that value.
+    """
+    from ._frame import DataFrame, Index
+    from ._multi import MultiIndex
+
+    multi_first = isinstance(this.index, MultiIndex)
+    multi, flat = (this, other) if multi_first else (other, this)
+    values = multi.index.get_level_values(level).tolist()
+    labels = set(flat.index.tolist())
+    whole = join == "outer" or join == ("left" if multi_first else "right")
+    rows = [at for at, value in enumerate(values) if whole or value in labels]
+    columns = None
+    if isinstance(this, DataFrame) and isinstance(other, DataFrame) and number is None:
+        joined = _aligned_labels(_column_labels(this), _column_labels(other), join)
+        columns = None if joined is None else joined.tolist()
+    kept = _moved_to(multi.iloc[rows], None, columns, fill_value)
+    spread = _moved_to(flat, Index([values[at] for at in rows]), columns, fill_value)
+    spread = spread.set_axis(kept.index)
+    return (kept, spread) if multi_first else (spread, kept)
 
 
 def _repeated_positions(count: int, repeats: Any, axis: Any) -> list[int]:
