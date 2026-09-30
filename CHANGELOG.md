@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Timestamp fold and MultiIndex sortorder as pandas takes them
+
+`Timestamp(fold=)` is taken only beside a naive `datetime` or fields given by name, where it now picks the side of a repeated hour when a zone is given, and it is refused in pandas' words beside text, a number, a date, a zoned moment or a year in the first position. `MultiIndex.sortorder` is kept as given, carried by a copy, a mask and a forward slice, and checked against the rows when an index is built from codes or a product.
+
 ### Fixed: Resample apply runs a function in pandas' order
 
 A function given to `apply` or `agg` over resample bins is first taken as an aggregation, one value a bin with a series of one read as its value, and over a frame it is tried on each column. An answer that is not one value makes it an apply over the whole bin, whose pieces are put end to end, under the bin labels whenever `group_keys` is set, as pandas does.

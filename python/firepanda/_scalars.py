@@ -653,6 +653,8 @@ class Timestamp(_datetime.datetime):
             TypeError: If the two forms are mixed, or the input names no moment.
             ValueError: If the text does not parse.
         """
+        if fold is not None:
+            _check_fold(ts_input, fold)
         if year is None and _nat_input(ts_input) and type(ts_input).__name__ != "timedelta64":
             return NaT  # type: ignore[return-value]
         zone = _zone(tz if tz is not _KEEP else tzinfo)
@@ -675,7 +677,11 @@ class Timestamp(_datetime.datetime):
             # zone straight to the builder below gives the other one. A number
             # counts from the epoch, which is a moment in UTC, so it converts.
             made = cls._from_nanos(nanos, spelled, None, fold)
-            return made.tz_localize(zone)
+            if fold is None:
+                return made.tz_localize(zone)
+            # The fold says which side of a repeated hour the wall clock is,
+            # the first, summer time, for 0 and the second for 1.
+            return made.tz_localize(zone, ambiguous=not fold)
         return cls._from_nanos(nanos, spelled, zone if zone is not None else found, fold)
 
     @classmethod
@@ -2559,6 +2565,28 @@ def _numpy_nanos(value: Any, finest: str) -> tuple[int, str]:
     spelled = str(value.dtype)
     unit = spelled[spelled.find("[") + 1 : -1] if "[" in spelled else "ns"
     return int(value.astype(finest).astype("int64")), unit if unit in _UNITS else "s"
+
+
+def _check_fold(ts_input: Any, fold: Any) -> None:
+    """Refuses a fold pandas refuses, which is any beside an input that is not ambiguous.
+
+    Only a wall clock with no zone can fall in a repeated hour, so pandas takes
+    a fold beside a naive `datetime` or the fields given by name, and refuses
+    it beside text, a number, or a moment that carries its zone. A year given
+    in the first position is a number there, so it is refused too.
+
+    Raises:
+        ValueError: For a fold other than 0 or 1, or beside such an input, in pandas' words.
+    """
+    if fold not in (0, 1):
+        raise InvalidArgumentError("Valid values for the fold argument are None, 0, or 1.")
+    naive = isinstance(ts_input, _datetime.datetime) and ts_input.tzinfo is None
+    if ts_input is not _KEEP and not naive:
+        raise InvalidArgumentError(
+            "Cannot pass fold with possibly unambiguous input: int, float, numpy.datetime64,"
+            " str, or timezone-aware datetime-like. Pass naive datetime-like or build"
+            " Timestamp from components."
+        )
 
 
 def _nat_input(value: Any) -> bool:

@@ -114,10 +114,38 @@ class _NoStr:
         raise AttributeError("Can only use .str accessor with Index, not MultiIndex")
 
 
+def _check_sortorder(sortorder: Any, keys: list[list[Any]]) -> None:
+    """Refuses a sortorder deeper than the rows are sorted, as pandas refuses it.
+
+    The depth is the most leading levels whose keys, read together, never step
+    back from one row to the next.
+
+    Raises:
+        ValueError: For a sortorder past that depth, in pandas' words.
+    """
+    if sortorder is None:
+        return
+    depth = len(keys)
+    while depth:
+        rows = list(zip(*keys[:depth], strict=True))
+        try:
+            if all(a <= b for a, b in itertools.pairwise(rows)):
+                break
+        except TypeError:
+            # Values of kinds that do not compare are in no order.
+            pass
+        depth -= 1
+    if sortorder > depth:
+        raise InvalidArgumentError(
+            "Value for sortorder must be inferior or equal to actual lexsort_depth:"
+            f" sortorder {sortorder} with lexsort_depth {depth}"
+        )
+
+
 class MultiIndex:
     """Labels made of several levels, which is `pandas.MultiIndex`."""
 
-    __slots__ = ("_codes", "_levels", "_names", "_owner")
+    __slots__ = ("_codes", "_levels", "_names", "_owner", "_sortorder")
 
     _levels: list[list[Any]]
     _codes: list[list[int]]
@@ -131,7 +159,7 @@ class MultiIndex:
         The frame the index was read off is left behind, so renaming a copy
         does not rename the frame.
         """
-        kept = ("_codes", "_levels", "_names")
+        kept = ("_codes", "_levels", "_names", "_sortorder")
         return None, {slot: getattr(self, slot) for slot in kept if hasattr(self, slot)}
 
     def __init__(
@@ -149,8 +177,8 @@ class MultiIndex:
         Args:
             levels: One list of distinct values per level.
             codes: One list per level saying which value every row holds, -1 for a gap.
-            sortorder: How many levels the rows are sorted by. Taken and not needed,
-                because sortedness is read off the rows.
+            sortorder: How many levels the rows are sorted by, kept as given and
+                checked against the codes when `verify_integrity` is set.
             names: The level names.
             copy: Taken, since the levels and codes are always copied.
             name: Another spelling of `names`.
@@ -158,7 +186,8 @@ class MultiIndex:
 
         Raises:
             TypeError: When one of levels and codes is missing.
-            ValueError: For levels and codes that do not fit together, in pandas' words.
+            ValueError: For levels and codes that do not fit together, or a sortorder
+                deeper than the codes are sorted, in pandas' words.
         """
         if levels is None or codes is None:
             raise TypeError("Must pass both levels and codes")
@@ -172,7 +201,9 @@ class MultiIndex:
         self._codes = codes
         if verify_integrity:
             self._verified()
+            _check_sortorder(sortorder, codes)
         self._names = _names_of(names if name is None else name, len(levels), [None] * len(levels))
+        self._sortorder = sortorder
 
     @classmethod
     def _built(cls, levels: list[list[Any]], codes: list[list[int]], names: list[Any]) -> Any:
@@ -230,7 +261,9 @@ class MultiIndex:
             raise InvalidArgumentError("all arrays must be same length")
         if not columns:
             raise InvalidArgumentError("Must pass non-zero number of levels/codes")
-        return cls._of_columns(columns, _names_of(names, len(columns), fallback))
+        made = cls._of_columns(columns, _names_of(names, len(columns), fallback))
+        made._sortorder = sortorder
+        return made
 
     @classmethod
     def from_tuples(cls, tuples: Any, sortorder: Any = None, names: Any = None) -> Any:
@@ -248,10 +281,13 @@ class MultiIndex:
             if names is None:
                 raise TypeError("Cannot infer number of levels from empty list")
             count = len(list(names))
-            return cls._built([[] for _ in range(count)], [[] for _ in range(count)], names)
-        width = max(len(row) for row in rows)
-        columns = [[row[i] if i < len(row) else None for row in rows] for i in range(width)]
-        return cls._of_columns(columns, _names_of(names, width, [None] * width))
+            made = cls._built([[] for _ in range(count)], [[] for _ in range(count)], names)
+        else:
+            width = max(len(row) for row in rows)
+            columns = [[row[i] if i < len(row) else None for row in rows] for i in range(width)]
+            made = cls._of_columns(columns, _names_of(names, width, [None] * width))
+        made._sortorder = sortorder
+        return made
 
     @classmethod
     def from_product(cls, iterables: Any, sortorder: Any = None, names: Any = NO_DEFAULT) -> Any:
@@ -266,9 +302,14 @@ class MultiIndex:
         parts = [_factorized(_list(each)) for each in iterables]
         rows = list(itertools.product(*(code for _, code in parts)))
         codes = [[row[i] for row in rows] for i in range(len(parts))]
-        return cls._built(
-            [level for level, _ in parts], codes, _names_of(names, len(parts), fallback)
-        )
+        levels = [level for level, _ in parts]
+        # pandas sorts every level before it multiplies them out, so its codes
+        # are sorted exactly as far as the values are.
+        values = [[level[c] for c in code] for level, code in zip(levels, codes, strict=True)]
+        _check_sortorder(sortorder, values)
+        made = cls._built(levels, codes, _names_of(names, len(parts), fallback))
+        made._sortorder = sortorder
+        return made
 
     @classmethod
     def from_frame(cls, df: Any, sortorder: Any = None, names: Any = None) -> Any:
@@ -281,9 +322,16 @@ class MultiIndex:
             raise TypeError("Input must be a DataFrame")
         labels = list(df.columns)
         columns = [df[label].tolist() for label in labels]
-        return cls._of_columns(columns, _names_of(names, len(labels), labels))
+        made = cls._of_columns(columns, _names_of(names, len(labels), labels))
+        made._sortorder = sortorder
+        return made
 
     # The shape of the thing.
+
+    @property
+    def sortorder(self) -> Any:
+        """How many levels the rows were said to be sorted by, or None, as given."""
+        return getattr(self, "_sortorder", None)
 
     @property
     def levels(self) -> FrozenList:
@@ -488,10 +536,16 @@ class MultiIndex:
                 raise IndexError(f"index {key} is out of bounds for axis 0 with size {size}")
             return self._row(at)
         if isinstance(key, slice):
-            return self._taken(list(range(size))[key])
+            made = self._taken(list(range(size))[key])
+            # Rows read forwards stay sorted as far as they were, as pandas keeps it.
+            if key.step is None or key.step > 0:
+                made._sortorder = self.sortorder
+            return made
         picks = _list(key)
         if picks and all(isinstance(pick, bool) for pick in picks):
-            return self._taken([at for at, keep in enumerate(picks) if keep])
+            made = self._taken([at for at, keep in enumerate(picks) if keep])
+            made._sortorder = self.sortorder
+            return made
         return self.take(picks)
 
     def _taken(self, rows: list[int]) -> Any:
@@ -655,7 +709,9 @@ class MultiIndex:
         """A copy, with new names when they are given."""
         given = names if names is not None else name
         chosen = self._names if given is None else _names_of(given, self.nlevels, self._names)
-        return self._built([list(v) for v in self._levels], [list(c) for c in self._codes], chosen)
+        made = self._built([list(v) for v in self._levels], [list(c) for c in self._codes], chosen)
+        made._sortorder = self.sortorder
+        return made
 
     def set_levels(self, levels: Any, *, level: Any = None, verify_integrity: bool = True) -> Any:
         """The index with some levels' values replaced, the codes kept.
