@@ -89,6 +89,15 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: frame(m).groupby("k").nth([]),
     lambda m: frame(m).groupby("k", dropna=False).nth(-1),
     lambda m: frame(m).groupby("k")["v"].nth(0),
+    lambda m: frame(m).groupby("k").nth(slice(0, 2)),
+    lambda m: frame(m).groupby("k").nth[1:],
+    lambda m: frame(m).groupby("k").nth[-2:],
+    lambda m: frame(m).groupby("k").nth[::2],
+    lambda m: frame(m).groupby("k").nth[-3::2],
+    lambda m: frame(m).groupby("k").nth[-10::3],
+    lambda m: frame(m).groupby("k").nth[:-1],
+    lambda m: frame(m).groupby("k").nth[0, 2:4],
+    lambda m: frame(m).groupby("k", dropna=False)["v"].nth[1:3],
     lambda m: frame(m).drop(index=60).groupby("k")["v"].idxmax(),
     lambda m: frame(m).drop(index=60).groupby("k")["v"].idxmin(),
     lambda m: frame(m).drop(index=60).groupby("k")["w"].idxmax(),
@@ -142,6 +151,8 @@ def test_a_numpy_mask_is_read_by_place(firepanda: ModuleType) -> None:
 
 
 MISTAKES: list[Callable[[Any], Any]] = [
+    lambda m: frame(m).groupby("k").nth[::-1],
+    lambda m: frame(m).groupby("k").nth["x"],
     lambda m: frame(m)[(frame(m)["v"] > 2).iloc[:3]],
     lambda m: frame(m).loc[(frame(m)["v"] > 2).iloc[:3]],
     lambda m: frame(m)[[True, False]],
@@ -166,7 +177,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: frame(m).groupby("k").nth(slice(0, 2)),
     lambda m: frame(m).groupby("k").nth(0, dropna="any"),
     lambda m: frame(m).groupby("k")["v"].idxmax(skipna=False),
     lambda m: frame(m).groupby("k", as_index=False).idxmax(),
@@ -175,7 +185,7 @@ REFUSED: list[Callable[[Any], Any]] = [
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """A slice of places, the deprecated `dropna`, `skipna` and keys as columns."""
+    """The deprecated `dropna`, `skipna` and keys as columns."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 

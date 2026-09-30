@@ -24768,6 +24768,29 @@ class NamedAgg:
         )
 
 
+def _nth_hit(place: int | slice, ahead: int, behind: int) -> bool:
+    """Whether a row `ahead` from its group's first row and `behind` its last is at `place`.
+
+    This is pandas' mask for `nth`, row by row: a slice with a negative start
+    counts its step from that start, or from the group's first row when the
+    start is before it.
+    """
+    if not isinstance(place, slice):
+        return ahead == place if place >= 0 else behind == -place - 1
+    start, stop = place.start, place.stop
+    step = 1 if place.step is None else place.step
+    if start is None:
+        hit = ahead % step == 0
+    elif start >= 0:
+        hit = ahead >= start and (ahead - start) % step == 0
+    else:
+        offset = ahead if ahead + behind + start + 1 < 0 else behind + start + 1
+        hit = behind < -start and offset % step == 0
+    if stop is not None:
+        hit = hit and (ahead < stop if stop >= 0 else behind >= -stop)
+    return hit
+
+
 class _NthSelector:
     """What `g.nth` hands back, which is called or indexed with the places."""
 
@@ -26622,24 +26645,35 @@ class GroupByMixin[Answer]:
         return _NthSelector(self)
 
     def _nth(self, n: Any) -> Any:
-        """The rows at the places `n` names, which is an int or a list of them."""
-        places = [n] if isinstance(n, int) and not isinstance(n, bool) else n
-        if not isinstance(places, (list, tuple)) or not all(
-            isinstance(one, int) and not isinstance(one, bool) for one in places
-        ):
-            raise NotImplementedError(
-                "nth takes a place or a list of places for now, because a slice"
-                " picks a run of places from each end"
-            )
-        front = self._positions(False) if any(one >= 0 for one in places) else None
-        back = self._positions(True) if any(one < 0 for one in places) else None
-        mask = None
+        """The rows at the places `n` names: an int, a slice, or a list or tuple of them.
+
+        A place counts from the front of its group, or from the back when it is
+        negative, and a slice keeps the run of places pandas' own mask keeps,
+        its step counted from its start.
+
+        Raises:
+            DTypeError: For a place that is none of those, in pandas' words.
+            InvalidArgumentError: For a slice that steps backwards.
+        """
+        from ._frame import Series
+
+        places = list(n) if isinstance(n, (list, tuple)) else [n]
         for one in places:
-            hit = cast("Series", front) == one if one >= 0 else cast("Series", back) == -one - 1
-            mask = hit if mask is None else mask | hit
-        if mask is None:
-            return self._kept(self._positions(False) < 0)
-        return self._kept(mask)
+            if isinstance(one, slice):
+                if one.step is not None and one.step < 0:
+                    raise InvalidArgumentError(f"Invalid step {one.step}. Must be non-negative")
+            elif not isinstance(one, int) or isinstance(one, bool):
+                raise DTypeError(
+                    f"Invalid index {type(one)}. Must be integer, list-like, slice or a"
+                    " tuple of integers and slices"
+                )
+        front = self._positions(False)
+        behind = self._positions(True).tolist()
+        keep = [
+            a is not None and a == a and any(_nth_hit(one, int(a), int(b)) for one in places)
+            for a, b in zip(front.tolist(), behind, strict=True)
+        ]
+        return self._kept(Series(keep, index=front.index))
 
     def _picked(self, how: str, column: str, skipna: bool) -> Series:
         """The label of the row holding each group's largest or smallest value.
