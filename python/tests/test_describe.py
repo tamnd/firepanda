@@ -145,6 +145,7 @@ MIXED: list[Callable[[Any], Any]] = [
     lambda m: m.Series(FRAME["b"]).describe(),
     lambda m: m.DataFrame(FRAME)[["s", "b"]].describe(),
     lambda m: m.DataFrame(FRAME).describe(include="all"),
+    lambda m: m.DataFrame(FRAME).describe(include=["number"]),
 ]
 
 
@@ -156,18 +157,6 @@ def test_a_mixed_answer_is_pandas_answer(
     import pandas as pd
 
     assert repr(build(firepanda)) == repr(build(pd))
-
-
-REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: m.DataFrame(FRAME).describe(include=["number"]),
-]
-
-
-@pytest.mark.parametrize("build", REFUSED)
-def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """A list of types and a row."""
-    with pytest.raises(NotImplementedError):
-        build(firepanda)
 
 
 @pytest.mark.parametrize("owner", ["Series", "DataFrame"])

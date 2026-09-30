@@ -14263,10 +14263,10 @@ class DataFrameMixin(_Carries):
         """`Series.describe` for the columns of numbers, a column a column.
 
         With neither `include` nor `exclude` the columns described are the
-        numbers and the moments, or every column when there are none of those,
-        and `include="all"` is every column. A column is described as
-        `Series.describe` describes it, and `include` and `exclude` as lists of
-        types are refused.
+        numbers, the spans and the moments without a zone, or every column when
+        there are none of those, and `include="all"` is every column. Other
+        values of `include` and `exclude` pick columns as `select_dtypes` does.
+        A column is described as `Series.describe` describes it.
         """
         from ._frame import DataFrame
 
@@ -14275,18 +14275,19 @@ class DataFrameMixin(_Carries):
         asked = _percentiles_asked(percentiles)
         if include == "all" and exclude is not None:
             raise InvalidArgumentError("exclude must be None when include is 'all'")
-        if include != "all" and (include is not None or exclude is not None):
-            raise NotImplementedError(
-                "include and exclude as lists of types are not supported yet, because"
-                " the one shape firepanda describes is a column of numbers"
-            )
-        columns = list(self.items())
-        if include is None:
+        picked = include != "all" and (include is not None or exclude is not None)
+        columns = list(
+            (self.select_dtypes(include=include, exclude=exclude) if picked else self).items()
+        )
+        if not columns:
+            raise InvalidArgumentError("No objects to concatenate")
+        if include is None and exclude is None:
             kept = [
                 (name, column)
                 for name, column in columns
                 if column.dtype in _SIGNED | _UNSIGNED | _FLOATING
-                or column.dtype.startswith("datetime64")
+                or column.dtype.startswith("timedelta64")
+                or (column.dtype.startswith("datetime64") and "," not in column.dtype)
             ]
             columns = kept or columns
         described = [(name, column.describe(asked)) for name, column in columns]
@@ -14295,8 +14296,13 @@ class DataFrameMixin(_Carries):
         labels: list[Any] = []
         for _, answer in sorted(described, key=lambda pair: len(pair[1])):
             labels += [label for label in answer.index.tolist() if label not in labels]
+        # A label a column has no answer for is NaN, as pandas prints it.
         return DataFrame(
-            {name: answer.reindex(labels).tolist() for name, answer in described}, index=labels
+            {
+                name: [answer[label] if label in answer.index else math.nan for label in labels]
+                for name, answer in described
+            },
+            index=labels,
         )
 
     def _reduce(
@@ -18821,8 +18827,8 @@ class SeriesMixin(_Carries):
         The answer is a float64 series labelled `count`, `mean`, `std`, `min`,
         the percentiles and `max`, under the column's name. `include` and
         `exclude` are read by a frame and ignored here, as in pandas. A column
-        of text, flags, categories or objects is described by `_described_values`.
-        Moments and spans are refused by name.
+        of text, flags, categories or objects is described by `_described_values`,
+        and a column of moments or spans by `_described_moments`.
         """
         from ._frame import Series
 
@@ -18832,6 +18838,8 @@ class SeriesMixin(_Carries):
             return self._described_values()
         if str(printed).startswith("period["):
             return self._described_values()
+        if str(printed).startswith(("datetime64[", "timedelta64[")):
+            return self._described_moments(asked)
         if printed not in _SIGNED | _UNSIGNED | _FLOATING:
             raise NotImplementedError(
                 f"describe is not supported yet for a {printed} column, because pandas"
@@ -18850,6 +18858,23 @@ class SeriesMixin(_Carries):
         ]
         labels = ["count", "mean", "std", "min", *_percentile_labels(asked), "max"]
         return Series(values, index=labels, name=self.name, dtype="float64")
+
+    def _described_moments(self, asked: list[float]) -> Series:
+        """The count, mean, extremes and percentiles of moments or spans, as pandas answers.
+
+        An object column: the count is a whole number and the rest are moments
+        or spans, NaT when there are no values. Spans have a spread and moments
+        do not, which is where pandas puts it.
+        """
+        from ._frame import Series
+
+        spans = str(self.dtype).startswith("timedelta")
+        quantiles = self.quantile(asked).tolist() if asked else []
+        spread = [self.std()] if spans else []
+        values = [int(self.count()), self.mean(), *spread, self.min(), *quantiles, self.max()]
+        labels = ["count", "mean", *(["std"] if spans else []), "min"]
+        labels += [*_percentile_labels(asked), "max"]
+        return Series(values, index=labels, name=self.name, dtype=object)
 
     def _described_values(self) -> Series:
         """How many values, how many distinct, the most common and how often, as pandas answers.

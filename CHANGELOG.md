@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: describe for moments, spans and picked types
+
+`Series.describe` of a datetime or timedelta column answers pandas' object column of count, mean, extremes and percentiles, with the spread for spans and NaT when there are no values. `DataFrame.describe` now takes spans by default, leaves out zoned moments as pandas does, prints NaN where a column has no answer, and takes `include` and `exclude` as types, picking columns the way `select_dtypes` does.
+
 ### Added: concat with keys across the columns
 
 `concat(keys=, axis=1)` labels the columns with each part's key, as pandas does. Series take their keys as their column names, frames put each key in front of every one of their columns' labels as a MultiIndex over the columns, and a series beside frames is a frame of one column. `names` names the levels from the front, a key that is a tuple is one level a value, and `DataFrame.transform` with a list of functions now answers through the same door.
