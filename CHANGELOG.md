@@ -189,6 +189,9 @@ A `MAP` type now carries its key and value types, written `MAP(K, V)` as DuckDB 
 ### Changed: Rolling.max takes pandas' extra arguments
 
 `Rolling.max` is the one window reduction pandas declares with `*args` before its engine arguments and `**kwargs` after them, and its body never reads either. firepanda declared the same three parameters as the other reductions and refused anything else, which was a registered divergence. The signature now matches pandas, and the extra arguments are dropped as pandas drops them. `Expanding.max` declares neither in pandas and still refuses them here.
+### Changed: an infinity in a window is a missing value
+
+Rolling, expanding and exponentially weighted windows now treat both infinities as missing values, as pandas does in `BaseWindow._prep_values`, where before they were kept as values. `count` still counts an infinity, and `sem` divides the spread of the finite values by that count, which is how pandas composes it. So `rolling(3).sum()` over `[1, 2, inf, 3, 4, 5, 6]` is `[nan, nan, nan, nan, nan, 12, 15]`, and `rolling(2).max()` over `[1, inf, 2, 3]` is `[nan, nan, nan, 3]`.
 
 ### Added: Styler.to_excel
 

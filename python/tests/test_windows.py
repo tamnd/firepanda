@@ -9,10 +9,9 @@ than ignored, and that the answers still match once the arguments have crossed
 the boundary.
 
 Every answer is compared against pandas rather than against a written down
-constant, for the reason `test_astype.py` gives, with one exception. The
-infinities are compared against what is true, because pandas replaces every
-infinity in a window with a missing value before its kernel sees the column, and
-the tests that assert the difference say so.
+constant, for the reason `test_astype.py` gives. That includes the infinities,
+which pandas turns into missing values before a window reads the column, and
+this library does the same.
 
 The last section is the same surface over a frame. It repeats the reductions and
 the placements rather than trusting that a frame window is the columns windowed
@@ -373,46 +372,50 @@ def test_a_text_column_has_nothing_to_reduce(firepanda: ModuleType) -> None:
     assert not issubclass(pd.errors.DataError, TypeError)
 
 
-def test_a_window_holding_one_infinity_sums_to_it(firepanda: ModuleType) -> None:
-    """The first of the asserted differences, and the reason for all of them.
+INFINITE = [
+    [1.0, 2.0, math.inf, 3.0, 4.0, 5.0, 6.0],
+    [math.inf, -math.inf, 1.0, 2.0, 3.0, 4.0],
+    [1.0, math.inf, 2.0, math.nan, -math.inf, 3.0, 4.0, math.inf, -math.inf, 5.0],
+]
+"""Columns holding infinities, alone, of both signs and beside gaps."""
 
-    pandas cannot get an infinity out of a window, and not because it disagrees
-    about the arithmetic. `BaseWindow._prep_values` replaces every infinity in
-    the column with a NaN before the kernel runs, so an infinity is a missing
-    value to a pandas window and the window is reduced over the rows either side
-    of it. Its `count` is the one reduction that does not see the replacement, so
-    pandas will tell you a window holds two values and then answer the sum of
-    one of them. An infinity in a column is an ordinary value here and this
-    counts the infinities beside the total.
-    """
-    rows = [1.0, 2.0, math.inf, 3.0, 4.0, 5.0, 6.0]
-    got = firepanda.Series(rows, name="v").rolling(3).sum().tolist()
-    assert math.isinf(got[2]) and got[2] > 0
-    assert math.isinf(got[3]) and math.isinf(got[4])
-    assert got[5] == 12.0
-    assert got[6] == 15.0
+INFINITE_CALLS = {
+    "sum": lambda s: s.rolling(3, min_periods=1).sum(),
+    "strict-sum": lambda s: s.rolling(3).sum(),
+    "mean": lambda s: s.rolling(3, min_periods=1).mean(),
+    "max": lambda s: s.rolling(2).max(),
+    "min": lambda s: s.rolling(2, min_periods=1).min(),
+    "count": lambda s: s.rolling(3).count(),
+    "var": lambda s: s.rolling(2, min_periods=1).var(ddof=0),
+    "std": lambda s: s.rolling(3, min_periods=1).std(),
+    "sem": lambda s: s.rolling(3, min_periods=1).sem(),
+    "skew": lambda s: s.rolling(3).skew(),
+    "median": lambda s: s.rolling(3, min_periods=1).median(),
+    "quantile": lambda s: s.rolling(3, min_periods=1).quantile(0.25),
+    "rank": lambda s: s.rolling(3, min_periods=1).rank(),
+    "expanding-sum": lambda s: s.expanding().sum(),
+    "expanding-sem": lambda s: s.expanding().sem(),
+    "ewm-mean": lambda s: s.ewm(alpha=0.3).mean(),
+    "ewm-std": lambda s: s.ewm(span=3).std(),
+    "ewm-ignore-na": lambda s: s.ewm(alpha=0.3, ignore_na=True).mean(),
+    "first": lambda s: s.rolling(3, min_periods=1).first(),
+    "nunique": lambda s: s.rolling(3, min_periods=1).nunique(),
+}
+"""The reductions an infinity reaches, across the three window kinds."""
 
 
-def test_a_window_holding_both_infinities_is_not_a_number(firepanda: ModuleType) -> None:
-    """The second, which is true rather than merely different, and it also has to
-    survive both of them leaving the window again."""
-    rows = [math.inf, -math.inf, 1.0, 2.0, 3.0, 4.0]
-    got = firepanda.Series(rows, name="v").rolling(3).sum().tolist()
-    assert math.isnan(got[2])
-    assert got[4] == 6.0
-    assert got[5] == 9.0
-
-
-def test_an_extreme_over_a_window_holding_an_infinity_answers_it(
-    firepanda: ModuleType,
+@needs_pandas
+@pytest.mark.parametrize("rows", INFINITE, ids=["one", "both", "gaps"])
+@pytest.mark.parametrize("call", list(INFINITE_CALLS), ids=list(INFINITE_CALLS))
+def test_an_infinity_in_a_window_is_pandas_missing_row(
+    firepanda: ModuleType, rows: list[float], call: str
 ) -> None:
-    """pandas answers the other row of the window here, for the reason the sum
-    test above gives, which is that the infinity was gone before its kernel
-    started. An infinity in a column is an ordinary value and this answers it."""
-    rows = [1.0, math.inf, 2.0, 3.0]
-    got = firepanda.Series(rows, name="v").rolling(2).max().tolist()
-    assert math.isinf(got[1]) and math.isinf(got[2])
-    assert got[3] == 3.0
+    """`BaseWindow._prep_values` turns every infinity into a NaN before a pandas
+    window reads the column, so an infinity is a missing row to every reduction
+    but `count`, which pandas reads before that step, and `sem`, which divides by
+    that count. Both engines here follow the same rule."""
+    run = INFINITE_CALLS[call]
+    assert same(run(firepanda.Series(rows, name="v")), run(theirs(rows)), 1e-12)
 
 
 def test_the_low_bits_survive_a_row_leaving_the_window(firepanda: ModuleType) -> None:
@@ -554,26 +557,6 @@ def test_a_window_of_one_repeated_value_answers_what_pandas_states(
 
 
 @needs_pandas
-def test_a_shape_over_a_window_holding_an_infinity_is_not_a_number(
-    firepanda: ModuleType,
-) -> None:
-    """The same argument as the spread above, one power further along.
-
-    pandas replaced the infinity with a missing value before its kernel saw the
-    column, so its four wide window over rows nought to three is a window over
-    three values and it answers their skewness. There is no skewness there: the
-    mean of a set holding an infinity is an infinity and every deviation from it
-    is an infinity minus an infinity.
-    """
-    rows = [1.0, math.inf, 2.0, 3.0, 4.0, 5.0]
-    got = firepanda.Series(rows, name="v").rolling(3).skew().tolist()
-    assert all(math.isnan(row) for row in got[:4])
-    assert got[4] == 0.0 and got[5] == 0.0
-    them = theirs(rows).rolling(3).skew().tolist()
-    assert math.isnan(them[3])
-
-
-@needs_pandas
 def test_a_shape_below_the_variance_pandas_refuses_still_answers(
     firepanda: ModuleType,
 ) -> None:
@@ -594,32 +577,6 @@ def test_a_shape_below_the_variance_pandas_refuses_still_answers(
     assert math.isnan(theirs(rows).rolling(4).kurt().tolist()[3])
     wider = [-1.1e-7, 1.1e-7, -1.1e-7, 1.1e-7]
     assert theirs(wider).rolling(4).kurt().tolist()[3] == pytest.approx(-6.0, rel=1e-9)
-
-
-@needs_pandas
-def test_a_spread_over_a_window_holding_an_infinity_is_not_a_number(
-    firepanda: ModuleType,
-) -> None:
-    """pandas answers `[0, 0, 0, 0.25, 0.25]` here and the middle three are
-    wrong, for the reason the sum test above gives.
-
-    The mean of a set holding an infinity is an infinity, every deviation from it
-    is an infinity minus an infinity, and there is no number there. pandas had
-    already replaced the infinity with a missing value, so its window over rows
-    nought and one is a window over one value and it answers the variance of one
-    value. Worse, it is not even consistent with itself across the degrees of
-    freedom: the same windows are NaN at the default, because one value leaves no
-    divisor there, and nought at `ddof=0`, because one value leaves a divisor of
-    one.
-    """
-    rows = [1.0, math.inf, 2.0, 3.0, 4.0]
-    got = firepanda.Series(rows, name="v").rolling(2, min_periods=1).var(ddof=0).tolist()
-    assert got[0] == 0.0
-    assert math.isnan(got[1]) and math.isnan(got[2])
-    assert got[3] == 0.25
-    assert got[4] == 0.25
-    them = theirs(rows).rolling(2, min_periods=1).var(ddof=0).tolist()
-    assert them[1] == 0.0 and them[2] == 0.0
 
 
 @needs_pandas
@@ -694,29 +651,6 @@ def test_a_median_is_a_value_out_of_the_window_and_not_an_average_of_it(
         firepanda.Series(rows, name="v").expanding().median(),
         theirs(rows).expanding().median(),
     )
-
-
-@needs_pandas
-def test_a_median_over_a_window_holding_an_infinity_is_a_value(
-    firepanda: ModuleType,
-) -> None:
-    """pandas replaces every infinity in the column with a missing row before it
-    forms a window, so a three wide window over one, an infinity and two holds
-    two values to pandas and answers one and a half. Here the infinity is a value
-    that sorts above every finite one, so the window holds three and the middle
-    of them is two. The last row is the first window the infinity has left and the
-    two agree there, which is the point: this is a disagreement about what the
-    window holds and not one that outlives it."""
-    rows = [1.0, math.inf, 2.0, 3.0, 4.0]
-    got = firepanda.Series(rows, name="v").rolling(3, min_periods=1).median().tolist()
-    them = theirs(rows).rolling(3, min_periods=1).median().tolist()
-    assert got[2] == 2.0
-    assert them[2] == 1.5
-    assert math.isinf(got[1])
-    assert them[1] == 1.0
-    assert got[3] == 3.0
-    assert them[3] == 2.5
-    assert got[4] == them[4] == 3.0
 
 
 @needs_pandas

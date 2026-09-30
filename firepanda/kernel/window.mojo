@@ -35,16 +35,7 @@ anybody uses these. The edges are non decreasing in `i` for every combination of
 the five parameters above, including `step`, which is what makes the carrying
 legal.
 
-pandas carries the same total and pays a price for it that is visible in the
-answers. Its total is one number, so an infinity that enters the window makes it
-infinite, and subtracting that infinity when the row leaves gives a NaN rather
-than giving the total back. Every window after that reads NaN until the window
-empties. That is not a rounding difference, it is a wrong answer on real data,
-and this file does not copy it. The infinities are counted rather than summed,
-the total carries only the finite rows, and the answer is assembled from the two
-at the end. A window holding one positive infinity sums to positive infinity, a
-window holding both signs sums to a NaN, and both of those survive the infinity
-leaving again.
+pandas never lets an infinity reach that total. Its `_prep_values` turns both infinities into NaN before any window reads the column, so to every reduction but `count` an infinity is a missing row, and this file does the same in `drop_infinities` before it reduces. `count` reads the column before that step in pandas and counts an infinity as a value, and `sem` divides by that count, so both are answered from the rows as they were. The total below still counts infinities rather than summing them, which costs nothing and keeps it right for a caller that hands it one.
 
 That leaves the case where the finite rows themselves overflow. It is rare and
 it is real, and the guard is to rebuild that one window from its rows, which
@@ -61,10 +52,9 @@ older and smaller can never be the answer again. Every row is pushed once and
 popped once, so the whole pass is the height of the column no matter how wide
 the window is.
 
-pandas does the same thing and then loses the two infinities on the way out,
-because it starts its running extreme at negative infinity and reads a result
-equal to that sentinel as an empty window. So `rolling(3).max()` over a column
-holding a positive infinity answers a NaN there. This file answers the infinity.
+pandas starts its running extreme at negative infinity and reads a result equal
+to that sentinel as an empty window, which would lose a real infinity, and an
+infinity never gets that far for the reason above. Neither does one here.
 
 ## What a missing row is
 
@@ -72,7 +62,8 @@ Whatever `present_bitmap_any` says, which on a float column means a NaN is
 missing and not a value. That is the library rule and it is also pandas', so
 none of the reductions here has to think about NaN at all: a missing row is not
 added to the total, not pushed into the deque and not counted toward
-`min_periods`.
+`min_periods`. An infinity is a missing row too, everywhere but `count` and the
+divisor of `sem`, which is pandas' rule and is described above.
 
 `count` is the one that reads differently, and the difference is not a decision
 made here. pandas computes it as a rolling sum over the presence indicator,
@@ -130,7 +121,7 @@ do with this file. And the windows given as a frequency rather than a count,
 which need a calendar before they need any of this.
 """
 
-from std.math import isinf, isnan, nan
+from std.math import isinf, isnan, nan, sqrt
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
@@ -728,6 +719,24 @@ def window_agg(
         col, DType.float64
     )
     var src = wide.unsafe_ptr[DType.float64]()
+    if col.dtype().is_floating_point() and drop_infinities(src, present, rows):
+        var counted = seen^
+        seen = _running_count(present, rows)
+        if op == WindowOp.SEM:
+            # pandas divides the spread of the finite rows by the root of a
+            # count that still holds every infinity.
+            var spread = _spread(
+                src, present, seen, rows, shape, settings.ddof, SPREAD_STD
+            )
+            var heights = _count(counted, rows, shape)
+            var target = spread.unsafe_mut_ptr()
+            var under = heights.unsafe_ptr()
+            for k in range(len(spread)):
+                target.unsafe_offset(k).unsafe_store(
+                    target.unsafe_offset(k).unsafe_load()
+                    / sqrt(under.unsafe_offset(k).unsafe_load())
+                )
+            return AnyArray(spread^)
     if op == WindowOp.MIN or op == WindowOp.MAX:
         return AnyArray(
             _extreme(src, present, seen, rows, shape, op == WindowOp.MAX)
@@ -749,6 +758,40 @@ def window_agg(
     return AnyArray(
         _total(src, present, seen, rows, shape, op == WindowOp.MEAN)
     )
+
+
+def drop_infinities[
+    origin: ImmOrigin
+](
+    src: Pointer[Scalar[DType.float64], origin], mut present: Bitmap, rows: Int
+) -> Bool:
+    """Marks every row holding an infinity as missing, the way pandas reads a window.
+
+    pandas' `_prep_values` turns both infinities into NaN before a rolling, an
+    expanding or an exponentially weighted window reduces a column. A missing
+    row holds a zero, so it is never mistaken for an infinity here.
+
+    Args:
+        src: The values, already float64.
+        present: Which rows hold a value, cleared here on every infinity.
+        rows: How tall the column is.
+
+    Parameters:
+        origin: The origin of the values.
+
+    Returns:
+        Whether any row was cleared, so a caller with nothing to redo can skip
+        redoing it.
+    """
+    var dropped = False
+    for i in range(rows):
+        if isinf(src.unsafe_offset(i).unsafe_load()) and present.get(i):
+            if not dropped:
+                # The bits may still be shared with the column's own validity.
+                present.make_private()
+                dropped = True
+            present.set(i, False)
+    return dropped
 
 
 def _running_count(present: Bitmap, rows: Int) -> List[Int]:
