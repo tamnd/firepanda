@@ -5711,6 +5711,67 @@ def _logical_operand(value: Any, op: str) -> None:
             )
 
 
+def _integral(dtype: Any) -> bool:
+    """Whether a column type is one of the integer types, signed or not."""
+    return str(dtype).startswith(("int", "uint"))
+
+
+def _bitwise(column: Any, other: Any, op: str, flip: bool) -> Any:
+    """`&`, `|` or `^` between integers, which pandas answers bit by bit.
+
+    An integer column against another with the same labels, or against a plain
+    integer, is answered one row at a time. A boolean column against an integer
+    column reads the integers as bools, as pandas does, and anything else is
+    left to the boolean path, which answers `None` here.
+    """
+    from ._frame import Series
+
+    mine = column._inner.dtype()
+    if isinstance(other, SeriesMixin) and not _labels_differ(column, other, 0):
+        theirs_type = other._inner.dtype()
+        if mine == "bool" and _integral(theirs_type):
+            return column._logical(other != 0, op, flip)
+        if not (_integral(mine) and _integral(theirs_type)):
+            return None
+        values = other.tolist()
+        kind = mine if mine == theirs_type else "int64"
+        name = column.name if column.name == other.name else None
+    elif _integral(mine) and isinstance(other, int) and not isinstance(other, bool):
+        values = [other] * len(column)
+        kind, name = mine, column.name
+    else:
+        return None
+    run = {"and": operator.and_, "or": operator.or_, "xor": operator.xor}[op]
+    answered = [
+        run(theirs, ours) if flip else run(ours, theirs)
+        for ours, theirs in zip(column.tolist(), values, strict=True)
+    ]
+    return Series(answered, index=column.index, name=name, dtype=kind)
+
+
+def _bitwise_frame(frame: Any, other: Any, op: str, flip: bool) -> Any:
+    """`_bitwise` for a frame of integers, column by column, or `None`."""
+    from ._frame import DataFrame
+
+    if not all(_integral(dtype) for dtype in frame.dtypes.tolist()):
+        return None
+    if isinstance(other, DataFrameMixin):
+        if _labels_differ(frame, other, 0) or list(frame.columns) != list(other.columns):
+            return None
+        pairs = [(frame.iloc[:, at], other.iloc[:, at]) for at in range(len(frame.columns))]
+    elif isinstance(other, int) and not isinstance(other, bool):
+        pairs = [(frame.iloc[:, at], other) for at in range(len(frame.columns))]
+    else:
+        return None
+    answered = [_bitwise(mine, theirs, op, flip) for mine, theirs in pairs]
+    if any(column is None for column in answered):
+        return None
+    made = DataFrame._wrap(frame._inner)
+    for at, column in enumerate(answered):
+        made = made.assign(**{frame._inner.names()[at]: column})
+    return made
+
+
 def _logical_series(left: Any, right: Any, op: str) -> Any:
     """`left op right` between two boolean series, aligned the way pandas aligns them.
 
@@ -9228,17 +9289,14 @@ def _factorized(column: Series, sort: Any, use_na_sentinel: Any) -> tuple[Series
     NaN is a group of its own there and a null is not, so when the NaN group
     is there and pandas wants it left out, every code after it moves down one.
 
-    Raises:
-        NotImplementedError: For a categorical column, whose uniques pandas
-            gives as a categorical index, which firepanda does not hold yet.
+    A categorical column is numbered by its codes, which puts `sort` in the
+    order of the categories rather than of the values, and its uniques come
+    back as categories that keep every category the column had.
     """
     sort = _flag("sort", sort)
     use_na_sentinel = _flag("use_na_sentinel", use_na_sentinel)
     if column.dtype == "category":
-        raise UnsupportedError(
-            "firepanda:unsupported: factorize on a categorical column answers a "
-            "categorical index, which firepanda does not hold yet"
-        )
+        return _factorized_categories(column, sort, use_na_sentinel)
     column = column.reset_index(drop=True).rename(None)
     missing = column.isna()
     grouped = column.to_frame("values").groupby("values", sort=sort, dropna=use_na_sentinel)
@@ -9255,6 +9313,27 @@ def _factorized(column: Series, sort: Any, use_na_sentinel: Any) -> tuple[Series
     if sort:
         uniques = uniques.sort_values(ignore_index=True)
     return codes.astype("int64"), uniques
+
+
+def _factorized_categories(
+    column: Series, sort: bool, use_na_sentinel: bool
+) -> tuple[Series, Series]:
+    """`_factorized` for a categorical column, read through its codes.
+
+    The codes are numbered as floats with a gap where the row is missing, so a
+    missing row is placed and kept or left out exactly as it is for any other
+    column, and the uniques are then turned back into categories.
+    """
+    from ._categorical import Categorical
+    from ._frame import Series
+
+    held = column.cat.codes
+    keyed = held.astype("float64").where(held >= 0)
+    codes, uniques = _factorized(keyed, sort, use_na_sentinel)
+    places = [-1 if _is_gap(place) else int(place) for place in uniques.tolist()]
+    categories = column.cat.categories
+    made = Categorical.from_codes(places, categories=categories, ordered=column.cat.ordered)
+    return codes, Series(made)
 
 
 def _combined_type(left: str, right: str) -> str:
@@ -14893,6 +14972,8 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
+        if (bitwise := _bitwise_frame(self, other, op, flip)) is not None:
+            return bitwise
         _logical_operand(self, op)
         _logical_operand(other, op)
         try:
@@ -19019,9 +19100,6 @@ class SeriesMixin(_Carries):
 
         Returns:
             The codes as a numpy array of int64 and the uniques as an index.
-
-        Raises:
-            NotImplementedError: For a categorical column.
         """
         from ._frame import Index
 
@@ -19689,6 +19767,8 @@ class SeriesMixin(_Carries):
             )
         if _masked_side(self, other):
             return _masked.logical(self, other, op)
+        if (bitwise := _bitwise(self, other, op, flip)) is not None:
+            return bitwise
         _logical_operand(self, op)
         _logical_operand(other, op)
         try:
@@ -24558,10 +24638,7 @@ class StringMixin:
                 answer = answer.str._replaced(key, value, n, case, flags, regex)
             return answer
         if callable(repl):
-            raise UnsupportedError(
-                "firepanda:unsupported: str.replace with a callable replacement needs a"
-                " regular expression engine and none is written yet"
-            )
+            return self._replaced_by_call(pat, repl, n, case, flags, regex)
         if not isinstance(repl, str):
             raise DTypeError("firepanda:dtype: repl must be a string or callable")
         text = self._a_pattern(pat)
@@ -24591,6 +24668,30 @@ class StringMixin:
             limit,
             other=repl,
         )
+
+    def _replaced_by_call(
+        self, pat: Any, repl: Any, n: Any, case: Any, flags: int, regex: Any
+    ) -> Series:
+        """Every match replaced by what a function answers for it, row by row.
+
+        pandas hands a callable to `re.sub`, so each match object is passed to
+        it and a missing row stays missing. A literal pattern cannot take one,
+        in pandas' words.
+        """
+        from ._frame import Series
+
+        if not regex:
+            raise InvalidArgumentError("Cannot use a callable replacement when regex=False")
+        text = self._a_pattern(pat)
+        limit = self._width(n, "n")
+        letters = flags | (re.IGNORECASE if case is not None and not case else 0)
+        compiled = re.compile(text, letters)
+        column = self._series
+        written = [
+            compiled.sub(repl, value, count=max(limit, 0)) if isinstance(value, str) else value
+            for value in column.tolist()
+        ]
+        return Series(written, index=column.index, name=column.name, dtype=column.dtype)
 
     def _translated(self, table: Any) -> Series:
         """Every row with single characters swapped one for one.

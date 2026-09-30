@@ -267,6 +267,32 @@ def test_a_count_with_a_pattern_is_refused(firepanda: ModuleType) -> None:
         mine.str.replace("abc", "\\0", n=2, regex=True)
 
 
+CALLED = {
+    "doubled": (r"\d+", lambda m: str(int(m.group(0)) * 2), {}),
+    "count": (r"\d", lambda m: "#", {"n": 1}),
+    "case": ("a", lambda m: m.group(0) * 2, {"case": False}),
+}
+
+
+@needs_pandas
+@pytest.mark.parametrize(("pattern", "call", "more"), CALLED.values(), ids=CALLED.keys())
+def test_a_callable_replacement_is_pandas(
+    firepanda: ModuleType, pattern: str, call: Any, more: dict[str, Any]
+) -> None:
+    import pandas as pd
+
+    def run(lib: Any) -> Any:
+        column = lib.Series(["foo 12", "Bar 3a", None, "a1b2"])
+        return column.str.replace(pattern, call, regex=True, **more)
+
+    assert repr(run(firepanda)) == repr(run(pd))
+
+
+def test_a_callable_replacement_needs_a_pattern(firepanda: ModuleType) -> None:
+    with pytest.raises(ValueError, match="callable replacement when regex=False"):
+        made(firepanda).str.replace("a", lambda m: "b", regex=False)
+
+
 @needs_pandas
 def test_a_count_with_a_plain_pattern_still_works(firepanda: ModuleType) -> None:
     """The refusal above is narrowed to the calls that would have needed the

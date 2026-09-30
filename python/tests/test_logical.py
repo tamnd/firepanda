@@ -120,7 +120,23 @@ def test_a_constant_that_is_not_a_bool_is_a_type_error(
         firepanda.Series(A) & constant
 
 
-def test_two_integer_columns_are_refused(firepanda: ModuleType) -> None:
-    """pandas answers the bitwise operation, which firepanda has not written."""
-    with pytest.raises(NotImplementedError):
-        firepanda.Series([1, 2]) & firepanda.Series([3, 1])
+BITWISE = {
+    "and": lambda m: m.Series([12, 10, 7]) & m.Series([10, 6, 1]),
+    "or": lambda m: m.Series([12, 10, 7], name="k") | m.Series([10, 6, 1], name="k"),
+    "xor": lambda m: m.Series([12, 10, 7]) ^ m.Series([10, 6, 1]),
+    "constant": lambda m: m.Series([12, 10, 7]) & 4,
+    "reflected": lambda m: 4 | m.Series([12, 10, 7]),
+    "bool and int": lambda m: m.Series([True, False, True]) & m.Series([1, 1, 0]),
+    "frame": lambda m: (
+        m.DataFrame({"x": [12, 10], "y": [1, 2]}) & m.DataFrame({"x": [4, 2], "y": [3, 3]})
+    ),
+    "frame constant": lambda m: m.DataFrame({"x": [12, 10]}) ^ 6,
+}
+
+
+@pytest.mark.parametrize("build", BITWISE.values(), ids=BITWISE.keys())
+def test_two_integer_operands_are_answered_bit_by_bit(firepanda: ModuleType, build: Any) -> None:
+    """pandas answers the bitwise operation on two integers."""
+    import pandas as pd
+
+    assert repr(build(firepanda)) == repr(build(pd))

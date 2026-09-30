@@ -151,10 +151,18 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     assert str(mine.value) == str(theirs.value)
 
 
-def test_a_categorical_factorize_is_refused(firepanda: ModuleType) -> None:
-    """Its uniques are a categorical index, which is not held yet."""
-    with pytest.raises(NotImplementedError):
-        firepanda.Series(["b", "a"]).astype("category").factorize()
+@pytest.mark.parametrize(
+    "more", [{}, {"sort": True}, {"use_na_sentinel": False}], ids=["plain", "sort", "kept gap"]
+)
+def test_a_categorical_factorize_is_pandas(firepanda: ModuleType, more: dict[str, Any]) -> None:
+    """Its uniques are a categorical index keeping every category, as in pandas."""
+    import pandas as pd
+
+    def run(lib: Any) -> Any:
+        codes, uniques = lib.Series(["b", "a", "b", None], dtype="category").factorize(**more)
+        return [int(code) for code in codes], repr(uniques)
+
+    assert run(firepanda) == run(pd)
 
 
 @pytest.mark.parametrize(

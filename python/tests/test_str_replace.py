@@ -205,10 +205,10 @@ def test_flags_move_the_call_to_the_other_engine(
 
 
 @needs_pandas
-def test_a_callable_replacement_is_refused(firepanda: ModuleType) -> None:
-    """pandas refuses this too when regex is off, and needs an engine when it is on."""
+def test_a_callable_replacement_is_refused_without_a_pattern(firepanda: ModuleType) -> None:
+    """pandas refuses a callable when regex is off, which is the default."""
     mine = made(firepanda)
-    with pytest.raises(firepanda.errors.UnsupportedError):
+    with pytest.raises(ValueError, match="callable replacement when regex=False"):
         mine.str.replace("a", lambda match: "X")
 
 
