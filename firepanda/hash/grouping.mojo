@@ -773,7 +773,9 @@ def _all_follow[
     return True
 
 
-def _follows(col: AnyArray, led: Grouping, begin: Int, stop: Int) raises -> Bool:
+def _follows(
+    col: AnyArray, led: Grouping, begin: Int, stop: Int
+) raises -> Bool:
     """Checks one key over a range of rows for `_all_follow`.
 
     Args:
@@ -844,9 +846,10 @@ def _follows_plain(
                         return False
                     if not here:
                         continue
-                if values.unsafe_offset(i).unsafe_load() != values.unsafe_offset(
-                    first
-                ).unsafe_load():
+                if (
+                    values.unsafe_offset(i).unsafe_load()
+                    != values.unsafe_offset(first).unsafe_load()
+                ):
                     return False
             return True
     raise Error("group by: unsupported key dtype")
