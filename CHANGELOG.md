@@ -71,6 +71,7 @@ A frame reduced with `axis=1` now answers one value per row for sum, prod, max, 
 ### Added: seven parameters that used to refuse
 
 `shift` fills the rows it opens with `fill_value` on a series and a frame, keeping a column of whole numbers whole. The four scans take `skipna=False`, where every row after the first gap is a gap, and the frame scans take `numeric_only`. `any` and `all` take `skipna=False`, where a gap counts as true and a masked column answers `NA` when the known values do not settle it, and the frame spelling takes `bool_only`. `fillna` stops after `limit` gaps down each column. `DataFrame.sort_index` sorts the columns with `axis=1` and numbers the rows again with `ignore_index`. `replace` with `regex` rewrites the matched part of every text row, for one pattern and one piece of text. Each answer is checked against pandas.
+
 ### Changed: a group by with a coded text key hashes the tuple once
 
 A text key held as codes into its distinct values now goes the fused route beside a fixed width key too wide to table. Its codes group the way its text does, so the fold and the verification read them as an int32 column, and the group by pays for one hash table instead of one over the wide key and another over the packed pair. ClickBench q16 groups a user id with a coded search phrase that way. At 1M rows on a six core machine that was busy with other work, its grouping went from 43 to 28 ms at best and q18's from 79 to 59, with the same groups.
@@ -88,6 +89,7 @@ With `expand=False` the pair now answers one object column of three element tupl
 Built against Mojo 1.0.0 (ed45d567).
 
 A patch release. On the pandas side it brings the readers and writers pandas has beyond CSV and Parquet (Excel, Stata, SAS, HDF, SQL over sqlite3, HTML, XML, LaTeX, the clipboard, Iceberg and SPSS), periods and interval columns, categoricals, object, sparse and masked columns, rows and columns labelled by a MultiIndex, `DataFrame.style` with `to_excel`, plotting with matplotlib, `firepanda.testing`, and pandas' byte counts, str dtype and float answers for var, std, sem, skew and kurt. SQL gains LATERAL subqueries, ASOF joins, PIVOT and UNPIVOT, recursive CTEs, named windows, window frames and CREATE, INSERT and DROP. The group by skips text keys another key already decides, packs two wide integer keys without factorizing either and uses every core on half a million rows or more, and the ClickBench driver builds again after a compiler hang that came in with the first of those.
+
 ### Added: Cross and anti merges
 
 `merge` answers `how="cross"`, `how="left_anti"` and `how="right_anti"` the way pandas 3 does, and `DataFrame.join(how="cross")` works. A cross join pairs every left row with every right row, left order first, and refuses any key with pandas' MergeError. An anti join keeps the rows of one side that found no partner on the other, labelled as the outer join labels them, with the other side's columns empty. A failed `validate` now reads as pandas' message does, with the repeated keys listed under it.
@@ -135,6 +137,7 @@ A `MAP` type now carries its key and value types, written `MAP(K, V)` as DuckDB 
 ### Added: HDFStore, read_hdf and to_hdf
 
 `HDFStore`, `read_hdf`, `DataFrame.to_hdf` and `Series.to_hdf` read and write HDF5 files in pandas' fixed and table formats, and `firepanda.io.pytables` holds the storers where pandas keeps them. The module is pandas' own `pandas.io.pytables` ported class for class on top of PyTables, which is imported only when a store opens. Columns are grouped into blocks and consolidated by pandas' rules, so a file firepanda writes has the same nodes, attributes and types as the one pandas writes and each library reads the other's files. Where clauses, data columns, appends, removal, chunks, coordinates, several tables at once, copies, table indexes, the printed store and the errors all match pandas.
+
 ### Added: read_sas and the SAS readers
 
 `read_sas` reads SAS transport files and SAS7BDAT data sets the way pandas does, and `firepanda.io.sas` holds `SASReader`, `XportReader` and `SAS7BDATReader` where pandas keeps them. Both readers are ported to plain Python with `struct`, including the IBM float conversion of transport files and the run length and Ross decompressors of data sets, so they need no other package. Names, types, values, dates, chunks, reader attributes and errors match pandas on pandas' own SAS test files, with and without an encoding.
@@ -210,9 +213,11 @@ A reader or method that needs a package which is not installed now says so the w
 ### Added: read_html
 
 `read_html` reads the tables of an HTML document into frames the way pandas does, with `match`, `attrs`, `displayed_only`, header inference from `thead` and `th` rows, `colspan` and `rowspan` expansion, `extract_links`, and the `read_csv` options for typing the cells. It parses with the standard library, so it needs neither lxml nor BeautifulSoup.
+
 ### Added: CREATE TABLE, CREATE VIEW, INSERT and DROP in SQL
 
 `firepanda.sql.execute` runs one statement against a catalog it may change. `CREATE TABLE` with columns and types, with `NOT NULL`, and `CREATE TABLE ... AS` a query make a frame under the name; `INSERT INTO` adds rows from `VALUES`, a query or `DEFAULT VALUES`, by position, by a column list or `BY NAME`, casts each to the column's type, and answers DuckDB's one-row `Count`; `CREATE VIEW` keeps the query's text, which is parsed again wherever the view is named, so a view sees rows inserted after it; and `DROP TABLE` and `DROP VIEW` take the name away. `OR REPLACE`, `IF NOT EXISTS` and `IF EXISTS` behave as in DuckDB, and every refusal a mismatch earns is DuckDB's message: a name made twice, a count of values that does not fit, a column the table lacks, a null in a `NOT NULL` column, a drop of the wrong kind, and a view that reaches itself. What a frame cannot hold (a key, a default, a check, a generated column, `ON CONFLICT`, `RETURNING`, `CASCADE`) is refused by name rather than read and dropped.
+
 ### Added: to_latex
 
 `DataFrame.to_latex` and `Series.to_latex` write the LaTeX table pandas writes, as a booktabs tabular, inside a table float when there is a caption, label or position, or as a longtable. Cells follow pandas' formatting with six digits for floats, `na_rep`, `float_format`, `formatters`, `decimal` and LaTeX escaping, and the text is written without needing jinja2.
@@ -232,6 +237,7 @@ A reader or method that needs a package which is not installed now says so the w
 ### Added: Period columns
 
 A Series or DataFrame column of `Period` values of one frequency is now a period column with the dtype `period[M]`, as in pandas. It can be asked for with `dtype="period[M]"` or `astype`, prints each period in its short form with `NaT` for gaps, sorts, groups and compares by period, moves by integers, and gives offsets when a period is subtracted. Scaling a period column and ordering it against another frequency are refused with pandas' messages. Document 103 describes the cell design and what waits for `PeriodIndex`.
+
 ### Added: PeriodDtype
 
 `pd.PeriodDtype` is the real type now, made from a frequency's text, `period[...]` text or an offset, with pandas' errors for the rest. It gives its frequency back as an offset, compares with text the way pandas does, pickles, and answers `construct_from_string`, `is_dtype` and the numpy style attributes pandas gives it. `pandas_dtype` and `is_period_dtype` in `api.types` read period text through it, so a frequency that does not exist is refused there too.
@@ -279,6 +285,7 @@ A Series or DataFrame column of `Period` values of one frequency is now a period
 ### Added: interval_range, and cut by an IntervalIndex
 
 `interval_range` builds an `IntervalIndex` of evenly spaced numbers from three of `start`, `end`, `periods` and `freq`, with whole number ends when every one given is whole, as pandas does. `cut` now takes an `IntervalIndex` as `bins` and answers an ordered category of those intervals, and it refuses intervals that overlap in pandas' words. Ranges of instants or spans still raise.
+
 ### Added: interval columns, and cut and qcut label bins with intervals
 
 A list of `Interval` values that share a side is now an interval column with pandas' `interval[int64, right]` or `interval[float64, right]` type, and it prints, casts to `category`, counts and groups the way pandas' does. `IntervalDtype` and `IntervalIndex` are new, with `from_breaks`, `from_tuples`, `from_arrays`, `left`, `right`, `mid`, `length` and pandas' repr, and `cat.categories` of a category of intervals is an `IntervalIndex`. `cut` and `qcut` without `labels=` now label each bin with an interval, rounded by pandas' precision rule, where they used to refuse. An interval column and a category of intervals or of numbers go to Arrow as pandas sends them, intervals as the `pandas.interval` type. Spec 102 has the details.
