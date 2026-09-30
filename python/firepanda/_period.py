@@ -516,7 +516,8 @@ class Period:
                 raise InvalidArgumentError("If value is None, freq cannot be None")
             return cls._made(parsed, _from_fields(parsed, *fields))
         if isinstance(value, Period):
-            if parsed is None:
+            if parsed is None or parsed.code == value._freq.code:
+                # pandas keeps a period of the same base frequency as it is, its count included.
                 return cls._made(value._freq, value._ordinal)
             return value.asfreq(parsed)
         if _is_nat(value):
