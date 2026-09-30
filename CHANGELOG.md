@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: nlargest ties and several columns, and str.repeat per row
+
+`nlargest` and `nsmallest` take `keep="all"`, answering every row tied with the last one kept and every gap when the cut falls among the gaps, and a list of columns, ranked one column at a time and then sorted stably the way pandas does. `str.repeat` takes one count per row, read by position, with a missing row left missing. A `Series` built with the default `str` dtype object, as in `dtype=s.dtype`, is no longer refused, since that dtype hashes apart from its text.
+
 ### Fixed: isin on instant and span columns
 
 `Series.isin` and `DataFrame.isin` on a datetime or timedelta column find a row by its value the way pandas does, instead of refusing. A `Timestamp`, `datetime`, `Timedelta`, `DatetimeIndex` or datetime Series in the set is read in the column's unit, an aware instant finds a row in any zone when the column has a zone too, and text, numbers and an instant of the other awareness find nothing. `NaT` and `None` find the gaps.

@@ -168,21 +168,32 @@ def test_a_rule_that_is_not_one_of_the_three_is_refused(firepanda):
         theirs().nlargest(2, "value", keep="oldest")
 
 
-def test_keeping_all_of_a_tie_is_refused_rather_than_answered_wrongly(firepanda):
-    # pandas answers more than n rows for this, and an answer whose height
-    # depends on the values in the column is a different piece of work from the
-    # fixed table of slots underneath. Saying so is better than quietly
-    # answering the keep first rows and looking right until there is a tie.
-    with pytest.raises(NotImplementedError) as raised:
-        made(firepanda).nlargest(2, "key", keep="all")
-    assert "keep='all'" in str(raised.value)
-    assert len(theirs().nlargest(2, "key", keep="all")) == 3
+TIES = {
+    "all": lambda m: m.Series([3, 1, 3, 2, 3], index=list("abcde")).nlargest(1, keep="all"),
+    "all small": lambda m: m.Series([3, 1, 1, float("nan"), 2]).nsmallest(2, keep="all"),
+    "all into gaps": lambda m: m.Series([3.0, float("nan"), 1.0, float("nan")]).nlargest(
+        3, keep="all"
+    ),
+    "frame all": lambda m: made(m).nlargest(2, "key", keep="all"),
+    "two columns": lambda m: m.DataFrame(
+        {"a": [1, 1, 2, 2, 3], "b": [5, 4, 3, 9, 1], "c": list("vwxyz")}, index=list("pqrst")
+    ).nlargest(3, ["a", "b"]),
+    "two columns small": lambda m: m.DataFrame(
+        {"a": [1, 1, 2, 2, 3], "b": [5, 4, 3, 9, 1]}, index=list("pqrst")
+    ).nsmallest(3, ["a", "b"]),
+    "two columns last": lambda m: m.DataFrame({"a": [1, 1, 1], "b": [2, 2, 1]}).nlargest(
+        1, ["a", "b"], keep="last"
+    ),
+    "two columns all": lambda m: m.DataFrame({"a": [1, 1, 1], "b": [2, 2, 1]}).nlargest(
+        1, ["a", "b"], keep="all"
+    ),
+    "all none": lambda m: made(m).nlargest(0, "key", keep="all"),
+}
 
 
-def test_ranking_by_two_columns_is_refused(firepanda):
-    with pytest.raises(NotImplementedError) as raised:
-        made(firepanda).nlargest(2, ["key", "value"])
-    assert "one column" in str(raised.value)
+@pytest.mark.parametrize("build", TIES.values(), ids=TIES.keys())
+def test_ties_and_several_columns_are_pandas(firepanda, build):
+    assert repr(build(firepanda)) == repr(build(pd))
 
 
 def test_a_column_that_is_not_there_is_refused(firepanda):
