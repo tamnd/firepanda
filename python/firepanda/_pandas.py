@@ -15201,7 +15201,15 @@ class DataFrameMixin(_Carries):
         if alone:
             answer = [columns[name][0] for name in names]
             return _labelled(names, answer).rename_axis(None).rename(float(wanted[0]))
-        return _quantile_rows(wanted, names, columns)
+        answer = _quantile_rows(wanted, names, columns)
+        blended = interpolation in ("linear", "midpoint")
+        kept = {
+            name: "category" if blended else read[name].dtype
+            for name in names
+            if read[name].dtype == "category"
+        }
+        # pandas keeps a column of categories as one, with the blended values as new categories.
+        return answer.astype(kept) if kept else answer
 
     def _corr_matrix(self, method: Any, min_periods: Any, numeric_only: bool) -> DataFrame:
         """Every numeric column correlated with every other, over the rows each pair shares.
@@ -19577,6 +19585,8 @@ class SeriesMixin(_Carries):
             if answer is not None:
                 return answer
         try:
+            if category and kind == "quantile":
+                return self._quantiles([param], "linear")[0]
             if category:
                 _category_reduction(kind, self._inner.ordered())
                 answer = self._inner.codes().reduce(kind, param)
@@ -19836,7 +19846,12 @@ class SeriesMixin(_Carries):
         answers = self._quantiles(wanted, interpolation)
         if alone:
             return answers[0]
-        return _labelled(wanted, answers).rename(self.name).rename_axis(None)
+        made = _labelled(wanted, answers).rename(self.name).rename_axis(None)
+        if self.dtype == "category":
+            # A blend is a new column of the codes as categories, and a pick keeps the dtype.
+            blended = interpolation in ("linear", "midpoint")
+            return made.astype("category" if blended else self.dtype)
+        return made
 
     def _quantiles(self, wanted: list[float], interpolation: str) -> list[Any]:
         """The value at each of several quantiles, under one interpolation.
@@ -19855,6 +19870,15 @@ class SeriesMixin(_Carries):
         """
         from ._frame import Series
 
+        if self.dtype == "category":
+            # pandas reads a quantile of categories off their codes, gaps left
+            # out: a blend answers the code itself and a pick the category at it.
+            codes = self.cat.codes
+            answers = codes[codes >= 0].reset_index(drop=True)._quantiles(wanted, interpolation)
+            if interpolation in ("linear", "midpoint"):
+                return [float(one) for one in answers]
+            labels = self.cat.categories.tolist()
+            return [one if one != one else labels[int(one)] for one in answers]
         if interpolation == "linear":
             return [self._reduce("quantile", one, 0, True, False, 0) for one in wanted]
         count = self.count()
@@ -25795,15 +25819,19 @@ class GroupByMixin[Answer]:
             )
         return answer
 
-    def _text_values(self) -> list[Any]:
-        """The text columns among the ones this group by reduces."""
+    def _reduced_names(self) -> list[Any]:
+        """The columns this group by reduces, which leaves out its keys."""
         keys = set(self._by)
         column = getattr(self, "_column", None)
         if column is not None:
             names = [column]
         else:
             names = getattr(self, "_selection", None) or _shown_names(self._frame)
-        return [name for name in names if name not in keys and _is_text(self._frame[name])]
+        return [name for name in names if name not in keys]
+
+    def _text_values(self) -> list[Any]:
+        """The text columns among the ones this group by reduces."""
+        return [name for name in self._reduced_names() if _is_text(self._frame[name])]
 
     def _text_summed(self, texts: list[Any], param: float) -> Any:
         """The sum over the groups with each text column joined in row order, as pandas sums text.
@@ -26006,6 +26034,11 @@ class GroupByMixin[Answer]:
                     f"Each 'q' must be between 0 and 1. Got '{one}' instead"
                 )
         wanted, alone = _quantiles_asked(q)
+        if not _flag("numeric_only", numeric_only) and any(
+            self._frame[name].dtype == "category" for name in self._reduced_names()
+        ):
+            # pandas' grouped quantile has no kernel for categories, unlike a column's.
+            raise TypeError("No matching signature found")
         if alone and interpolation == "linear":
             return self._reduce(
                 "quantile", _quantile_wanted(q, interpolation), numeric_only=numeric_only
