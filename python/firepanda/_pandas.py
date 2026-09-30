@@ -13544,10 +13544,11 @@ class DataFrameMixin(_Carries):
             id_vars: The columns kept as they are, one name or a list.
             value_vars: The columns stacked, one name or a list. By default
                 every column that is not an id column.
-            var_name: The name of the column of names. By default the column
-                labels' own name, or `variable`.
+            var_name: The name of the column of names, or a list of them, one
+                for each level of columns. By default the column labels' own
+                names, or `variable`.
             value_name: The name of the column of values.
-            col_level: Only 0 or None, since there is one level of columns.
+            col_level: The one level of columns to melt, by number or name.
             ignore_index: Number the rows from zero rather than repeating the
                 row labels.
 
@@ -31127,12 +31128,12 @@ def _melt(
     they are.
     """
     from ._frame import Series
+    from ._multi import MultiIndex
 
-    _refuse(
-        "col_level",
-        None if col_level == 0 else col_level,
-        "firepanda's columns have one level, so there is no other level to melt",
-    )
+    if col_level is not None:
+        # pandas melts the one level asked for, as if it were the only one.
+        frame = frame.set_axis(frame.columns.get_level_values(col_level), axis=1)
+    deep = isinstance(frame.columns, MultiIndex)
     columns = _shown_names(frame)
     ids = _listed(id_vars)
     values = _listed(value_vars)
@@ -31151,14 +31152,27 @@ def _melt(
         values = [name for name in columns if name not in ids]
     else:
         values = [name for name in values if name not in ids]
-    if var_name is None:
+    if var_name is None and deep:
+        # A level of columns names the column its labels land in, and when the
+        # names are not distinct pandas numbers the columns instead.
+        levels = list(frame.columns.names)
+        distinct = len(set(levels)) == len(levels)
+        var_names = levels if distinct else [f"variable_{at}" for at in range(len(levels))]
+    elif var_name is None:
         var_name = _axis_names(frame)[0]
-        var_name = "variable" if var_name is None else var_name
+        var_names = ["variable" if var_name is None else var_name]
+    elif isinstance(var_name, (list, tuple)):
+        if not deep:
+            raise InvalidArgumentError(f"var_name={var_name!r} must be a scalar.")
+        # pandas takes a level for each name, the first ones when there are fewer.
+        var_names = list(var_name)[: frame.columns.nlevels]
+    else:
+        var_names = [var_name]
     label = "__firepanda_label__"
     keep = ids if ignore_index else [label, *ids]
-    if len({*keep, var_name, value_name}) < len(keep) + 2:
+    if len({*keep, *var_names, value_name}) < len(keep) + len(var_names) + 1:
         raise NotImplementedError(
-            f"melt: the answer would have two columns called {var_name!r} or {value_name!r},"
+            f"melt: the answer would have two columns called {var_names!r} or {value_name!r},"
             " and a firepanda frame's column names are distinct"
         )
     flags = [_word(frame[name].dtype) == "bool" for name in values]
@@ -31172,7 +31186,13 @@ def _melt(
     plain = frame.reset_index(drop=True) if ignore_index else _with_labels(frame, label)
     if values:
         out = concat(
-            [plain[keep].assign(**{var_name: name, value_name: plain[name]}) for name in values],
+            [
+                plain[keep].assign(
+                    **dict(zip(var_names, name if deep else [name], strict=False)),
+                    **{value_name: plain[name]},
+                )
+                for name in values
+            ],
             ignore_index=True,
         )
     else:
@@ -31180,10 +31200,8 @@ def _melt(
             plain[keep]
             .head(0)
             .assign(
-                **{
-                    var_name: Series([], dtype="str"),
-                    value_name: Series([], dtype="float64"),
-                }
+                **{one: Series([], dtype="str") for one in var_names},
+                **{value_name: Series([], dtype="float64")},
             )
         )
     if not ignore_index:

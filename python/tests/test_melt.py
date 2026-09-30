@@ -90,6 +90,8 @@ MISTAKES: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["z", "y"]),
     lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_name="a"),
     lambda m: m.DataFrame(FRAME).melt(value_name="d"),
+    lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["b"], col_level=1),
+    lambda m: m.DataFrame(FRAME).melt(var_name=["p"]),
 ]
 
 
@@ -119,13 +121,12 @@ def test_values_pandas_holds_as_objects_are_an_object_column(firepanda: ModuleTy
 REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["d", "e"]),
     lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["b"], var_name="a"),
-    lambda m: m.DataFrame(FRAME).melt(id_vars="a", value_vars=["b"], col_level=1),
 ]
 
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """A repeated name and a second level."""
+    """A repeated name."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 
