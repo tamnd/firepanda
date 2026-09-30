@@ -8633,6 +8633,28 @@ def _prefixed(owner: Any, text: str, axis: Any, before: bool) -> Any:
     return _with_row_labels(owner, [change(label) for label in owner.index.tolist()])
 
 
+def _rows_dropped(owner: Any, rows: Any, errors: str) -> Any:
+    """The frame or column without every row whose label is one of `rows`, by position.
+
+    For labels that repeat, which `reindex` refuses. `Index.drop` still reads
+    the labels first, so a label that is not there raises as it would.
+    """
+    listed = _sequence(rows)
+    owner.index.drop(listed, errors)
+    gone = owner.index.isin(listed)
+    return owner.iloc[[place for place, out in enumerate(gone) if not out]]
+
+
+def _category_cells(value: Any) -> Any:
+    """A `Categorical` or an index of categories as a category column, or None for others."""
+    from ._categorical import Categorical
+    from ._frame import Index
+
+    if isinstance(value, Index) and str(value.dtype) == "category":
+        value = Categorical(value.tolist(), dtype=value.dtype)
+    return value._column if isinstance(value, Categorical) else None
+
+
 def _with_row_labels(owner: Any, labels: list[Any]) -> Any:
     """The frame or column with new row labels, one per row, the index name kept.
 
@@ -11501,6 +11523,10 @@ class DataFrameMixin(_Carries):
         Row labels that are not text become names written as `_names` writes them.
         Columns that mix text and numbers, or flags and numbers, make object
         columns, whose gaps read as NaN as pandas' do.
+
+        Raises:
+            NotImplementedError: For repeated row labels, which would make
+                repeated columns.
         """
         from ._frame import Series
 
@@ -11509,6 +11535,12 @@ class DataFrameMixin(_Carries):
         types = {_word(self[name].dtype) for name in names}
         columns = [self[name].tolist() for name in names]
         rows = list(zip(*columns, strict=True)) if columns else [() for _ in labels]
+        if len(set(labels)) != len(labels):
+            # Each row becomes a column named after its label, and building
+            # them by name would keep only the last of a repeated label.
+            raise NotImplementedError(
+                "transpose: the row labels repeat, and a firepanda frame names each column once"
+            )
         if names and _row_type(sorted(types)) == "object":
             built = {
                 label: Series(_objects.cells(row, "N"), dtype="str")
@@ -12117,11 +12149,9 @@ class DataFrameMixin(_Carries):
 
         The row half is `self.index.drop` followed by `reindex`, which is two
         calls that already existed and no new code at all. It costs one hashing
-        pass over the index more than a purpose built version would, and it
-        inherits `reindex`'s refusal of a repeated row label, so a frame whose
-        index holds the same label twice raises here where pandas drops both
-        rows. Both of those are the price of composing rather than writing a
-        kernel, and document 46 says what the kernel would look like.
+        pass over the index more than a purpose built version would. `reindex`
+        refuses a repeated row label, so labels that repeat are dropped by
+        position instead, every row holding one of them, as pandas does.
 
         `index=` and `columns=` together in one call is allowed and does both,
         which is the one place this is more generous than `rename`. There the
@@ -12140,6 +12170,8 @@ class DataFrameMixin(_Carries):
         rows, names = _dropping(labels, axis, index, columns, "DataFrame")
         if rows is None:
             answer = self.copy()
+        elif not self.index.is_unique:
+            answer = _rows_dropped(self, rows, errors)
         else:
             answer = self._reindex(
                 labels=None,
@@ -12787,9 +12819,19 @@ class DataFrameMixin(_Carries):
             )
         if isinstance(value, collections.abc.Mapping):
             value = Series(dict(value))
-        if hasattr(value, "tolist") and not isinstance(value, Series):
+        # Categories are put by position, whole, rather than read back as their values.
+        categories = _category_cells(value)
+        if categories is not None and not len(_shown_names(self)) and not rows:
+            return DataFrame({name: categories})
+        if categories is None and hasattr(value, "tolist") and not isinstance(value, Series):
             value = value.tolist()
-        if isinstance(value, Series):
+        if categories is not None:
+            if len(categories) != rows:
+                raise InvalidArgumentError(
+                    f"Length of values ({len(categories)}) does not match length of index ({rows})"
+                )
+            column = categories
+        elif isinstance(value, Series):
             if value.index.tolist() != self.index.tolist():
                 value = value.reindex(self.index)
             column = value
@@ -15020,9 +15062,14 @@ class DataFrameMixin(_Carries):
                 " under one name is a shape the schema does not carry"
             )
         try:
-            return _settled(self, DataFrame._wrap(self._inner.reset_index(bool(drop))), inplace)
+            made = DataFrame._wrap(self._inner.reset_index(bool(drop)))
         except Exception as error:
             raise translate(error) from None
+        if not drop and str(self.index.dtype) == "category":
+            # The labels land as their text, so the column is put back to categories.
+            first = _shown_names(made)[0]
+            made[first] = made[first].astype(self.index.dtype)
+        return _settled(self, made, inplace)
 
     def _sort_index(
         self,
@@ -16095,6 +16142,10 @@ class SeriesMixin(_Carries):
         if name is None and isinstance(data, IndexMixin):
             # pandas names a column built from an index after the index.
             name = data.name
+        if isinstance(data, IndexMixin) and str(data.dtype) == "category":
+            from ._categorical import Categorical
+
+            data = Categorical(data.tolist(), dtype=data.dtype)
         typed = None
         try:
             if keyed:
@@ -17394,6 +17445,8 @@ class SeriesMixin(_Carries):
         rows, _ = _dropping(labels, axis, index, columns, "Series")
         if rows is None:
             return _settled(self, self.copy(), inplace)
+        if not self.index.is_unique:
+            return _settled(self, _rows_dropped(self, rows, errors), inplace)
         kept = self._reindex(
             index=self.index.drop(_sequence(rows), errors),
             axis=None,
