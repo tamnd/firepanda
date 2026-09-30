@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: arithmetic on one level of a MultiIndex
+
+The arithmetic and comparison methods of a Series and a frame take `level=` when one side has a MultiIndex and the other flat labels, as pandas does: the flat side is read out once for every row by its label on that level, NaN where it has none or `fill_value` when one is given. Two MultiIndexes, or two frames, on one level are still refused.
+
 ### Added: mean, median and the spreads over a whole frame
 
 `mean`, `median`, `std`, `var`, `sem`, `skew` and `kurt` on a frame take `axis=None` as pandas does and answer one number read from every cell, gaps skipped unless `skipna=False` and flags counted as numbers. A column of text raises `TypeError`, unless `numeric_only=True` leaves it out.
