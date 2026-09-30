@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: resample origin= and offset=
+
+`resample` now takes `origin="end"`, `origin="end_day"` and a timestamp origin, and `offset=`, and lays fixed step bins from them as pandas does, with `end` and `end_day` closing and naming the bins on the right unless told otherwise. A rule in days warns, as pandas 3 does, that neither moves it, and its bins now run a step before midnight of the first day when they close on the right and a step past midnight of the last day, so the empty end bins pandas answers are there. A rule of no length now says "division by zero" as pandas 3.0 does.
+
 ### Fixed: ewm times= with an index or infinities
 
 `ewm(times=...)` now takes a `DatetimeIndex` such as `to_datetime([...], unit="s")` as well as a column of instants, and reads an infinite value as a gap, as pandas' window code does before its kernel runs.

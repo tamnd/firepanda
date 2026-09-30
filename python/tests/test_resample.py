@@ -263,10 +263,8 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 REFUSED: list[Callable[[Any], Any]] = [
     lambda m: numbers(m).resample("W").sum(),
     lambda m: numbers(m).resample("ME").sum(),
-    lambda m: numbers(m).resample("h", offset="5min").sum(),
     lambda m: numbers(m).resample("h", convention="end").sum(),
     lambda m: numbers(m).resample("h", group_keys=True).sum(),
-    lambda m: numbers(m).resample("h", origin="end").sum(),
     lambda m: numbers(m).resample("ns").sum(),
     lambda m: numbers(m).resample("h").ohlc(),
     lambda m: numbers(m).resample("h").agg(["sum", "max"]),
@@ -311,3 +309,66 @@ def test_a_method_signature_is_pandas_signature(firepanda: ModuleType, name: str
     assert [(p.name, p.kind) for p in ours.values()] == [(p.name, p.kind) for p in yours.values()]
     for each in ours:
         assert ours[each].default == yours[each].default, each
+
+
+def uneven(m: Any) -> Any:
+    """Four rows that start after midnight and end on one."""
+    times = m.to_datetime(
+        ["2024-01-01 12:00", "2024-01-02 00:00", "2024-01-04 06:00", "2024-01-05 00:00"]
+    )
+    return m.Series([1.0, 2.0, 3.0, 4.0], index=times)
+
+
+ANCHORED: list[Callable[[Any], Any]] = [
+    lambda m: uneven(m).resample("2D", closed="right").sum(),
+    lambda m: uneven(m).resample("2D", closed="right", label="right").mean(),
+    lambda m: uneven(m).resample("3D", closed="right").sum(),
+    lambda m: uneven(m).resample("2D").sum(),
+    lambda m: uneven(m).resample("30h", origin="end").sum(),
+    lambda m: uneven(m).resample("30h", origin="end", closed="left").sum(),
+    lambda m: uneven(m).resample("30h", origin="end_day").sum(),
+    lambda m: uneven(m).resample("30h", origin="2023-12-31 07:00").sum(),
+    lambda m: uneven(m).resample("30h", origin=m.Timestamp("2024-01-01 03:00")).sum(),
+    lambda m: uneven(m).resample("30h", offset="2h").sum(),
+    lambda m: uneven(m).resample("30h", offset=m.Timedelta(hours=-5), origin="epoch").sum(),
+    lambda m: uneven(m).resample("30h", origin="end", offset="1h").sum(),
+    lambda m: numbers(m).resample("h", offset="5min").sum(),
+]
+
+
+@pytest.mark.parametrize("build", ANCHORED)
+def test_an_origin_or_offset_moves_the_bins_as_pandas(
+    firepanda: ModuleType, build: Callable[[Any], Any]
+) -> None:
+    """The bins are laid from the origin pandas picks, moved by the offset."""
+    import warnings
+
+    import pandas as pd
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        agrees(build(firepanda), build(pd))
+
+
+def test_a_day_rule_warns_that_origin_and_offset_do_nothing(firepanda: ModuleType) -> None:
+    """pandas 3 does not count a day as a tick, so it warns and ignores both."""
+    with pytest.warns(RuntimeWarning, match="'offset' keyword does not take effect"):
+        uneven(firepanda).resample("D", offset="2h").sum()
+    with pytest.warns(RuntimeWarning, match="'origin' keyword does not take effect"):
+        uneven(firepanda).resample("D", origin="epoch").sum()
+
+
+@pytest.mark.parametrize(
+    ("options", "words"),
+    [
+        ({"offset": "abc"}, "'offset' should be a Timedelta convertible type"),
+        ({"origin": "abc"}, "'origin' should be equal to 'epoch'"),
+        ({"origin": "2024-01-01 00:00+00:00"}, "The origin must have the same timezone"),
+    ],
+)
+def test_an_origin_or_offset_pandas_cannot_read_is_refused(
+    firepanda: ModuleType, options: dict[str, Any], words: str
+) -> None:
+    """With pandas' ValueError and its words."""
+    with pytest.raises(ValueError, match=words):
+        uneven(firepanda).resample("30h", **options).sum()
