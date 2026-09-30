@@ -144,10 +144,9 @@ def test_a_mistake_raises_what_pandas_raises(firepanda: ModuleType, name: str) -
     [
         lambda m: data(m).groupby("v")["k"].describe(),
         lambda m: data(m).groupby("k")["t"].describe(),
-        lambda m: data(m).groupby([m.Grouper(key="t", freq="D"), "k"]).sum(),
     ],
 )
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Any) -> None:
-    """Text and moments have no numbers to describe, and the row labels are not a key yet."""
+    """Text and moments have no numbers to describe."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
