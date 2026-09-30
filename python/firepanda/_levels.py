@@ -17,6 +17,8 @@ character a value can hold:
 - `b` is a bool, `0` or `1`.
 - `t` is an instant, its nanoseconds as `i` has them, then its unit and zone.
 - `d` is a span, its nanoseconds as `i` has them, then its unit.
+- `v` is an interval of numbers, each end as `i` or `f` has it behind its
+  kind letter, then the letter of the side it is closed on.
 - `~` is a gap, which sorts after every other kind.
 
 The name of the labels is U+001E followed by the level names as JSON.
@@ -90,10 +92,32 @@ def _value(value: Any) -> str:
     if isinstance(value, dt.timedelta):
         span = Timedelta(value)
         return "d" + _whole(span.value) + span.unit + _END
+    if type(value).__name__ == "Interval" and _numbers(value.left, value.right):
+        ends = "".join(_end(end) for end in (value.left, value.right))
+        return "v" + ends + _CLOSED[value.closed] + _END
     raise NotImplementedError(
         f"a level value of type {type(value).__name__} cannot label a row yet, because"
-        " only text, numbers, bools, instants and spans are written into row labels"
+        " only text, numbers, bools, instants, spans and intervals of numbers are"
+        " written into row labels"
     )
+
+
+_CLOSED = {"right": "r", "left": "l", "both": "b", "neither": "n"}
+
+
+def _numbers(*values: Any) -> bool:
+    """Whether every value is a plain int or float, the ends an interval label can hold."""
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)
+
+
+def _end(value: Any) -> str:
+    """One end of an interval as its kind letter and sixteen hex digits."""
+    return "i" + _whole(value) if isinstance(value, int) else "f" + _float(value)
+
+
+def _unend(part: str) -> Any:
+    """One end of an interval back as the number it was."""
+    return int(part[1:], 16) - _SHIFT if part[0] == "i" else _unfloat(part[1:])
 
 
 def _read(part: str) -> Any:
@@ -123,6 +147,11 @@ def _read(part: str) -> Any:
         return Timestamp(nanos, unit="ns", tz=zone or None).as_unit(unit)
     if kind == "d":
         return Timedelta(int(rest[:16], 16) - _SHIFT, unit="ns").as_unit(rest[16:])
+    if kind == "v":
+        from ._interval import Interval
+
+        closed = next(word for word, letter in _CLOSED.items() if letter == rest[34])
+        return Interval(_unend(rest[:17]), _unend(rest[17:34]), closed)
     return math.nan
 
 
