@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: A missing row label in drop is named as pandas names it
+
+Dropping a row label that is not there raised `index: [z] not found in axis`, the core's words with the labels printed as text. It now raises pandas' `KeyError: "['z'] not found in axis"`, listing the missing labels as they were given, for frames, columns and indexes alike.
+
 ### Fixed: CategoricalIndex lookups and map beside a gap
 
 A `CategoricalIndex` holding a gap refused `get_loc`, `get_indexer`, `in`, `duplicated`, `unique` and `is_unique`, because the labels it looked them up among mixed NaN with text. The gaps are now held as gaps of a text index, as in pandas. `map` with a function hands a gap to it as pandas does, and answers a plain index then unless the function gives back NaN itself, which is pandas' rule.
