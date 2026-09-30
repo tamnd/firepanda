@@ -12249,7 +12249,11 @@ class DataFrameMixin(_Carries):
             taken = index
         elif isinstance(index, (list, tuple)) and index and all(one in pieces for one in index):
             if len(index) != 1:
-                raise NotImplementedError("from_records: several index columns make a MultiIndex")
+                # Several columns label the rows by a level each, which is `set_index`.
+                for name in exclude or ():
+                    if name not in index:
+                        pieces.pop(name, None)
+                return cls(pieces).set_index(list(index))
             taken = index[0]
         elif index is not None:
             labels = list(index)
