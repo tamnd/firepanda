@@ -274,6 +274,11 @@ def _anchor(origin: Any, counts: Any, step: int, day: int, per: int, right: bool
     return _counted(int(origin.value), per)
 
 
+def _label_of(how: Any) -> Any:
+    """The column label pandas gives a reduction: its name, or a function's name."""
+    return how if isinstance(how, str) else getattr(how, "__name__", "<lambda>")
+
+
 class Resampler:
     """The bins of a resample, waiting for a reduction.
 
@@ -319,16 +324,18 @@ class Resampler:
             label = label or "right"
         if on is not None:
             if not isinstance(obj, DataFrame):
-                raise NotImplementedError("resample: on= names a column, which a series has not")
+                raise KeyError(on)
             times = obj[on]
             self._obj = obj.drop(columns=[on])
             self._name = on
             kind = "Index"
+        elif level is not None and obj.index.nlevels > 1:
+            times = obj.index.get_level_values(level).to_series()
+            self._name = times.name
+            kind = "Index"
         else:
             if level not in (None, 0, obj.index.name):
-                raise NotImplementedError(
-                    "resample: level= picks a level of a MultiIndex, which firepanda does not have"
-                )
+                raise InvalidArgumentError(f"The level {level} is not valid")
             times = obj.index.to_series()
             self._name = obj.index.name
             kind = "RangeIndex" if obj.index._inner.is_range() else "Index"
@@ -396,7 +403,7 @@ class Resampler:
         self._time_unit = unit
         self._right_label = label == "right"
         self._right_closed = right
-        self._chosen = on is not None
+        self._chosen = on is not None or (level is not None and obj.index.nlevels > 1)
         self._rule = rule
 
     def _state(self) -> tuple[Any, ...]:
@@ -682,17 +689,20 @@ class Resampler:
     def ohlc(self) -> DataFrame:
         """The first, largest, smallest and last value of every bin.
 
-        Raises:
-            NotImplementedError: Over a frame, where pandas answers with two
-                levels of column labels.
+        Over a frame each column gets the four under its own name, as two
+        levels of column labels.
         """
         from ._frame import DataFrame, Series
 
         if not isinstance(self._obj, Series):
-            raise NotImplementedError(
-                "ohlc over a frame answers with two levels of column labels, which is"
-                " pandas' MultiIndex and firepanda does not have one"
-            )
+            parts = {
+                (name, how): part for name in self._obj for how, part in self[name].ohlc().items()
+            }
+            first = next(iter(parts.values()), None)
+            if first is None:
+                return self.first()
+            out = DataFrame({name: part.reset_index(drop=True) for name, part in parts.items()})
+            return out.set_axis(first.index)
         parts = {"open": self.first(), "high": self.max(), "low": self.min(), "close": self.last()}
         out = DataFrame({name: part.reset_index(drop=True) for name, part in parts.items()})
         return out.set_axis(parts["open"].index)
@@ -702,41 +712,44 @@ class Resampler:
     # ------------------------------------------------------------------
 
     def aggregate(self, func: Any = None, *args: Any, **kwargs: Any) -> Any:
-        """A reduction by name, a list of them, or either for each column.
+        """A reduction by name or a function, a list of them, or either for each column.
 
         A list names a column for each reduction, under the column it reduces
-        when there is one, as pandas' two levels of column labels do.
+        when there is one, as pandas' two levels of column labels do. A function
+        is run on every bin, the empty ones too, and on each column of a frame.
 
         Raises:
-            NotImplementedError: For a function, which is Python run once a bin.
+            InvalidArgumentError: For something that is neither a name, a function,
+                a list of them nor a mapping of columns to them.
         """
         from ._frame import DataFrame
 
         if isinstance(func, str):
             return self._by_name(func)(*args, **kwargs)
-        named = isinstance(func, list) and all(isinstance(how, str) for how in func)
+        if callable(func):
+            return self._called(func, args, kwargs)
+        named = isinstance(func, list) and all(
+            isinstance(how, str) or callable(how) for how in func
+        )
         if named and not isinstance(self._obj, DataFrame):
-            parts = {how: self._by_name(how)() for how in func}
+            parts = {_label_of(how): self._one(how) for how in func}
         elif named:
-            parts = {(name, how): self[name]._by_name(how)() for name in self._obj for how in func}
+            parts = {
+                (name, _label_of(how)): self[name]._one(how) for name in self._obj for how in func
+            }
         elif isinstance(func, dict) and isinstance(self._obj, DataFrame):
-            if any(not isinstance(how, str | list) for how in func.values()):
-                raise NotImplementedError(
-                    "aggregate: a function for a column is Python run once a bin, which is"
-                    " not supported yet"
-                )
-            if all(isinstance(how, str) for how in func.values()):
+            if all(not isinstance(how, list) for how in func.values()):
                 parts = {name: self[name].aggregate(how) for name, how in func.items()}
             else:
                 parts = {
-                    (name, how): self[name]._by_name(how)()
+                    (name, _label_of(how)): self[name]._one(how)
                     for name, hows in func.items()
-                    for how in ([hows] if isinstance(hows, str) else hows)
+                    for how in (hows if isinstance(hows, list) else [hows])
                 }
         else:
-            raise NotImplementedError(
-                "aggregate takes a reduction by name, a list of them, or a mapping of columns"
-                " to them, for now, because a function is Python run once a bin"
+            raise InvalidArgumentError(
+                "aggregate takes a reduction by name, a function, a list of them, or a"
+                " mapping of columns to them"
             )
         first = next(iter(parts.values()))
         out = DataFrame({name: part.reset_index(drop=True) for name, part in parts.items()})
@@ -753,32 +766,106 @@ class Resampler:
             raise AttributeError(f"'{how}' is not a valid function for 'Resampler' object")
         return getattr(self, how)
 
-    def apply(self, func: Any = None, *args: Any, **kwargs: Any) -> Any:
-        """A reduction by name; a function is refused."""
-        if isinstance(func, str):
-            return self.aggregate(func, *args, **kwargs)
-        raise NotImplementedError(
-            "apply with a function runs Python once a bin, which is not written yet"
+    def _one(self, how: Any) -> Any:
+        """One reduction, by name or a function, over every bin."""
+        return self._by_name(how)() if isinstance(how, str) else self._called(how, (), {})
+
+    def _rows(self) -> list[list[int]]:
+        """The positions of the rows in every bin, the empty ones too, in order."""
+        rows: list[list[int]] = [[] for _ in range(self._count)]
+        for position, code in enumerate(self._codes.tolist()):
+            if code is not None and code == code:
+                rows[int(code) - self._first].append(position)
+        return rows
+
+    def _called(self, func: Any, args: Any, kwargs: Any) -> Any:
+        """A function run on every bin, as pandas' `aggregate` and `apply` run it.
+
+        Over a frame it is run on each column first, and on the whole of every
+        bin when a column refuses it. Values come back one a bin, labelled by
+        the bins; pieces with labels of their own are put end to end.
+        """
+        from ._frame import DataFrame, Series
+
+        rows = self._rows()
+        if isinstance(self._obj, Series):
+            answers = [func(self._obj.iloc[at], *args, **kwargs) for at in rows]
+            return self._gathered({_VALUE: answers})
+        try:
+            columns = {
+                name: [func(self._obj[name].iloc[at], *args, **kwargs) for at in rows]
+                for name in self._obj
+            }
+        except Exception:
+            columns = {}
+        if columns:
+            return self._gathered(columns)
+        answers = [func(self._obj.iloc[at], *args, **kwargs) for at in rows]
+        if answers and all(isinstance(answer, Series) for answer in answers):
+            labels = answers[0].index.tolist()
+            table = {label: [answer[label] for answer in answers] for label in labels}
+            return self._labelled(DataFrame(table), None)
+        out = self._gathered({_VALUE: answers})
+        return out[_VALUE].rename(None) if isinstance(out, DataFrame) else out
+
+    def _gathered(self, columns: dict[Any, list[Any]]) -> Any:
+        """Answers of a function a bin, labelled by the bins, or put end to end."""
+        from ._frame import DataFrame, Series
+        from ._pandas import concat
+
+        if any(
+            isinstance(answer, Series | DataFrame) for part in columns.values() for answer in part
+        ):
+            pieces = [answer for part in columns.values() for answer in part]
+            return concat(pieces)
+        return self._labelled(
+            DataFrame({name: Series(part) for name, part in columns.items()}), None
         )
 
+    def apply(self, func: Any = None, *args: Any, **kwargs: Any) -> Any:
+        """A reduction by name, or a function run on every bin."""
+        return self.aggregate(func, *args, **kwargs)
+
+    def _transformed(self, func: Any, args: Any, kwargs: Any) -> Series:
+        """A function run on every bin of a series, its answers put back on the rows."""
+        from ._frame import DataFrame, Series
+
+        held = self._obj
+        values: list[Any] = [None] * len(held)
+        for at in self._rows():
+            if not at:
+                continue
+            answer = func(held.iloc[at], *args, **kwargs)
+            if isinstance(answer, Series | DataFrame):
+                answer = answer.tolist()
+                if len(answer) != len(at):
+                    raise InvalidArgumentError(
+                        "transform must return a scalar value for each group"
+                    )
+            else:
+                answer = [answer] * len(at)
+            for position, value in zip(at, answer, strict=True):
+                values[position] = value
+        return Series(values, index=held.index, name=held.name)
+
     def transform(self, arg: Any, *args: Any, **kwargs: Any) -> DataFrame | Series:
-        """A reduction by name put back on every row of its bin, on the rows' own labels.
+        """A reduction by name or a function put back on every row of its bin.
 
-        Raises:
-            NotImplementedError: For a function.
+        The answer is on the rows' own labels. A function is run on every bin
+        with rows in it, and on each column of a frame.
         """
-        from ._frame import DataFrameGroupBy
+        from ._frame import DataFrame, DataFrameGroupBy, Series
 
-        if not isinstance(arg, str):
-            raise NotImplementedError(
-                "transform takes a reduction by name for now, because a function is Python"
-                " run once a bin"
-            )
         if self._dropped:
             raise NotImplementedError(
                 "transform over rows with a missing timestamp answers NaN for those rows,"
                 " which is not written yet"
             )
+        if not isinstance(arg, str):
+            if isinstance(self._obj, Series):
+                return self._transformed(arg, args, kwargs)
+            parts = {name: self[name]._transformed(arg, args, kwargs) for name in self._obj}
+            return DataFrame(parts, index=self._obj.index)
         grouped = DataFrameGroupBy(self._frame(), [_BIN], True, True, True)
         return self._on_rows(grouped.transform(arg, *args, **kwargs))
 
