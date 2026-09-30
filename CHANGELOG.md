@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Whole number levels with a gap stay whole
+
+A level of a MultiIndex that holds whole numbers and a gap keeps them as int64, as pandas does, rather than turning them into floats. A frame or a column labelled by it prints the numbers whole and NaN for the gap, and the MultiIndex itself still prints them as floats, as pandas reads them.
+
 ### Added: Kendall's tau and callables in corr
 
 `corr` on a column and a frame, and `corrwith`, take `method="kendall"`, which answers Kendall's tau-b as scipy does for pandas, and a callable, which is handed the rows each pair of columns shares. A column against itself is 1 for both, as in pandas.

@@ -34385,6 +34385,8 @@ def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> l
     the same values on it and on every level to its left. A frame puts one
     space between the levels and a column two.
     """
+    from ._frame import Index
+
     codes = index._codes
     last = index.nlevels - 1
     columns = []
@@ -34392,6 +34394,11 @@ def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> l
         values = index.get_level_values(number)
         texts = _text_labels(values, named, widest)
         above = 1 if named else 0
+        level = index._levels[number]
+        if -1 in codes[number] and all(type(value) is int for value in level):
+            # A level of whole numbers keeps them whole beside its gaps, as pandas prints it.
+            written = _text_labels(Index(level), False, widest)
+            texts[above:] = ["NaN" if code < 0 else written[code] for code in codes[number]]
         if _word(values.dtype) in ("string", "str"):
             # pandas prints a gap in a level of text as nan, and NaN everywhere else.
             for row, code in enumerate(codes[number]):

@@ -58,12 +58,7 @@ def _ordered(values: list[Any]) -> list[Any]:
 
 def _factorized(values: list[Any]) -> tuple[list[Any], list[int]]:
     """One level and its codes out of a column of values, a gap coded as -1."""
-    present = [v for v in values if not _gap(v)]
-    level = _ordered(present)
-    if len(present) < len(values) and all(
-        isinstance(v, int) and not isinstance(v, bool) for v in present
-    ):
-        level = [float(v) for v in level]
+    level = _ordered([v for v in values if not _gap(v)])
     where = {v: i for i, v in enumerate(level)}
     return level, [-1 if _gap(v) else where[v] for v in values]
 
@@ -457,7 +452,18 @@ class MultiIndex:
         if not len(self):
             return f"MultiIndex([], {tail})"
         # Each value right aligned to the widest at its place, which is pandas' `_justify`.
-        parts = [[repr(value) for value in row] for row in self]
+        # pandas reads a level of whole numbers with a gap as floats, NaN for the gap.
+        floated = [
+            -1 in code and all(type(value) is int for value in level)
+            for code, level in self._pairs()
+        ]
+        parts = [
+            [
+                repr(float(value) if lift else value)
+                for value, lift in zip(row, floated, strict=True)
+            ]
+            for row in self
+        ]
         widths = [max(len(row[at]) for row in parts) for at in range(len(parts[0]))]
         rows = [
             "("
