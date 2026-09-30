@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: replace with several patterns
+
+`Series.replace` and `DataFrame.replace` with `regex=True` take a run of patterns with one text or a run of texts, a mapping of patterns to texts, compiled patterns, and the same shapes passed as `regex` itself. As in pandas, each pattern rewrites only the rows it matched in the column as it arrived. A frame reads a mapping of column names to mappings, or to patterns beside one text, column by column, and runs of different lengths raise pandas' ValueError.
+
 ### Added: bitwise operators on integers, callable str.replace and categorical factorize
 
 `&`, `|` and `^` between two integer columns, an integer column and a plain integer, or two frames of integers answer the bitwise operation as pandas does, and a boolean column against an integer column reads the integers as bools. `str.replace` takes a callable replacement, handed each match through Python's `re` with `n`, `case` and `flags` honoured, and refuses it with `regex=False` in pandas' words. `factorize` on a categorical column answers a `CategoricalIndex` of uniques that keeps every category, numbered in category order under `sort`.

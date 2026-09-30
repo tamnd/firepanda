@@ -6684,25 +6684,92 @@ default there is a bool, which is not a pattern. It reads as a leak and it is
 the documented way pandas refuses `s.replace(None, 0)`.
 """
 
-def _regex_replaced(column: Any, to_replace: Any, value: Any, regex: Any) -> Any:
-    """`replace` with a pattern, which rewrites the matched part of each text row.
+def _regex_pairs(to_replace: Any, value: Any, regex: Any) -> list[tuple[Any, Any]]:
+    """The patterns a `replace` call names, each with the text it writes in.
 
-    pandas substitutes inside every string cell the pattern is found in and leaves
-    the rest alone, so a column that holds no text comes back as it was. The one
-    shape written is a single pattern and a text replacement, named either as
-    `to_replace` with `regex=True` or as `regex` itself.
+    pandas reads the patterns out of `to_replace` when `regex` is True and out of
+    `regex` itself otherwise. A run of patterns takes one text for all of them or
+    a run as long, and a mapping pairs each pattern with its own text.
+
+    Raises:
+        InvalidArgumentError: If a run of texts is not as long as the patterns.
+        NotImplementedError: For a replacement that is not text.
     """
     pattern = to_replace if regex is True else regex
-    written = isinstance(pattern, (str, re.Pattern)) and isinstance(value, str)
-    if written and (regex is True or to_replace is None):
-        text = _word(column.dtype) == "string" and not _objects.is_object(column._inner)
-        if not text:
-            return column.copy()
-        return column.str.replace(pattern, value, regex=True)
-    raise NotImplementedError(
-        f"regex={regex!r} is not supported yet with these arguments, because only one"
-        " pattern replaced by one piece of text is written"
+    if regex is not True and to_replace is not None:
+        pattern = None
+    if isinstance(pattern, dict) and (value is None or value is NO_DEFAULT):
+        pairs = list(pattern.items())
+    elif isinstance(pattern, (str, re.Pattern)):
+        pairs = [(pattern, value)]
+    elif _positional(pattern) and not isinstance(value, dict):
+        patterns = list(pattern)
+        texts = list(value) if _positional(value) else [value] * len(patterns)
+        if len(texts) != len(patterns):
+            raise InvalidArgumentError(_lengths(len(patterns), len(texts)))
+        pairs = list(zip(patterns, texts, strict=True))
+    else:
+        pairs = []
+    written = all(
+        isinstance(one, (str, re.Pattern)) and isinstance(text, str) for one, text in pairs
     )
+    if (not pairs and pattern is None) or not written:
+        raise NotImplementedError(
+            f"regex={regex!r} is not supported yet with these arguments, because only"
+            " patterns replaced by text are written"
+        )
+    return pairs
+
+
+def _frame_regex_pairs(
+    to_replace: Any, value: Any, regex: Any, names: list[str]
+) -> dict[str, list[tuple[Any, Any]]]:
+    """The patterns a frame's `replace` runs over each column it touches.
+
+    A mapping of column names to mappings gives each named column its own
+    patterns, and a mapping of column names to patterns beside one text gives
+    each named column one pattern. Anything else runs over every column.
+    """
+    if regex is True and isinstance(to_replace, dict):
+        held = [key for key in to_replace if str(key) in names]
+        nested = to_replace and all(isinstance(one, dict) for one in to_replace.values())
+        if (value is None or value is NO_DEFAULT) and nested:
+            return {str(key): _regex_pairs(to_replace[key], None, True) for key in held}
+        if value is not None and value is not NO_DEFAULT and not isinstance(value, dict):
+            return {str(key): _regex_pairs(to_replace[key], value, True) for key in held}
+    pairs = _regex_pairs(to_replace, value, regex)
+    return dict.fromkeys(names, pairs)
+
+
+def _regex_replaced(column: Any, to_replace: Any, value: Any, regex: Any) -> Any:
+    """`replace` with patterns, which rewrites the matched part of each text row.
+
+    pandas substitutes inside every string cell a pattern is found in and leaves
+    the rest alone, so a column that holds no text comes back as it was. Several
+    patterns run one after another, each over what the one before it left.
+    """
+    return _regex_run(column, _regex_pairs(to_replace, value, regex))
+
+
+def _regex_run(column: Any, pairs: list[tuple[Any, Any]]) -> Any:
+    """A column with each pattern replaced by its text, if it holds text.
+
+    pandas finds the rows each pattern matches in the column as it arrived, and
+    only rewrites those, so a row a later pattern would match only after an
+    earlier one rewrote it is left as the earlier one left it.
+    """
+    text = _word(column.dtype) == "string" and not _objects.is_object(column._inner)
+    answer = column.copy()
+    if not text:
+        return answer
+    for pattern, replacement in pairs:
+        found, flags = pattern, 0
+        if isinstance(pattern, re.Pattern):
+            found, flags = pattern.pattern, pattern.flags & ~re.UNICODE
+        hit = column.str.contains(found, flags=flags, regex=True, na=False)
+        rewritten = answer.str.replace(found, replacement, flags=flags, regex=True)
+        answer = rewritten.where(hit, answer)
+    return answer
 
 
 def _lengths(wanted: int, given: int) -> str:
@@ -13642,8 +13709,8 @@ class DataFrameMixin(_Carries):
         names = _held_names(self)
         if regex is not False:
             answer = self.copy()
-            for name in names:
-                answer[name] = _regex_replaced(self[name], to_replace, value, regex)
+            for name, pairs in _frame_regex_pairs(to_replace, value, regex, names).items():
+                answer[name] = _regex_run(self[name], pairs)
             return _kept(self, answer, inplace)
         wanted = _frame_replacements(to_replace, value, names, "DataFrame")
         labels = self._inner.labels().to_list()
