@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: A zone on one level of a MultiIndex
+
+`tz_localize` and `tz_convert` on a frame or a column take `level=` as pandas does, changing the zone of the dates on that level and leaving the other levels as they were. A level that is not there, or one that does not hold dates, is refused in pandas' words.
+
+### Changed: factorize answers numpy codes
+
+`factorize` on a column, an index or an array answers the codes as a numpy array of int64, which prints as pandas' does, when numpy is installed.
+
 ### Added: Timestamp.tz_localize settles a repeated or skipped hour
 
 `Timestamp.tz_localize` took only `ambiguous="raise"` and `nonexistent="raise"`, and even then attached the zone to a repeated or skipped hour without a word. It now reads the zone's transitions as an index does: `ambiguous` takes True, False or "NaT", `nonexistent` takes "NaT", "shift_forward", "shift_backward" or a timedelta, and "raise" refuses in pandas' words. Those refusals, from an index or a column too, no longer start with the core's `temporal: `.
