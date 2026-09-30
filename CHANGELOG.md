@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Level names, reindex by level, asfreq and sparsify as pandas has them
+
+`to_string(sparsify=)` and the `display.multi_sparse` option print every level label whole when off. `stack` carries the names of the column levels it moves and takes a level by name. `rename_axis(index=)` with a mapping or a function renames the level names, and a mapping as the mapper is refused in pandas' words. `reindex(level=)` reads flat labels against one level of a MultiIndex in both directions and refuses a fill method. A reindex onto a range keeps its freq, so `asfreq` with a method does too, `asfreq` over periods moves each label by `how`, and `info(memory_usage=False)` ends on its last line as pandas' report does.
+
 ### Fixed: Timestamp fold and MultiIndex sortorder as pandas takes them
 
 `Timestamp(fold=)` is taken only beside a naive `datetime` or fields given by name, where it now picks the side of a repeated hour when a zone is given, and it is refused in pandas' words beside text, a number, a date, a zoned moment or a year in the first position. `MultiIndex.sortorder` is kept as given, carried by a copy, a mask and a forward slice, and checked against the rows when an index is built from codes or a product.

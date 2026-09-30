@@ -2092,6 +2092,13 @@ def _one_name(value: Any) -> str | None:
     return _held_label(names[0])
 
 
+def _rename_function(value: Any) -> Any:
+    """A mapping or a function as the function pandas renames with, keeping what a mapping lacks."""
+    if hasattr(value, "items"):
+        return lambda name: value.get(name, name)
+    return value
+
+
 def _column_axis_names(frame: Any, value: Any, mapping: bool) -> tuple[Any, ...]:
     """The new names of a frame's column axis, one a level, as `rename_axis(columns=)` reads them.
 
@@ -2524,7 +2531,42 @@ def _reindex_by_position(
             moved = Series._wrap(counted.reindex(wanted, value, True))
     except Exception as error:
         raise translate(error) from None
-    return _with_row_labels(moved, labels).rename_axis(labels.name)
+    moved = _with_row_labels(moved, labels).rename_axis(labels.name)
+    if getattr(labels, "freq", None) is not None:
+        # The target itself becomes the labels, as in pandas, so a range keeps its step.
+        moved.index = labels
+    return moved
+
+
+def _reindex_level(owner: Any, target: Any, level: Any, method: Any, value: Any) -> Any:
+    """`reindex(level=)`, flat labels matched against one level of a `MultiIndex`.
+
+    Onto a `MultiIndex` from flat labels, each row reads the value at its label
+    on the level, missing when there is none. From a `MultiIndex` onto flat
+    labels, the rows whose label on the level is asked for are kept, in the
+    order the labels are asked for. Between two flat indexes the level means
+    nothing and None sends the reindex on as usual.
+
+    Raises:
+        TypeError: For a fill `method`, in pandas' words.
+    """
+    from ._multi import MultiIndex
+
+    if method is not None:
+        raise TypeError("Fill method not supported if level passed")
+    source = owner.index
+    if isinstance(target, MultiIndex) and not isinstance(source, MultiIndex):
+        number = target._level_numbers([level])[0]
+        wanted = target.get_level_values(number).tolist()
+        moved = owner.reindex(wanted, fill_value=value)
+        moved.index = target
+        return moved
+    if isinstance(source, MultiIndex) and not isinstance(target, MultiIndex):
+        number = source._level_numbers([level])[0]
+        held = source.get_level_values(number).tolist()
+        order = list(dict.fromkeys(_sequence(target)))
+        return owner.take([at for label in order for at, one in enumerate(held) if one == label])
+    return None
 
 
 def _reindex_here(owner: Any, target: Any, method: str | None) -> bool:
@@ -5014,8 +5056,12 @@ def _info_write(lines: list[str], buf: Any) -> None:
     Args:
         lines: The report, one line per entry and no newlines on them.
         buf: Where it goes, or None for standard output.
+
+    pandas ends its memory line with a newline and no other, so a report left
+    without one, `memory_usage=False`, ends on its last line.
     """
-    (sys.stdout if buf is None else buf).write("\n".join(lines) + "\n")
+    ending = "\n" if lines and lines[-1].startswith("memory usage: ") else ""
+    (sys.stdout if buf is None else buf).write("\n".join(lines) + ending)
 
 
 def _quantile_rows(wanted: list[float], names: list[str], columns: dict[str, list[Any]]) -> Any:
@@ -9713,18 +9759,29 @@ def _aligned_labels(mine: Index, theirs: Index, join: Any) -> Index | None:
     return joined.rename(mine.name)
 
 
-def _asfreq(owner: Any, freq: Any, method: Any, normalize: Any, fill_value: Any) -> Any:
+def _asfreq(
+    owner: Any, freq: Any, method: Any, normalize: Any, fill_value: Any, how: Any = None
+) -> Any:
     """The frame or column reindexed onto a range of instants at `freq`.
 
     This is pandas' own recipe: a `date_range` from the smallest label to the
     largest at the unit of the labels, then `reindex` onto it, then the labels
     taken to midnight when `normalize` asks for that. An empty axis of instants
-    comes back as it is.
+    comes back as it is. Labels of periods are each moved to `freq` instead, at
+    the end of the period unless `how` says the start, and the rows are kept.
+
+    Raises:
+        NotImplementedError: For `method` over periods, in pandas' words.
     """
     from ._date_range import date_range
     from ._datetime import DatetimeIndex
+    from ._period_index import PeriodIndex
 
     labels = owner.index
+    if isinstance(labels, PeriodIndex):
+        if method is not None:
+            raise UnsupportedError("'method' argument is not supported")
+        return _with_row_labels(owner.copy(), labels.asfreq(freq, how="E" if how is None else how))
     kind = _word(labels.dtype)
     if not len(labels):
         if not kind.startswith("datetime64"):
@@ -11949,10 +12006,10 @@ class DataFrameMixin(_Carries):
         """The rows at a fixed frequency, from the first label to the last.
 
         A label the rows do not have is filled by `method` from a neighbour, or
-        with `fill_value`, as `reindex` fills it. `how` is for a PeriodIndex and
-        is taken and ignored here, as pandas ignores it for instants.
+        with `fill_value`, as `reindex` fills it. Labels of periods are each
+        moved to `freq`, at the end or the start as `how` says.
         """
-        return _asfreq(self, freq, method, normalize, fill_value)
+        return _asfreq(self, freq, method, normalize, fill_value, how)
 
     def tz_localize(
         self,
@@ -14587,6 +14644,7 @@ class DataFrameMixin(_Carries):
                 "formatters": formatters,
                 "float_format": float_format,
                 "index_names": index_names,
+                "sparsify": sparsify,
                 "justify": justify,
                 "show_dimensions": show_dimensions,
                 "decimal": decimal,
@@ -15013,10 +15071,19 @@ class DataFrameMixin(_Carries):
         inplace = _flag("inplace", inplace)
         mapping = True
         if mapper is not NO_DEFAULT and axis in (1, "columns"):
+            if hasattr(mapper, "items") or callable(mapper):
+                raise InvalidArgumentError("Use `.rename` to alter labels with a mapper.")
             columns, mapper, mapping = mapper, NO_DEFAULT, False
         elif axis not in (0, "index", 1, "columns"):
             raise InvalidArgumentError(f"No axis named {axis} for object type DataFrame")
         wanted = mapper if mapper is not NO_DEFAULT else index
+        if mapper is NO_DEFAULT and (callable(index) or hasattr(index, "items")):
+            # A mapping or a function given as `index=` renames the names the levels have.
+            rename = _rename_function(index)
+            names = [rename(name) for name in self.index.names]
+            wanted = names if _has_levels(self) else names[0]
+        elif hasattr(wanted, "items") or callable(wanted):
+            raise InvalidArgumentError("Use `.rename` to alter labels with a mapper.")
         named = None if columns is NO_DEFAULT else _column_axis_names(self, columns, mapping)
         try:
             if wanted is NO_DEFAULT:
@@ -16831,10 +16898,10 @@ class DataFrameMixin(_Carries):
         belong to `method`, so passing either without it is the error pandas
         gives, word for word, rather than a refusal of our own.
 
-        `copy` and `level` are accepted and ignored, which is also what pandas
-        does. `copy` is deprecated there and everything here is immutable
-        anyway, and `level` selects one level of a MultiIndex, of which a flat
-        index has exactly one.
+        `copy` is accepted and ignored, which is also what pandas does, since it
+        is deprecated there and everything here is immutable anyway. `level`
+        matches flat labels against one level of a MultiIndex, as
+        `_reindex_level` says, and between two flat indexes means nothing.
 
         A `fill_value` of NaN is read as no fill value at all. pandas' own
         default for the parameter is NaN, so a caller writing it out has asked
@@ -16848,7 +16915,7 @@ class DataFrameMixin(_Carries):
             axis: Which axis `labels` is for. The rows by default.
             method: Refused.
             copy: Ignored.
-            level: Ignored.
+            level: The level of a MultiIndex to match flat labels against.
             fill_value: What to put in a row or column the frame does not have.
             limit: Refused, since it only means something with `method`.
             tolerance: Refused, for the same reason.
@@ -16887,6 +16954,10 @@ class DataFrameMixin(_Carries):
                         f" kind, {columns!r} was passed"
                     )
                 inner = inner.reindex_columns(_names.held_all(columns), value)
+            if index is not None and level is not None:
+                levelled = _reindex_level(DataFrame._wrap(inner), index, level, method, value)
+                if levelled is not None:
+                    return levelled
             index = _written_index(index, _is_multi(self.index))
             if index is not None and _reindex_here(self, index, method):
                 return _reindex_by_position(
@@ -17742,10 +17813,10 @@ class SeriesMixin(_Carries):
         """The rows at a fixed frequency, from the first label to the last.
 
         A label the rows do not have is filled by `method` from a neighbour, or
-        with `fill_value`, as `reindex` fills it. `how` is for a PeriodIndex and
-        is taken and ignored here, as pandas ignores it for instants.
+        with `fill_value`, as `reindex` fills it. Labels of periods are each
+        moved to `freq`, at the end or the start as `how` says.
         """
-        return _asfreq(self, freq, method, normalize, fill_value)
+        return _asfreq(self, freq, method, normalize, fill_value, how)
 
     def tz_localize(
         self,
@@ -19656,6 +19727,13 @@ class SeriesMixin(_Carries):
         wanted = mapper if mapper is not NO_DEFAULT else index
         if wanted is NO_DEFAULT:
             return _settled(self, self.copy(), inplace)
+        if mapper is NO_DEFAULT and (callable(index) or hasattr(index, "items")):
+            # A mapping or a function given as `index=` renames the names the levels have.
+            rename = _rename_function(index)
+            names = [rename(name) for name in self.index.names]
+            wanted = names if _has_levels(self) else names[0]
+        elif hasattr(wanted, "items") or callable(wanted):
+            raise InvalidArgumentError("Use `.rename` to alter labels with a mapper.")
         try:
             return _settled(
                 self, Series._wrap(self._inner.renamed_axis(_axis_name(self, wanted))), inplace
@@ -20591,7 +20669,8 @@ class SeriesMixin(_Carries):
         The row half of the frame's method with one column under it, and the
         same four answers to the parameters that do no work. `method` is
         refused, `limit` and `tolerance` give pandas' own sentence when they
-        arrive without it, and `copy` and `level` are taken and ignored.
+        arrive without it, and `copy` is taken and ignored. `level` reads the
+        labels of one level against flat ones, as `_reindex_level` says.
 
         `axis` is the one that differs from the frame, and it is taken and
         ignored too. A series has one axis, so naming it is not a choice, and
@@ -20607,7 +20686,7 @@ class SeriesMixin(_Carries):
             axis: Ignored.
             method: Refused.
             copy: Ignored.
-            level: Ignored.
+            level: The level of a `MultiIndex` to match flat labels against.
             fill_value: What to put in a row whose label was not found.
             limit: Refused, since it only means something with `method`.
             tolerance: Refused, for the same reason.
@@ -20622,6 +20701,10 @@ class SeriesMixin(_Carries):
             return Series._wrap(self._inner)
 
         value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
+        if level is not None:
+            levelled = _reindex_level(self, index, level, method, value)
+            if levelled is not None:
+                return levelled
         index = _written_index(index, _is_multi(self.index))
         if _reindex_here(self, index, method):
             return _reindex_by_position(self, index, method, value, limit, tolerance)
@@ -35607,12 +35690,14 @@ def _text_named(index: Any) -> bool:
     return any(name is not None for name in getattr(index, "names", [index.name]))
 
 
-def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> list[str]:
+def _text_levels(
+    index: Any, named: bool, widest: int | None, between: int, sparse: bool = True
+) -> list[str]:
     """The rows of a `MultiIndex` as text, one column per level, sparsified as pandas does.
 
     A value on any level but the last is left blank when the row above has
-    the same values on it and on every level to its left. A frame puts one
-    space between the levels and a column two.
+    the same values on it and on every level to its left, unless `sparse` is
+    off. A frame puts one space between the levels and a column two.
     """
     from ._frame import Index
 
@@ -35640,7 +35725,7 @@ def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> l
             for row, code in enumerate(codes[number]):
                 if code < 0:
                     texts[row + above] = "nan"
-        if number < last:
+        if sparse and number < last:
             for row in range(1, len(index)):
                 if all(codes[n][row] == codes[n][row - 1] for n in range(number + 1)):
                     texts[row + above] = ""
@@ -35649,7 +35734,9 @@ def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> l
     return [(" " * between).join(parts) for parts in zip(*columns, strict=True)]
 
 
-def _text_labels(index: Any, named: bool, widest: int | None, between: int = 1) -> list[str]:
+def _text_labels(
+    index: Any, named: bool, widest: int | None, between: int = 1, sparse: bool = True
+) -> list[str]:
     """The row labels as text, headed by the index name when `named` is set.
 
     Text labels are written as they are. Other labels go through the column
@@ -35659,7 +35746,7 @@ def _text_labels(index: Any, named: bool, widest: int | None, between: int = 1) 
     from ._multi import MultiIndex
 
     if isinstance(index, MultiIndex):
-        return _text_levels(index, named, widest, between)
+        return _text_levels(index, named, widest, between, sparse)
     header = []
     if named:
         header.append("" if index.name is None else _text_plain(index.name))
@@ -35715,24 +35802,32 @@ def _stacked_levels(frame: Any, level: Any) -> Any:
     each row followed by one row for each value of them in the order the
     values first appear. The columns left are the other levels, again in the
     order they first appear, and a pair that has no column reads as missing.
-    Stacking every level answers a series of the columns that exist.
+    Stacking every level answers a series of the columns that exist. The
+    names of the column levels go with them, and a level may be asked for by
+    its name.
 
     Raises:
         IndexError: For a level past the ones the columns have, in pandas' words.
+        KeyError: For a name no column level has, in pandas' words.
     """
-    from ._frame import DataFrame, Series
+    from ._frame import DataFrame, Index, Series
     from ._multi import MultiIndex
 
     labels = _shown_names(frame)
     depth = _column_depth(labels)
+    level_names = list(getattr(frame.columns, "names", [None] * depth))
     asked = list(level) if isinstance(level, (list, tuple)) else [level]
     places = []
     for each in asked:
-        if not isinstance(each, int) or not -depth <= each < depth:
+        if not isinstance(each, int) and each in level_names:
+            each = level_names.index(each)
+        elif not isinstance(each, int):
+            raise KeyError(f"Level {each} not found")
+        if not -depth <= each < depth:
             raise IndexError(f"Too many levels: Index has only {depth} levels, not {each + 1}")
         places.append(each % depth)
     rows = [row if isinstance(row, tuple) else (row,) for row in frame.index.tolist()]
-    names = [*frame.index.names, *([None] * len(places))]
+    names = [*frame.index.names, *(level_names[at] for at in places)]
     if sorted(set(places)) == list(range(depth)):
         values = concat([frame[label] for label in labels], ignore_index=True)
         height = len(frame)
@@ -35767,18 +35862,27 @@ def _stacked_levels(frame: Any, level: Any) -> Any:
     tuples = [
         (*row, *(key if len(places) > 1 else (key,))) for row in rows for key in keys
     ]
-    return joined.take(order).set_axis(MultiIndex.from_tuples(tuples, names=names), axis=0)
+    stacked = joined.take(order).set_axis(MultiIndex.from_tuples(tuples, names=names), axis=0)
+    if any(level_names[at] is not None for at in rest):
+        if len(rest) > 1:
+            stacked.columns = MultiIndex.from_tuples(kept, names=[level_names[at] for at in rest])
+        else:
+            stacked.columns = Index(kept, name=level_names[rest[0]])
+    return stacked
 
 
-def _text_level_heads(labels: list[Any]) -> list[list[str]]:
+def _text_level_heads(labels: list[Any], sparse: bool = True) -> list[list[str]]:
     """The header lines of columns with levels, one per level, as pandas prints them.
 
     A label that repeats the one to its left, with every level above it
     repeating too, prints blank. That is pandas' `sparsify_labels`, and the last
-    level always prints. Unlike a flat header no label gets a leading space for
-    a numeric column, which is pandas 3's rule.
+    level always prints, and with `sparse` off every label prints whole. Unlike
+    a flat header no label gets a leading space for a numeric column, which is
+    pandas 3's rule.
     """
     columns = [[_text_head(part) for part in label] for label in labels]
+    if not sparse:
+        return columns
     heads = [columns[0]] if columns else []
     for before, now in itertools.pairwise(columns):
         sparse = []
@@ -35944,6 +36048,9 @@ def _text_table(
     header = kw["header"]
     index = kw["index"]
     float_format = _text_float_format(kw["float_format"])
+    sparse = kw.get("sparsify")
+    if sparse is None:
+        sparse = _config.get_option("display.multi_sparse")
 
     def picked(position: int, label: str) -> Any:
         if isinstance(formatters, dict):
@@ -35962,7 +36069,7 @@ def _text_table(
         # pandas sparsifies the columns left after the cut, so the first one past the dots
         # prints its whole label.
         heads = [[] for _ in labels]
-        kept_heads = _text_level_heads([labels[position] for position in kept_cols])
+        kept_heads = _text_level_heads([labels[position] for position in kept_cols], sparse)
         for position, head in zip(kept_cols, kept_heads, strict=True):
             heads[position] = head
     elif header:
@@ -36007,7 +36114,7 @@ def _text_table(
             if kw["index_names"] and len(held) == depth:
                 corner = ["" if one is None else _text_plain(one) for one in held]
         names = _text_fixed(
-            corner + _text_labels(frame.index, named, widest),
+            corner + _text_labels(frame.index, named, widest, sparse=sparse),
             "left",
             int(spaces.get("", 0)),
             widest,
@@ -36142,7 +36249,8 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
         footer += ("\n" if footer else "") + _text_categories(column)
     if not rows:
         return f"Series([], {footer})"
-    labels = _text_labels(shown.index, True, _TEXT_SERIES_WIDEST, 2)
+    sparse = _config.get_option("display.multi_sparse")
+    labels = _text_labels(shown.index, True, _TEXT_SERIES_WIDEST, 2, sparse)
     texts = _text_values(shown, None, kw["float_format"], kw["na_rep"], ".", kw["index"])
     texts = _text_fixed(texts, "right", None, _TEXT_SERIES_WIDEST)
     if dots is not None:
