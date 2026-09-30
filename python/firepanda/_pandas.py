@@ -8116,9 +8116,23 @@ def _interpolated(
         raise TypeError("Cannot interpolate with str dtype")
     elif kind == "category":
         raise NotImplementedError("Categorical does not implement interpolate")
+    elif kind.startswith("period["):
+        raise NotImplementedError("PeriodArray does not implement interpolate")
+    elif kind.startswith("interval["):
+        if gaps == 0:
+            return column
+        raise NotImplementedError("IntervalArray does not implement interpolate")
     elif kind in _FLOATING:
         values = column if kind == "float64" else column.astype("float64")
-    elif kind.startswith(("timedelta64[", "datetime64[")) and "," not in kind:
+    elif kind.startswith("datetime64[") and "," in kind:
+        # A zoned column draws the same line through its UTC instants, then goes back to its zone.
+        if gaps in (0, len(column)):
+            return column
+        zone = column.dt.tz
+        plain = column.dt.tz_convert(None)
+        answer = _interpolated(plain, owner, method, index, limit, direction, area, kwargs)
+        return answer.dt.tz_localize("UTC").dt.tz_convert(zone)
+    elif kind.startswith(("timedelta64[", "datetime64[")):
         # pandas draws the line through the counts and truncates each point to a whole count.
         if gaps in (0, len(column)):
             return column
@@ -20065,7 +20079,7 @@ class SeriesMixin(_Carries):
         printed = self.dtype
         if str(printed) in ("str", "string", "bool", "category", "object"):
             return self._described_values()
-        if str(printed).startswith("period["):
+        if str(printed).startswith(("period[", "interval[")):
             return self._described_values()
         if str(printed).startswith(("datetime64[", "timedelta64[")):
             return self._described_moments(asked)
