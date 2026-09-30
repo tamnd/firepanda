@@ -19707,8 +19707,10 @@ def _grouped(
         by = [key._column(frame) if isinstance(key, Grouper) else key for key in by]
     single = not isinstance(by, list) or _values_key(frame, by)
     frame, names, shown = _outside_keys(frame, by, level)
-    frame = _unmasked_frame(frame)
     keys = GroupByMixin._keys(frame, names, None)
+    masks = {name: _masked.masked_of(frame[name]) for name in keys}
+    masks = {name: kind for name, kind in masks.items() if kind is not None}
+    frame = _unmasked_frame(frame)
     frame, categories = _category_keys(frame, keys)
     if dropna:
         frame = _gaps_as_nulls(frame, keys)
@@ -19718,7 +19720,7 @@ def _grouped(
             "observed=False over several keys makes a group of every mix of their"
             " categories, which is labelled by a MultiIndex"
         )
-    showing = shown or categories
+    showing = shown or categories or masks
     kind = _key_showing(DataFrameGroupBy) if showing else DataFrameGroupBy
     grouped = kind(frame, keys, as_index, sort, dropna)
     grouped._single = single
@@ -19727,6 +19729,7 @@ def _grouped(
         grouped._shown = shown
         grouped._categories = categories
         grouped._every = every
+        grouped._masks = masks
         grouped._busy = False
     return grouped
 
@@ -19937,7 +19940,7 @@ def _key_showing(base: type) -> Any:
     import inspect
 
     space: dict[str, Any] = {
-        "__slots__": ("_busy", "_categories", "_every", "_shown"),
+        "__slots__": ("_busy", "_categories", "_every", "_masks", "_shown"),
         "__doc__": base.__doc__,
         "__module__": base.__module__,
         "__qualname__": base.__qualname__,
@@ -20033,6 +20036,7 @@ def _rekeyed(
     keyed._shown = shown
     keyed._categories = categories or {}
     keyed._every = every
+    keyed._masks = getattr(grouped, "_masks", {})
     keyed._busy = False
     return keyed
 
@@ -20198,7 +20202,12 @@ def _key_code(owner: Any, key: Any) -> Any:
 
 
 def _categories_back(owner: Any, answer: Any) -> Any:
-    """`answer` with each category key's codes turned back into the categories."""
+    """`answer` with each category key's codes turned back into the categories.
+
+    A key of a masked type, grouped as its lower case column, is written back
+    in its masked type too.
+    """
+    answer = _masks_back(owner, answer)
     if not owner._categories:
         return answer
     if isinstance(answer, DataFrameMixin):
@@ -20212,6 +20221,26 @@ def _categories_back(owner: Any, answer: Any) -> Any:
     label = answer.index.name
     if isinstance(label, str) and label in owner._categories:
         column = _as_categories(answer.index.to_series(), *owner._categories[label])
+        answer = _with_row_labels(answer, column)
+    return answer
+
+
+def _masks_back(owner: Any, answer: Any) -> Any:
+    """`answer` with each key of a masked type back in that type, in a column and on the labels."""
+    masks = getattr(owner, "_masks", None)
+    if not masks:
+        return answer
+    if isinstance(answer, DataFrameMixin):
+        changed = {
+            name: _masked.as_masked(answer[name], masks[name])
+            for name in _shown_names(answer)
+            if name in masks and not _masked.masked_of(answer[name])
+        }
+        if changed:
+            answer = answer.assign(**changed)
+    label = answer.index.name
+    if isinstance(label, str) and label in masks and not _is_object_index(answer.index):
+        column = _masked.as_masked(answer.index.to_series(), masks[label])
         answer = _with_row_labels(answer, column)
     return answer
 
@@ -34295,7 +34324,8 @@ def _masked_through(method: Any, how: str) -> Any:
     masked type pandas answers for its values, `own` writes it back in the
     column's own type, `whole` does that for a column of whole numbers only,
     `reduce` reads a missing answer as `NA`, `truth` is `any` and `all` by Kleene's
-    logic, `raw` hands it back as it is, and
+    logic, `raw` hands it back as it is, `counts` is `family` with the labels
+    written back in the column's type, and
     `transform` picks one of these by the transform asked for.
     A masked series among the arguments is read the same way.
     """
@@ -34332,7 +34362,12 @@ def _masked_through(method: Any, how: str) -> Any:
         if chosen == "raw":
             return answer
         keep = chosen == "own" or (chosen == "whole" and name[0] in "IU")
-        return _kept(self, _masked.rewrap(answer, name if keep else None), inplace)
+        answer = _masked.rewrap(answer, name if keep else None)
+        if chosen == "counts":
+            # The counts are labelled by the values, which keep the column's type.
+            labels = _masked.as_masked(answer.index.to_series(), name)
+            answer = _with_row_labels(answer, labels)
+        return _kept(self, answer, inplace)
 
     return run
 
@@ -34344,7 +34379,7 @@ for _method, _how in (
     ("_unary", "family"),
     ("_shift", "own"),
     ("_transformed", "transform"),
-    ("_value_counts", "family"),
+    ("_value_counts", "counts"),
     ("sort_values", "own"),
     ("where", "own"),
     ("fillna", "own"),

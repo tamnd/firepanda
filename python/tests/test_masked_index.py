@@ -98,3 +98,40 @@ def test_the_class_is_called_index() -> None:
     assert type(made).__name__ == "Index"
     assert isinstance(made, fp.Index)
     assert str(made.dtype) == "Int64"
+
+
+def grouped(lib: ModuleType) -> Any:
+    return lib.DataFrame(
+        {
+            "k": lib.Series([1, 1, None, 2], dtype="Int64"),
+            "j": ["a", "b", "a", "a"],
+            "v": [1, 2, 3, 4],
+        }
+    )
+
+
+KEYED: dict[str, Callable[[ModuleType], Any]] = {
+    "mean": lambda lib: grouped(lib).groupby("k").v.mean(),
+    "size-gaps": lambda lib: grouped(lib).groupby("k", dropna=False).size(),
+    "as-column": lambda lib: grouped(lib).groupby("k", as_index=False).v.sum(),
+    "agg": lambda lib: grouped(lib).groupby("k").agg({"v": "max"}),
+    "first": lambda lib: grouped(lib).groupby("k").first(),
+    "nunique": lambda lib: grouped(lib).groupby("k").nunique(),
+    "get-group": lambda lib: grouped(lib).groupby("k").get_group(1),
+    "count": lambda lib: grouped(lib).groupby("k").count(),
+    "two-keys": lambda lib: grouped(lib).groupby(["k", "j"]).v.sum(),
+    "pivot": lambda lib: grouped(lib).pivot_table(index="k", values="v", aggfunc="sum"),
+    "counts": lambda lib: lib.Series([5, 6, 5, None], dtype="Int64").value_counts(),
+    "counts-gaps": lambda lib: lib.Series([5, 6, 5, None], dtype="Int64").value_counts(
+        dropna=False
+    ),
+    "counts-share": lambda lib: lib.Series([1.5, 1.5, 2.0], dtype="Float64").value_counts(
+        normalize=True
+    ),
+    "counts-flags": lambda lib: lib.Series([True, None, True], dtype="boolean").value_counts(),
+}
+
+
+@pytest.mark.parametrize("case", KEYED.values(), ids=KEYED.keys())
+def test_a_masked_key_labels_the_answer_in_its_type(case: Callable[[ModuleType], Any]) -> None:
+    assert outcome(lambda: case(fp)) == outcome(lambda: case(pd))

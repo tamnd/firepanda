@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: A masked key keeps its type on the answer
+
+`groupby` on a key of a masked type, `Int64`, `Float64`, `boolean` or `string`, now labels its answer in that type, on the row labels or in the key column with `as_index=False`, rather than in the lower case type it was grouped as. `Series.value_counts` on a masked column labels the counts in the column's type too, as pandas does.
+
 ### Added: An index of a masked type
 
 `Index(data, dtype="Int64")`, and the same with `Float64`, `boolean` or `string`, now make pandas' masked index rather than refusing, and an index made from a masked column keeps its type instead of reading as text. The repr and dtype name the masked type and print a gap as `<NA>`. `get_loc` and `in` find a label by its value, `==` and `isin` answer a `BooleanArray`, and sorting goes by value. A series or frame keeps the labels through `index=`, `set_index`, `sort_index`, `reindex` and `reset_index`. A frame now prints a space ahead of the name of a masked column of numbers, as pandas does for any column of numbers.
