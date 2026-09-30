@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Text and numbers refused with pandas' TypeError, and df.a writing column a
+
+A whole number column added to a text column, such as `n + s`, now raises pandas' `TypeError` naming the reflected operator (`operation 'radd' not supported for dtype 'str' with dtype 'int64'`) instead of a core type error. A frame with a text column plus a number, by operator or by the named form, raises the same `TypeError` pandas raises for that column. Assigning to an attribute that names an existing column, `df.a = [7, 8]`, now writes the column as pandas does.
+
 ### Added: Assigning to an axis or a name
 
 `df.columns = [...]`, `df.index = [...]`, `s.index = [...]` and `s.name = "w"` now work as they do in pandas, refusing labels of another length with pandas' `Length mismatch` message and a name that cannot be hashed with its `TypeError`. An index read off a frame or a column remembers where it came from, so `df.index.name = "r"`, `s.index.name = "k"` and `df.index.names = [...]` name the axis they were read off, while a standalone index or a copy is renamed alone. Naming the column axis still waits on the core, which keeps a frame's columns as its schema.

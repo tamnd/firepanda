@@ -513,6 +513,22 @@ def _frame_text_equality(frame: Any, other: Any, op: str) -> Any:
     return DataFrame(pieces, index=frame.index)
 
 
+def _frame_text_refused(frame: Any, other: Any, op: str, flip: bool) -> None:
+    """Refuses arithmetic between a number and a frame with a column of text, in pandas' words.
+
+    pandas runs the operator one column at a time, so the first column of text
+    raises the `TypeError` a column of text raises on its own.
+    """
+    if op not in ("add", "sub", "truediv", "floordiv", "mod", "pow"):
+        return
+    if not isinstance(other, numbers.Number) or isinstance(other, bool):
+        return
+    for name in _shown_names(frame):
+        column = frame[name]
+        if _is_text(column):
+            _text_arithmetic(column, other, op, flip)
+
+
 def _holds_objects(column: Any, other: Any) -> bool:
     """Whether either side of an operator is an object column."""
     if _objects.is_object(column._inner):
@@ -1096,6 +1112,9 @@ def _text_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
     from ._frame import Series
 
     if not _is_text(owner):
+        if _is_text(other) and op in ("add", "sub", "truediv", "floordiv", "mod", "pow"):
+            # pandas hands a number on the left to the text's reflected operator.
+            return _text_arithmetic(other, owner, op, not flip)
         return None
     if op == "mul":
         return _text_repeated(owner, other)
@@ -14012,6 +14031,7 @@ class DataFrameMixin(_Carries):
             unequal = _frame_text_equality(self, other, op)
             if unequal is not None:
                 return unequal
+            _frame_text_refused(self, other, op, flip)
             return DataFrame._wrap(_two_valued_frame(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
@@ -14055,6 +14075,7 @@ class DataFrameMixin(_Carries):
             unequal = _frame_text_equality(self, other, op)
             if unequal is not None:
                 return unequal
+            _frame_text_refused(self, other, op, flip)
             return DataFrame._wrap(_two_valued_frame(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
