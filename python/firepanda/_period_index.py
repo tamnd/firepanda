@@ -434,6 +434,14 @@ class PeriodIndex(Index):
         """The periods as pandas' `PeriodArray`."""
         return self.to_series().array
 
+    def __arrow_array__(self, type: Any = None) -> Any:
+        """The periods as the Arrow array pandas exports, `pandas.period` over their ordinals."""
+        import pyarrow as pa
+
+        ordinals = [None if value is NaT else value.ordinal for value in self._periods()]
+        storage = pa.array(ordinals, type=pa.int64())
+        return pa.ExtensionArray.from_storage(_arrow_period(self.freqstr), storage)
+
     def astype(self, dtype: Any, copy: bool = True) -> Any:
         """The periods as text, or as periods of another frequency."""
         if str(dtype) in ("str", "string", "<class 'str'>"):
@@ -566,6 +574,44 @@ def _offset_type() -> Any:
     from .offsets import BaseOffset
 
     return BaseOffset
+
+
+_ARROW_TYPE: list[Any] = []
+
+
+def _arrow_period(freq: str) -> Any:
+    """pandas' Arrow type for periods, `pandas.period`, without registering it.
+
+    pandas registers the name when its Arrow types are first imported, so its own
+    type is used when pandas is loaded, which a reader in the same process then
+    sees as pandas' type, and otherwise one of the same name and metadata is
+    built, as `_interval._arrow_type` builds the one for intervals.
+    """
+    import json
+    import sys
+
+    import pyarrow as pa
+
+    if not _ARROW_TYPE and "pandas" in sys.modules:
+        from pandas.core.arrays.arrow.extension_types import ArrowPeriodType
+
+        _ARROW_TYPE.append(ArrowPeriodType)
+    if not _ARROW_TYPE:
+
+        class ArrowPeriodType(pa.ExtensionType):
+            def __init__(self, freq: str) -> None:
+                self._freq = freq
+                pa.ExtensionType.__init__(self, pa.int64(), "pandas.period")
+
+            def __arrow_ext_serialize__(self) -> bytes:
+                return json.dumps({"freq": self._freq}).encode()
+
+            @classmethod
+            def __arrow_ext_deserialize__(cls, storage: Any, serialized: bytes) -> Any:
+                return cls(json.loads(serialized.decode())["freq"])
+
+        _ARROW_TYPE.append(ArrowPeriodType)
+    return _ARROW_TYPE[0](freq)
 
 
 def period_range(

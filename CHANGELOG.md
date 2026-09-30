@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: period labels cross to Arrow as pandas' do
+
+A `PeriodIndex` hands Arrow the array pandas exports for periods, the `pandas.period` extension type over the periods' ordinals with the frequency in its metadata, and a missing period as a null. It is pandas' own type when pandas is loaded, so a series or frame labelled by periods compares with pandas' through Arrow rather than as text.
+
 ### Added: resample over periods
 
 `resample` over rows labelled by periods works the way pandas' `PeriodIndexResampler` does. Going to a coarser frequency, months to quarters or to an anchored year, each row joins the bin of the period it falls in and the bins cover every period between the first row's and the last's, counted bins such as `2Q` included, so every reduction, `ohlc`, `agg` and `groups` answer pandas' labels. Going to a finer frequency, each row lands at the start or the end of its period as `convention` says, and `asfreq`, `ffill`, `bfill` and `interpolate` fill the periods between. A reduction to an equal or finer frequency is that upsample, and one between frequencies neither of which divides the other raises IncompatibleFrequency. A `Period` built from a period of the same base frequency keeps it as it is, so `period_range` over counted frequencies such as `12h` starts where pandas starts.
