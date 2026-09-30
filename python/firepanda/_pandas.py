@@ -7974,7 +7974,7 @@ def _interpolation_points(column: Series, method: str, index: Any) -> Series:
     Raises:
         TypeError: For a text index under `index` or `values`, with numpy's
             message, since that is where pandas stops.
-        NotImplementedError: For an index that is not numbers in rising order.
+        NotImplementedError: For an index that is not numbers, instants or spans.
     """
     from ._frame import Series
 
@@ -7992,12 +7992,6 @@ def _interpolation_points(column: Series, method: str, index: Any) -> Series:
         raise NotImplementedError(
             f"method={method!r} over an index of {kind} is not supported yet, because only"
             " an index of numbers, instants or spans is read as positions along the line"
-        )
-    if not (index.is_monotonic_increasing and index.is_unique):
-        raise NotImplementedError(
-            f"method={method!r} needs an index of numbers in rising order here, because"
-            " each gap is filled from the rows either side of it rather than by sorting"
-            " the labels first"
         )
     # Instants and spans sit at their counts in the index's unit, as pandas reads them.
     points = index.asi8 if counted else index.tolist()
@@ -8021,19 +8015,24 @@ def _interpolated_line(
 
     Every step is a whole column operation. The values have at least one gap
     and at least one value, and the labels are unique, since the steps line
-    columns up by label.
+    columns up by label. Points that do not rise, labels out of order or
+    repeated, are handed to `interp` sorted the way pandas sorts them, and the
+    rows pandas leaves are still counted by position.
     """
     here = values.notna()
     gap = ~here
-    seen = points.where(here)
-    left_x, right_x = seen.ffill(), seen.bfill()
-    left_y, right_y = values.ffill(), values.bfill()
-    slope = (right_y - left_y) / (right_x - left_x)
-    guess = slope * (points - left_x) + left_y
-    guess = guess.where(guess.notna(), slope * (points - right_x) + right_y)
-    guess = guess.where(guess.notna() | (left_y != right_y), left_y)
-    guess = guess.where(left_x.notna(), right_y).where(right_x.notna(), left_y)
-    filled = values.where(here, guess)
+    if points.is_monotonic_increasing:
+        seen = points.where(here)
+        left_x, right_x = seen.ffill(), seen.bfill()
+        left_y, right_y = values.ffill(), values.bfill()
+        slope = (right_y - left_y) / (right_x - left_x)
+        guess = slope * (points - left_x) + left_y
+        guess = guess.where(guess.notna(), slope * (points - right_x) + right_y)
+        guess = guess.where(guess.notna() | (left_y != right_y), left_y)
+        guess = guess.where(left_x.notna(), right_y).where(right_x.notna(), left_y)
+        filled = values.where(here, guess)
+    else:
+        filled = _interpolated_unsorted(values, points)
 
     rows = _interpolation_points(values, "linear", None)
     counted = rows.where(here)
@@ -8056,6 +8055,19 @@ def _interpolated_line(
     if keep is None:
         return filled
     return filled.where(~(keep & gap), math.nan)
+
+
+def _interpolated_unsorted(values: Series, points: Series) -> Series:
+    """The gaps filled by numpy's `interp` over the points sorted, which is what pandas does."""
+    from ._frame import Series
+
+    numpy = _numpy()
+    x = numpy.asarray(points.tolist(), dtype="float64")
+    y = numpy.asarray(values.tolist(), dtype="float64")
+    valid = ~numpy.isnan(y)
+    order = numpy.argsort(x[valid])
+    y[~valid] = numpy.interp(x[~valid], x[valid][order], y[valid][order])
+    return Series(y, index=values.index, name=values.name)
 
 
 def _lined_up_by_label(index: Any) -> bool:

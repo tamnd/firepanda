@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: interpolate by labels that do not rise
+
+`interpolate` with `method="index"`, `"values"` or `"time"` now fills gaps when the labels are out of order or repeat, sorting the points of the known values and filling by numpy's `interp` as pandas does, with `limit`, `limit_direction` and `limit_area` still counted by position.
+
 ### Fixed: a Series or frame column built from an IntervalIndex
 
 `Series(intervals)` and a frame column given an `IntervalIndex` now make an interval column of the index's own type, placed by position as pandas places it, where they used to be refused. `IntervalIndex.to_series` labels the rows with the intervals, as pandas does.
