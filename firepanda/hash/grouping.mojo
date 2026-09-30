@@ -464,10 +464,12 @@ def _key_agrees(
     few thousand of them is comparing against something that stays in cache
     while the column streams past it.
 
-    The walk is serial. It is a scan of the codes and of the column with one
-    random read into the gathered values, and it costs about a tenth of what the
-    per key factorizes it replaces cost, so making it parallel is an improvement
-    to something that is no longer the expensive part.
+    The walk is split into slices of rows, one per worker, as `_all_follow`
+    splits its check. It is a scan of the codes and of the column with one
+    random read into the gathered values, which is cheap next to the factorize
+    it follows, but it was serial and the factorize is not. On ClickBench q16's
+    million rows it was 7 to 10 ms of a fused grouping near 40, one core
+    reading while the others waited.
 
     Args:
         col: The key column.
@@ -499,18 +501,34 @@ def _key_agrees(
                     from_.unsafe_offset(firsts[g]).unsafe_load()
                 )
             var nullable = view.null_count() > 0
-            for i in range(rows):
-                var code = Int(ranks.unsafe_offset(i).unsafe_load())
-                if nullable:
-                    var here = view.is_valid(i)
-                    if here != view.is_valid(firsts[code]):
-                        return False
-                    if not here:
-                        continue
-                if (
-                    from_.unsafe_offset(i).unsafe_load()
-                    != rep.unsafe_offset(code).unsafe_load()
-                ):
+            var pieces = max(1, min(worker_count(), rows // FOLLOW_SLICE_ROWS))
+            var broken = List[Int](length=pieces, fill=0)
+
+            def check(piece: Int) raises {mut broken, imm}:
+                var begin = rows * piece // pieces
+                var stop = rows * (piece + 1) // pieces
+                for i in range(begin, stop):
+                    var code = Int(ranks.unsafe_offset(i).unsafe_load())
+                    if nullable:
+                        var here = view.is_valid(i)
+                        if here != view.is_valid(firsts[code]):
+                            broken[piece] = 1
+                            return
+                        if not here:
+                            continue
+                    if (
+                        from_.unsafe_offset(i).unsafe_load()
+                        != rep.unsafe_offset(code).unsafe_load()
+                    ):
+                        broken[piece] = 1
+                        return
+
+            if pieces == 1:
+                check(0)
+            else:
+                parallel_for(check, pieces)
+            for piece in range(pieces):
+                if broken[piece] != 0:
                     return False
             return True
     raise Error("group by: unsupported key dtype")
