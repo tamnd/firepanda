@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: clock and type arguments of the temporal indexes
+
+`DatetimeIndex` now takes `tz=`, putting freshly read instants on that clock as `tz_localize` would with `ambiguous=`, keeping labels already on it and refusing another clock or none in pandas' words. `dtype=` names the unit, and the clock too for instants, and `copy=` is read. `TimedeltaIndex` takes `dtype=` and `copy=`, and counts spans read out of nothing in seconds as pandas does.
+
 ### Added: describe for moments, spans and picked types
 
 `Series.describe` of a datetime or timedelta column answers pandas' object column of count, mean, extremes and percentiles, with the spread for spans and NaT when there are no values. `DataFrame.describe` now takes spans by default, leaves out zoned moments as pandas does, prints NaN where a column has no answer, and takes `include` and `exclude` as types, picking columns the way `select_dtypes` does.

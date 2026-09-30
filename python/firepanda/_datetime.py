@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 import zoneinfo
 from typing import Any, cast
 
@@ -71,6 +72,54 @@ def _is_temporal(dtype: Any) -> bool:
     return str(dtype).startswith("datetime64")
 
 
+def _asked_type(dtype: Any, tz: Any) -> tuple[str | None, Any]:
+    """The unit and the clock `DatetimeIndex` is asked for through `dtype=` and `tz=`.
+
+    Raises:
+        InvalidArgumentError: For a type that is not one of instants, or a clock
+            in the type that is not the one `tz=` names, in pandas' words.
+    """
+    if dtype is None:
+        return None, tz
+    found = re.fullmatch(r"datetime64\[(s|ms|us|ns)(?:, (.+))?\]", str(dtype))
+    if found is None:
+        raise InvalidArgumentError(
+            f"Unexpected value for 'dtype': '{dtype}'. Must be 'datetime64[s]', "
+            "'datetime64[ms]', 'datetime64[us]', 'datetime64[ns]' or DatetimeTZDtype'."
+        )
+    zone = found.group(2)
+    if zone is not None and tz not in (NO_DEFAULT, None) and _zone_text(tz) != zone:
+        raise InvalidArgumentError("cannot supply both a tz and a dtype with a tz")
+    return found.group(1), tz if zone is None else zone
+
+
+def _zone_text(tz: Any) -> str:
+    """A clock spelled as its name."""
+    return tz if isinstance(tz, str) else _zone_name(tz)
+
+
+def _clocked(index: DatetimeIndex, tz: Any, ambiguous: Any) -> None:
+    """Puts freshly read labels on the clock `tz=` names, as pandas' constructor does.
+
+    Raises:
+        InvalidArgumentError: For labels on a clock asked to be on none.
+        TypeError: For labels on another clock, in pandas' words.
+    """
+    held = index.tz
+    if held is None:
+        if tz is not None:
+            made = index.tz_localize(tz, ambiguous=ambiguous)
+            index._inner, index._freq = made._inner, made.freq
+        return
+    if tz is None:
+        raise InvalidArgumentError(
+            "Passed data is timezone-aware, incompatible with 'tz=None'. "
+            "Use obj.tz_localize(None) instead."
+        )
+    if _zone_text(tz) != held:
+        raise TypeError(f"data is already tz-aware {held}, unable to set specified tz: {tz}")
+
+
 class DatetimeIndex(HeldFreq, Index):
     """An index whose labels are instants, which is `pandas.DatetimeIndex`.
 
@@ -109,46 +158,34 @@ class DatetimeIndex(HeldFreq, Index):
             freq: The frequency the index holds. Left out it comes along from
                 another `DatetimeIndex`, `infer` takes the one the labels keep,
                 and anything else has to be one they keep.
-            tz: Refused. Attaching a clock as the values are read is
-                `tz_localize` after the fact, which is written.
-            ambiguous: Refused away from its default, since it only means
-                something alongside `tz=`, which is refused.
+            tz: The clock the labels are put on, as `tz_localize` puts
+                them. Labels that already carry a clock have to carry this one.
+            ambiguous: How a wall clock reading that happens twice is placed,
+                read alongside `tz=` as `tz_localize` reads it.
             dayfirst: Whether two small numbers are read day first, as
                 `to_datetime` reads them with `format="mixed"`.
             yearfirst: Whether three small numbers are read year first.
-            dtype: Refused. The unit comes off the values and `as_unit` changes
-                it afterwards.
-            copy: Refused. There is one behaviour and it always copies.
+            dtype: The type of the labels, `datetime64[unit]` or
+                `datetime64[unit, zone]`, whose zone is read as `tz=`.
+            copy: Read and ignored. The labels are always a copy.
             name: The level name. Left out, it comes off the data when the
                 data is a named series or another index, and is unnamed when
                 the data is a list with nobody to name it.
 
         Raises:
-            ValueError: For a frequency the labels do not keep.
-            NotImplementedError: If any of the refused arguments was passed.
+            ValueError: For a frequency the labels do not keep, or a clock
+                that is not the one the labels carry.
         """
+        unit, tz = _asked_type(dtype, tz)
+        self._read(data, freq, dayfirst, yearfirst, name)
         if tz is not NO_DEFAULT:
-            raise NotImplementedError(
-                "tz= is not supported yet, because reading the values and"
-                " attaching a clock at once is two operations, and the second"
-                " of them is tz_localize"
-            )
-        _held_at(
-            "ambiguous",
-            ambiguous,
-            "raise",
-            "it only means something alongside tz=, which is tz_localize after the fact",
-        )
-        if dtype is not None:
-            raise NotImplementedError(
-                "dtype= is not supported yet, because the unit is read off the"
-                " values and as_unit is how it is changed afterwards"
-            )
-        if copy is not None:
-            raise NotImplementedError(
-                "copy= is not supported yet, because there is exactly one"
-                " behaviour and it always copies"
-            )
+            _clocked(self, tz, ambiguous)
+        if unit is not None and unit != self.unit:
+            made = self.as_unit(unit)
+            self._inner, self._freq = made._inner, made.freq
+
+    def _read(self, data: Any, freq: Any, dayfirst: bool, yearfirst: bool, name: Any) -> None:
+        """Reads the values into the labels, before any clock or unit is asked for."""
         label = _label_of(data) if name is None else str(name)
         if isinstance(data, Index) and _is_temporal(data.dtype):
             # The labels are already instants, so there is nothing to read and
