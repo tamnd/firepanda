@@ -488,6 +488,15 @@ def agreed(inputs: list[Any]) -> tuple[dict[Any, Any], bool] | None:
     return (kept, unique_only) if kept or unique_only else None
 
 
+def _renames_rows(args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+    """Whether a `rename` call maps the row labels, whose answer has labels of its own."""
+    if kwargs.get("index") is not None:
+        return callable(kwargs["index"]) or hasattr(kwargs["index"], "items")
+    if not args or kwargs.get("axis") not in (None, 0, "index"):
+        return False
+    return callable(args[0]) or hasattr(args[0], "items")
+
+
 def _keeping(
     fn: Callable[..., Any], source_of: Callable[[Any], Any], name: str, freq: bool = False
 ) -> Any:
@@ -495,9 +504,12 @@ def _keeping(
     binary = name in _BINARY
     agreeing = name in _AGREED
     freq = freq and name not in _FREQ_DROPS
+    renaming = name == "rename"
 
     @functools.wraps(fn)
     def method(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if renaming and freq and _FREQ_USED and _renames_rows(args, kwargs):
+            return _keeping(fn, source_of, "set_axis")(self, *args, **kwargs)
         if not _USED:
             if not (freq and _FREQ_USED) and not _COLUMNS_USED:
                 return fn(self, *args, **kwargs)

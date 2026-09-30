@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: rename of the row labels
+
+`DataFrame.rename(index=...)`, its positional form and the mapping or function form of `Series.rename` rename the row labels as pandas does, keeping a label the mapping has no key for. On a MultiIndex every level is renamed, or only the one `level` names, `errors="raise"` refuses a key that is not a label, and both axes can be renamed in one call. A date index renamed this way no longer keeps its old frequency.
+
 ### Added: corr and cov of every pair of columns over a window
 
 `corr` and `cov` on a rolling, expanding or ewm window of a frame answer `pairwise=True`, the default with no other frame, as pandas does: each row label once for every column of the other frame, under a second level of row labels, with the columns of the first frame across.

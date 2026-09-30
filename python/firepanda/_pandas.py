@@ -1666,13 +1666,47 @@ def _no_level(level: Any) -> None:
         )
 
 
-_NO_LABEL_MAP = (
-    "mapping row labels is a pass over the index rather than a change to a"
-    " schema, and doing it from Python would be a dictionary lookup or a call"
-    " per row with the interpreter holding the loop. set_index on a column"
-    " computed the way you want does the same work with the loop in the right"
-    " place"
-)
+def _mapped_labels(labels: Any, mapping: Any, level: Any, errors: str) -> Any:
+    """Row labels through a mapping or a function, as pandas' `rename` takes them.
+
+    A label the mapping has no key for stays as it was. On a MultiIndex every
+    level goes through it, or only the one `level` names.
+
+    Raises:
+        KeyError: For a key that is not a label, with `errors="raise"`.
+    """
+    from ._frame import Index
+    from ._multi import MultiIndex
+
+    several = isinstance(labels, MultiIndex)
+    chosen = labels._level_number(level) if several and level is not None else None
+    if callable(mapping):
+        look = mapping
+    else:
+        held = dict(mapping.items())
+        if errors == "raise":
+            present = labels.get_level_values(chosen) if chosen is not None else labels
+            known = set(present.tolist()) if not several or chosen is not None else None
+            if known is None:
+                known = {value for row in labels.tolist() for value in row}
+            missing = [key for key in held if key not in known]
+            if missing:
+                raise KeyError(f"{missing} not found in axis")
+
+        def look(label: Any) -> Any:
+            return held.get(label, label)
+
+    if several:
+        arrays = [
+            [
+                look(value) if chosen in (None, number) else value
+                for value in labels.get_level_values(number).tolist()
+            ]
+            for number in range(labels.nlevels)
+        ]
+        return MultiIndex.from_arrays(arrays, names=list(labels.names))
+    return Index([look(label) for label in labels.tolist()], name=labels.name)
+
 
 _BOOL_ARGUMENT = 'For argument "{name}" expected type bool, received type {kind}.'
 """What pandas says when a flag arrives as something that is not a flag.
@@ -1827,10 +1861,6 @@ def _renaming(mapper: Any, axis: Any, index: Any, columns: Any) -> tuple[str, An
         if axis in (0, "index", None):
             return "index", mapper
         raise InvalidArgumentError(f"No axis named {axis} for object type DataFrame")
-    if index is not None and columns is not None:
-        raise NotImplementedError(
-            f"renaming both axes in one call is not supported yet, because {_NO_LABEL_MAP}"
-        )
     if columns is not None:
         return "columns", columns
     if index is not None:
@@ -13011,13 +13041,13 @@ class DataFrameMixin(_Carries):
         level: Any = None,
         errors: str = "ignore",
     ) -> DataFrame | None:
-        """The same rows under different column names.
+        """The same rows under different column names or row labels.
 
-        The column door is here and the row label door is not, and document 45
-        is about why those are two operations rather than one. Renaming a column
-        edits a schema and reads nothing, and renaming a row label is a lookup
-        or a call for every row in the frame. pandas spells both of them
-        `rename` and decides from the keyword.
+        Renaming a column edits a schema and reads nothing, and renaming a row
+        label is a lookup or a call for every row in the frame. pandas spells
+        both of them `rename` and decides from the keyword, and takes both in
+        one call. A row label the mapping has no key for stays as it was, and
+        on a MultiIndex of rows `level` picks the one level renamed.
 
         A dictionary names the columns it wants changed and leaves the rest, a
         callable is applied to every name, and both go to the core in one call
@@ -13033,18 +13063,19 @@ class DataFrameMixin(_Carries):
         at the first.
 
         `copy` is accepted and not read, for document 44's reasons. `level` is
-        refused for anything but `None`, which is a shade stricter than pandas,
-        since pandas quietly accepts `level=0` on a flat index where it means
-        nothing. There is no level to name until there is a MultiIndex and
-        saying so is better than accepting a number and ignoring it.
+        refused for anything but `None` when renaming columns.
         """
         from ._frame import DataFrame
 
         inplace = _flag("inplace", inplace)
-        _no_level(level)
+        if mapper is None and index is not None and columns is not None:
+            both = self.rename(index=index, level=level, errors=errors)
+            return _settled(self, both.rename(columns=columns, level=level, errors=errors), inplace)
         where, mapping = _renaming(mapper, axis, index, columns)
         if where == "index":
-            raise NotImplementedError(f"index= is not supported yet, because {_NO_LABEL_MAP}")
+            moved = self.set_axis(_mapped_labels(self.index, mapping, level, errors), axis=0)
+            return _settled(self, moved, inplace)
+        _no_level(level)
         held = self._inner.names()
         olds, news = _renamings(held, mapping, errors)
         changed = dict(zip(olds, news, strict=True))
@@ -17935,10 +17966,8 @@ class SeriesMixin(_Carries):
         instead, and pandas decides between them by asking whether what arrived
         is callable or has keys.
 
-        Those two doors land on opposite sides of the line document 45 draws.
-        The scalar one is a field on a column and is here. The mapping one is a
-        lookup for every row and raises, with the same message
-        `DataFrame.rename(index=...)` gives, because it is the same operation.
+        The mapping one is the same operation as `DataFrame.rename(index=...)`
+        and goes through the same code, `level` and `errors` included.
 
         `rename(None)` clears the name and `rename("")` sets it to a name that
         happens to be empty, which are two different states because pandas tells
@@ -17946,18 +17975,17 @@ class SeriesMixin(_Carries):
         `pd.Series([1], name="").name` is `""`, and the two land in different
         places when the column becomes a frame.
 
-        `errors` is declared and does nothing, because the only thing it
-        describes in pandas is what happens to a key of the mapping that is not
-        a label, and the mapping form is the one that raises.
+        `errors="raise"` refuses a key of the mapping that is not a label.
         """
         from ._frame import Series
 
         inplace = _flag("inplace", inplace)
-        _no_level(level)
         if axis not in (0, "index", None):
             raise InvalidArgumentError(f"No axis named {axis} for object type Series")
         if callable(index) or hasattr(index, "items"):
-            raise NotImplementedError(f"a mapping is not supported yet, because {_NO_LABEL_MAP}")
+            moved = self.set_axis(_mapped_labels(self.index, index, level, errors), axis=0)
+            return _settled(self, moved, inplace)
+        _no_level(level)
         try:
             renamed = Series._wrap(self._inner.relabel(_names.held(index)))
             return _kept(self, _named_as(renamed, index), inplace)

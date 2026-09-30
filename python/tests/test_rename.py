@@ -5,10 +5,8 @@ nothing in the frame moved. So most of these read the values back as well as the
 names, because a rename that quietly reordered the columns would pass a test that
 only looked at the schema.
 
-The other half of the file is the doors that refuse. `rename(index=...)` and the
-mapping form of `Series.rename` are a pass over the labels rather than an edit to
-a schema, and they raise rather than being written as a loop in Python, which is
-a decision document 45 argues for and these assert.
+The row label doors, `rename(index=...)` and the mapping form of
+`Series.rename`, are checked against pandas here and in `test_rename_rows.py`.
 """
 
 from __future__ import annotations
@@ -83,14 +81,12 @@ def test_a_rename_onto_a_name_the_frame_already_has_is_refused(firepanda):
         frame(firepanda).rename(columns={"v": "s"})
 
 
-def test_renaming_the_row_labels_says_what_it_would_cost(firepanda):
-    with pytest.raises(NotImplementedError, match="pass over the index"):
-        frame(firepanda).rename(index={0: 99})
+def test_renaming_the_row_labels_is_pandas(firepanda):
+    assert repr(frame(firepanda).rename(index={0: 99})) == repr(frame(pd).rename(index={0: 99}))
 
 
-def test_the_bare_positional_form_is_the_row_labels_and_refuses(firepanda):
-    with pytest.raises(NotImplementedError, match="pass over the index"):
-        frame(firepanda).rename(str)
+def test_the_bare_positional_form_is_the_row_labels(firepanda):
+    assert repr(frame(firepanda).rename(str).index) == repr(frame(pd).rename(str).index)
 
 
 def test_both_doors_at_once_is_the_pandas_type_error(firepanda):
@@ -167,8 +163,7 @@ def test_a_column_keeps_its_labels_through_a_rename(firepanda):
 
 
 def test_the_mapping_form_of_a_column_rename_is_the_label_half(firepanda):
-    with pytest.raises(NotImplementedError, match="pass over the index"):
-        frame(firepanda)["v"].rename({0: 99})
+    assert repr(frame(firepanda)["v"].rename({0: 99})) == repr(frame(pd)["v"].rename({0: 99}))
 
 
 def test_a_column_rename_to_nothing_clears_the_name(firepanda):
