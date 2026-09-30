@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Group every category in pivot_table and keep names in a mixed concat
+
+`pivot_table(observed=False)` now gives a row for every category of a categorical key, holding the aggregate of no rows, as pandas does, and a categorical row key labels the table with a `CategoricalIndex`. `concat` of parts whose row labels are of different types now keeps a name they share, and a `CategoricalIndex` meeting other labels is read as the values it holds, so text and categories give a text index as in pandas.
+
 ### Fixed: Keep a CategoricalIndex handed over as the labels
 
 A `CategoricalIndex` given as `index=` to `Series` or `DataFrame`, set with `set_axis` or the `index` setter, or reindexed onto, now stays a `CategoricalIndex` with its categories, order and name, as in pandas, where before it came back as an `Index` of text. Reindexing numeric labels by text now leaves the rows missing, as pandas does, rather than refusing the lookup.

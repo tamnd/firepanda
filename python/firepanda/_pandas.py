@@ -12777,7 +12777,8 @@ class DataFrameMixin(_Carries):
                 values = {name: piece.tolist() for name, piece in zip(names, pieces, strict=True)}
                 grouped = DataFrame(values, index=pieces[0].index)
             else:
-                grouped = self.groupby(down, sort=sort, dropna=dropna)[names].agg(aggfunc, **kwargs)
+                grouped = self.groupby(down, sort=sort, dropna=dropna, observed=observed)
+                grouped = grouped[names].agg(aggfunc, **kwargs)
             if sort and isinstance(values, list | tuple):
                 # pandas sorts the value columns along with the keys.
                 grouped = grouped[sorted(names)]
@@ -12799,6 +12800,8 @@ class DataFrameMixin(_Carries):
         order = list(dict.fromkeys(head for _, head in pairs))
         if sort:
             rows, order = sorted(rows), sorted(order)
+        if not observed:
+            rows, order = _unobserved(self, down, rows), _unobserved(self, across, order)
         names = _pivot_names(order, "pivot_table")
         cells: dict[Any, Any] = {}
         printed = _word(self[measured].dtype)
@@ -12813,6 +12816,13 @@ class DataFrameMixin(_Carries):
             printed = _word(answer.dtype)
             for key, value in zip(answer.index.tolist(), answer.tolist(), strict=True):
                 cells[key, name] = value
+        if not observed and not callable(aggfunc):
+            # Every pair of categories is a group, and an empty one holds what
+            # the aggregate of no rows is, as pandas' group by answers it.
+            empty = self[measured].iloc[:0].agg(aggfunc, **kwargs)
+            for row in rows:
+                for name in names:
+                    cells.setdefault((row, name), empty)
         if dropna:
             names = [
                 name for name in names if not all(_missing(cells.get((row, name))) for row in rows)
@@ -12820,9 +12830,10 @@ class DataFrameMixin(_Carries):
             rows = [
                 row for row in rows if not all(_missing(cells.get((row, name))) for name in names)
             ]
-        return _pivoted(
+        table = _pivoted(
             rows, names, cells, printed, row_name=down, fill_value=fill_value, column_name=across
         )
+        return _category_axes(self, table, down, across)
 
     def isetitem(self, loc: Any, value: Any) -> None:
         """Sets the column at a position, or the columns at several, by position.
@@ -32457,18 +32468,30 @@ def _concat_index_units(frames: list[DataFrame]) -> list[DataFrame]:
     from ._multi import MultiIndex
 
     kinds = {_word(frame.index.dtype) for frame in frames}
+    if len(kinds) > 1 and "category" in kinds:
+        # Categories that meet other labels are read as the values they hold.
+        frames = [
+            frame.set_axis(Index(frame.index.tolist(), name=frame.index.name))
+            if _word(frame.index.dtype) == "category"
+            else frame
+            for frame in frames
+        ]
+        kinds = {_word(frame.index.dtype) for frame in frames}
     wanted = _temporal_unit_type(kinds) if len(kinds) > 1 else None
     if wanted is None:
         numbers = ("int", "uint", "float")
         families = {"number" if kind.startswith(numbers) else kind for kind in kinds}
         if len(families) < 2 or any(isinstance(frame.index, MultiIndex) for frame in frames):
             return frames
-        # Labels of two kinds meet as objects, each label kept as it was.
+        # Labels of two kinds meet as objects, each label kept as it was, and
+        # a name every part shares stays on them.
         labels = [frame.index.tolist() for frame in frames]
         letter = _objects.cells([value for part in labels for value in part])
         spelling = next((_objects.spelling(cell) for cell in letter if cell is not None), "")
+        named = {frame.index.name for frame in frames}
+        name = next(iter(named)) if len(named) == 1 else None
         return [
-            frame.set_axis(Index(Series(_objects.cells(part, spelling), dtype="str")))
+            frame.set_axis(Index(Series(_objects.cells(part, spelling), dtype="str"), name=name))
             for frame, part in zip(frames, labels, strict=True)
         ]
 
@@ -33579,6 +33602,30 @@ def _pivot_margins(
     made = DataFrame({name: _readable(got) for name, got in cells.items()}, index=labels)
     _hold_columns(made, list(table.columns.names))
     return made
+
+
+def _category_axes(frame: Any, table: Any, down: Any, across: Any) -> Any:
+    """A pivot whose keys were categorical, labelled by categorical indexes as pandas' is."""
+    from ._category_index import CategoricalIndex
+
+    for axis, key in ((0, down), (1, across)):
+        if isinstance(key, list | tuple) or key not in frame.columns:
+            continue
+        column = frame[key]
+        if column.dtype != "category":
+            continue
+        labels = table.index if axis == 0 else table.columns
+        typed = CategoricalIndex(labels.tolist(), dtype=column.dtype, name=labels.name)
+        table = table.set_axis(typed, axis=axis)
+    return table
+
+
+def _unobserved(frame: Any, key: Any, seen: list[Any]) -> list[Any]:
+    """The labels a pivot key gives under `observed=False`, a categorical's every category."""
+    if isinstance(key, list | tuple) or key not in frame.columns:
+        return seen
+    column = frame[key]
+    return list(column.cat.categories) if column.dtype == "category" else seen
 
 
 def _pivoted(
