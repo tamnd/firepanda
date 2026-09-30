@@ -27857,13 +27857,40 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         most common value comes first, or the least common with `ascending`, and
         ties keep the order the values are first seen.
 
+        With `bins` each group's values are counted in bins as
+        `Series.value_counts` counts them, every bin listed, the empty ones too.
+
         Raises:
-            NotImplementedError: For `bins`, and for a `dropna` that differs from
-                the group by's, since one group by drops a missing key and value
-                together.
+            NotImplementedError: For a `dropna` that differs from the group by's,
+                since one group by drops a missing key and value together.
         """
-        _refuse("bins", bins, "cutting the values into bins before counting them is not written")
+        if bins is not None:
+            return self._counted_in_bins(normalize, sort, ascending, bins, dropna)
         return self._tallied([self._column], normalize, sort, ascending, dropna)
+
+    def _counted_in_bins(
+        self, normalize: bool, sort: bool, ascending: bool, bins: Any, dropna: bool
+    ) -> DataFrame | Series:
+        """`value_counts` with `bins`, group by group, labelled by the key and the bin.
+
+        A number of bins cuts each group's values on their own and a list of
+        edges cuts every group alike, which is what `Series.value_counts` does
+        with each, so each group is counted by it.
+        """
+        from ._frame import Series
+        from ._multi import MultiIndex
+
+        column = self._source()
+        labels: list[tuple[Any, ...]] = []
+        counts: list[Any] = []
+        name = "proportion" if normalize else "count"
+        for key, places in self._members():
+            counted = column.iloc[places].value_counts(normalize, sort, ascending, bins, dropna)
+            labels += [(*key, label) for label in counted.index]
+            counts += counted.tolist()
+        index = MultiIndex.from_tuples(labels, names=[*self._by, self._column])
+        out = Series(counts, index=index, name=name, dtype="float64" if normalize else "int64")
+        return out if self._as_index else out.reset_index()
 
     def _named_group(self, rows: Any, key: tuple[Any, ...]) -> Any:
         """The group's values, named after its key the way iterating spells it."""
@@ -28253,6 +28280,14 @@ class IndexStrings:
         return Index(answer.rename(self._index.name))
 
 
+def _all_intervals(data: Any) -> bool:
+    """Whether a list holds intervals and gaps only, at least one interval."""
+    if not isinstance(data, (list, tuple)):
+        return False
+    values = [value for value in data if not _objects.is_gap(value)]
+    return bool(values) and all(isinstance(value, _interval.Interval) for value in values)
+
+
 def _object_labels(data: Any, label: Any) -> Any:
     """The labels of a list that pandas holds as objects, as object cells, or None.
 
@@ -28333,6 +28368,10 @@ class IndexMixin:
         known = set(kwargs) <= {"dtype", "copy", "name", "tupleize_cols"}
         if cls is Index and known and tupleize and _all_tuples(data) and _from_outside():
             return _tuples_index(data, kwargs.get("name", args[2] if len(args) > 2 else None))
+        if cls is Index and known and kwargs.get("dtype") is None and _all_intervals(data):
+            # pandas answers a list of intervals with an IntervalIndex.
+            name = kwargs.get("name", args[2] if len(args) > 2 else None)
+            return _interval.IntervalIndex(data, name=name)
         return object.__new__(cls)
 
     if TYPE_CHECKING:
@@ -34608,10 +34647,16 @@ def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> l
     columns = []
     for number in range(index.nlevels):
         values = index.get_level_values(number)
-        texts = _text_labels(values, named, widest)
         above = 1 if named else 0
         level = index._levels[number]
-        if -1 in codes[number] and all(type(value) is int for value in level):
+        spans = isinstance(values, _interval.IntervalIndex)
+        if spans:
+            # A level of intervals is written as pandas writes each interval.
+            heading = [] if not named else ["" if values.name is None else str(values.name)]
+            texts = heading + ["NaN" if v is None else str(v) for v in values.tolist()]
+        else:
+            texts = _text_labels(values, named, widest)
+        if not spans and -1 in codes[number] and all(type(value) is int for value in level):
             # A level of whole numbers keeps them whole beside its gaps, as pandas prints it.
             written = _text_labels(Index(level), False, widest)
             texts[above:] = ["NaN" if code < 0 else written[code] for code in codes[number]]

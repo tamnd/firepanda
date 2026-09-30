@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: bins on a group by's value_counts, and intervals as row labels
+
+`SeriesGroupBy.value_counts` now takes `bins`, where it used to refuse it. A number of bins cuts each group's values on their own and a list of edges cuts every group alike, each group listing every bin, the empty ones too, as pandas does. To label those rows a `MultiIndex` now holds intervals of numbers on a level, and `Index` of a list of intervals answers an `IntervalIndex`, as in pandas.
+
 ### Added: include and exclude on a group by's describe
 
 A group by's `describe` now takes `include` and `exclude`, where it used to refuse them. It picks the columns the way `DataFrame.describe` does, and when the picked columns answer different statistics each takes them all, with the ones it has no answer for missing, as pandas lays them out. `SeriesGroupBy.describe` now describes a column of text, flags, moments or spans group by group, as `Series.describe` does, where it used to refuse it.
