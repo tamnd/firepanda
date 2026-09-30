@@ -352,10 +352,66 @@ def test_an_index_exports_itself_as_arrow(firepanda: ModuleType) -> None:
     assert pyarrow.array(firepanda.Index(["a", "b"])).to_pylist() == ["a", "b"]
 
 
-def test_the_constructor_refuses_what_it_does_not_do(firepanda: ModuleType) -> None:
-    """A declared parameter that is silently ignored is worse than a missing one."""
-    with pytest.raises(NotImplementedError, match="tupleize_cols"):
-        firepanda.Index([("a", 1)], tupleize_cols=False)
+def test_tupleize_cols_off_keeps_an_index_of_tuples(firepanda: ModuleType) -> None:
+    """Turning `tupleize_cols` off is how pandas asks for tuples as labels rather than levels."""
+    made = firepanda.Index([("a", 1), ("b", 2)], tupleize_cols=False)
+    assert type(made).__name__ == "Index"
+    assert made.tolist() == [("a", 1), ("b", 2)]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda pd: pd.Index([("a", 1), ("b", 2)]),
+        lambda pd: pd.Index((("a", 1), ("b", 2))),
+        lambda pd: pd.Index([("a", 1), ("b", 2)], dtype=object),
+        lambda pd: pd.Index([("a", 1), ("b",)]),
+        lambda pd: pd.Index([("a", 1), "b"]),
+        lambda pd: pd.Index([("a", 1), ("b", 2)], tupleize_cols=False),
+        lambda pd: pd.Series([1, 2], index=[("a", 1), ("b", 2)]).index,
+        lambda pd: pd.DataFrame({"v": [1, 2]}, index=[("a", 1), ("b", 2)]).index,
+        lambda pd: pd.Series({("a", 1): 1, ("b", 2): 2}).index,
+        lambda pd: pd.Series({("a", 1, "x"): 1, ("b", 2, "y"): 2}).index,
+        lambda pd: pd.Series({("a", 1): 1, "b": 2}).index,
+        lambda pd: pd.Series({("a", 1): 1, ("b", 2): 2}, index=[("b", 2)]).index,
+        lambda pd: pd.Series([1, 2], index=["x", "y"]).reindex([("a", 1), ("c", 3)]).index,
+        lambda pd: (
+            pd.Series([1, 2], index=pd.MultiIndex.from_tuples([("a", 1), ("b", 2)]))
+            .reindex([("a", 1), ("c", 3)])
+            .index
+        ),
+    ],
+    ids=[
+        "list",
+        "tuple",
+        "object",
+        "ragged",
+        "mixed",
+        "tupleize-off",
+        "series-index",
+        "frame-index",
+        "dict-keys",
+        "dict-keys-three",
+        "dict-mixed",
+        "dict-index",
+        "reindex-flat",
+        "reindex-multi",
+    ],
+)
+def test_tuples_are_levels_where_pandas_makes_them_levels(firepanda: ModuleType, call) -> None:
+    """pandas' `Index` reads a list of tuples as levels, and a constructor's `index=` does not."""
+    mine, them = call(firepanda), call(pd)
+    assert type(mine).__name__ == type(them).__name__
+    assert mine.tolist() == them.tolist() or repr(mine) == repr(them)
+
+
+@pytest.mark.parametrize(
+    ("name", "error"), [("x", ValueError), (["x", "y"], TypeError)], ids=["scalar", "list"]
+)
+def test_a_tuple_index_refuses_a_name_as_pandas_does(firepanda: ModuleType, name, error) -> None:
+    """A `MultiIndex` takes its names as a tuple, and pandas refuses a scalar or a list."""
+    with pytest.raises(error):
+        firepanda.Index([("a", 1), ("b", 2)], name=name)
 
 
 def test_get_indexer_refuses_the_filling_arguments(firepanda: ModuleType) -> None:
