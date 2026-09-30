@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.37] - 2026-09-30
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. On the pandas side it brings the readers and writers pandas has beyond CSV and Parquet (Excel, Stata, SAS, HDF, SQL over sqlite3, HTML, XML, LaTeX, the clipboard, Iceberg and SPSS), periods and interval columns, categoricals, object, sparse and masked columns, rows and columns labelled by a MultiIndex, `DataFrame.style` with `to_excel`, plotting with matplotlib, `firepanda.testing`, and pandas' byte counts, str dtype and float answers for var, std, sem, skew and kurt. SQL gains LATERAL subqueries, ASOF joins, PIVOT and UNPIVOT, recursive CTEs, named windows, window frames and CREATE, INSERT and DROP. The group by skips text keys another key already decides, packs two wide integer keys without factorizing either and uses every core on half a million rows or more, and the ClickBench driver builds again after a compiler hang that came in with the first of those.
+
 ### Changed: Byte counts are pandas' byte counts
 
 `Series.nbytes`, `Index.nbytes` and `memory_usage` on the frame, the column and the index now answer the number pandas answers, counted from the numpy or Arrow arrays pandas would hold the data in: a width a row for numbers, a mask byte on top for a masked type, offsets and UTF-8 bytes and a bitmap for text, codes and categories for a category, a pointer a row for objects with `deep` adding each object, and the Python range and its three numbers for a `RangeIndex`. `info` spells text `str` and objects `object`, and writes pandas' `+` when object memory was left out. A column or frame built from columns that carry the plain range from zero now keeps a `RangeIndex` rather than turning it into stored integers, which also fixes their repr.
