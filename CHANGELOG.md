@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: bitwise operators on integers, callable str.replace and categorical factorize
+
+`&`, `|` and `^` between two integer columns, an integer column and a plain integer, or two frames of integers answer the bitwise operation as pandas does, and a boolean column against an integer column reads the integers as bools. `str.replace` takes a callable replacement, handed each match through Python's `re` with `n`, `case` and `flags` honoured, and refuses it with `regex=False` in pandas' words. `factorize` on a categorical column answers a `CategoricalIndex` of uniques that keeps every category, numbered in category order under `sort`.
+
 ### Added: aligned isin, get_dummies types, verified keyed concat and row squeeze
 
 `DataFrame.isin` against a frame or a series answers pandas' equality test lined up by label, with a cell that has nothing across from it answering false and a repeated label on the other side refused. `str.get_dummies` takes any numeric or boolean `dtype`. `concat` with `keys` and `verify_integrity=True` checks the keyed labels and names the repeats. `squeeze` that drops the row axis answers the one row as a series, as `iloc[0]` does.
