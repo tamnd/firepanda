@@ -195,7 +195,6 @@ def test_what_is_not_written_is_refused(firepanda: ModuleType) -> None:
         lambda: grouped.ngroup(ascending=False),
         lambda: grouped.shift(fill_value=0),
         lambda: grouped.shift(freq="D"),
-        lambda: grouped.cumsum(numeric_only=True),
         lambda: grouped.transform("sum", engine="numba"),
         lambda: frame(firepanda).astype({"x": "bool"}).groupby("k")["x"].diff(),
     ):

@@ -5829,6 +5829,21 @@ def _other_side(
     return _fallback(printed, other, column)
 
 
+def _numbers_asked(column: Any, kind: str, numeric_only: Any) -> None:
+    """Refuses `numeric_only=True` on a column of Python objects, as pandas does.
+
+    A series reduction reads its one column whatever the flag says, and pandas
+    refuses the flag only where the column holds objects.
+
+    Raises:
+        DTypeError: For a column of objects under `numeric_only=True`.
+    """
+    if numeric_only and _objects.is_object(column._inner):
+        raise DTypeError(
+            f"Series.{kind} does not allow numeric_only={numeric_only} with non-numeric dtypes."
+        )
+
+
 def _moved_labels(labels: Any, periods: int, freq: Any) -> Any:
     """The labels a shift by a frequency moves the rows or columns to.
 
@@ -19407,6 +19422,7 @@ class SeriesMixin(_Carries):
         """
         _reducing_axis(axis, "Series")
         skipna = _flag("skipna", skipna)
+        _numbers_asked(self, kind, numeric_only)
         if kind in _OBJECT_FOLDS and _objects.is_object(self._inner):
             return _objects_reduced(self, kind, skipna, min_count)
         if _is_text(self):
@@ -19414,13 +19430,6 @@ class SeriesMixin(_Carries):
                 return _text_total(self, skipna, min_count)
             if kind in _TEXT_REFUSED:
                 raise TypeError(f"Cannot perform reduction '{kind}' with string dtype")
-        _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "refusing a column a reduction cannot read is what the reduction"
-            " already does, and it says so with the dtype in the message",
-        )
         category = self.dtype == "category"
         if kind in _NUMPY_ORDER and _word(self.dtype) in _SIGNED | _UNSIGNED | _FLOATING:
             if not skipna and self.hasnans:
@@ -19465,13 +19474,7 @@ class SeriesMixin(_Carries):
         """
         _reducing_axis(axis, "Series")
         skipna = _flag("skipna", skipna)
-        _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "refusing a column a reduction cannot read is what the reduction"
-            " already does, and it says so with the dtype in the message",
-        )
+        _numbers_asked(self, "kurt", numeric_only)
         _kurt_refusal(self.dtype)
         if not skipna and self.hasnans:
             return math.nan
@@ -25836,7 +25839,7 @@ class GroupByMixin[Answer]:
         Args:
             q: One quantile or a list of them, each between zero and one.
             interpolation: How to land between two values.
-            numeric_only: Declared and held at False.
+            numeric_only: Whether to read only the number and flag columns.
 
         Returns:
             The frame or the series pandas answers.
@@ -25852,12 +25855,8 @@ class GroupByMixin[Answer]:
                 "quantile", _quantile_wanted(q, interpolation), numeric_only=numeric_only
             )
         _interpolation_written(interpolation)
-        _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "each group's own quantile reads every column it holds",
-        )
+        if _flag("numeric_only", numeric_only):
+            return self._numeric_only("quantile")._quantile(q, interpolation, False)
         if not self._members():
             return self._reduce("quantile", 0.5, numeric_only=numeric_only)
         answer = self._each_keyed(lambda rows: rows.quantile(wanted, interpolation=interpolation))
@@ -25965,26 +25964,21 @@ class GroupByMixin[Answer]:
 
         Args:
             kind: `cumsum`, `cumprod`, `cummax` or `cummin`.
-            numeric_only: Declared and held at False.
+            numeric_only: Whether to fold only the number and flag columns.
             args: The numpy compatibility arguments, refused if there are any.
             kwargs: The same, by keyword.
 
         Returns:
             The frame or the series pandas answers.
         """
-        _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "dropping the columns a fold cannot read is a decision about which"
-            " columns come back, and firepanda folds the ones it was given or says"
-            " which one it could not",
-        )
         if args or kwargs:
             raise UnsupportedError(
                 f"the extra arguments of {kind} are not taken, because pandas only"
                 " passes them on to numpy and none of them mean anything here"
             )
+        if _flag("numeric_only", numeric_only) and getattr(self, "_column", None) is None:
+            # A group by over one column folds it whatever the flag says, as in pandas.
+            return self._numeric_only(kind)._cumulative(kind, False)
         texts = self._text_values()
         if texts:
             word = str(self._frame[texts[0]].dtype)
@@ -27509,7 +27503,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
 
         Args:
             skipna: Declared and held at True.
-            numeric_only: Declared and held at False.
+            numeric_only: Whether to read only the number and flag columns.
 
         Returns:
             One row a group, on the keys.
@@ -27521,7 +27515,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
 
         Args:
             skipna: Declared and held at True.
-            numeric_only: Declared and held at False.
+            numeric_only: Whether to read only the number and flag columns.
 
         Returns:
             One row a group, on the keys.
@@ -27530,13 +27524,8 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
 
     def _picked_all(self, how: str, skipna: bool, numeric_only: bool) -> DataFrame:
         """`_picked` over every column that is not a key, side by side."""
-        _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "dropping the columns a reduction cannot read is a decision about"
-            " which columns come back",
-        )
+        if _flag("numeric_only", numeric_only):
+            return self._numeric_only(f"idx{how}")._picked_all(how, skipna, False)
         out: Any = None
         for name in _shown_names(self._frame):
             if name in self._by:
