@@ -158,6 +158,9 @@ or `flags` pays one global read for each call."""
 _FREQ_USED = False
 """Whether any frame or column has carried an index frequency, the fast path's flag."""
 
+_COLUMNS_USED = False
+"""Whether any frame has held a name for its column axis, the fast path's flag."""
+
 _FREQ_DROPS = frozenset(
     [
         "set_index",
@@ -222,6 +225,100 @@ def hold_freq(obj: Any, freq: Any) -> None:
         return
     _FREQ_USED = True
     obj._row_freq = freq
+
+
+def column_names(obj: Any) -> tuple[Any, ...] | None:
+    """The names a frame holds for its column axis, one a level, or None when it holds none."""
+    try:
+        return obj._column_names
+    except AttributeError:
+        return None
+
+
+def hold_columns(obj: Any, names: Any) -> None:
+    """Gives a frame names for its column axis, or takes them away with None.
+
+    Names of None are held rather than dropped, so a frame whose axis was
+    cleared does not take its source's names back when a method carries them.
+    """
+    global _COLUMNS_USED
+    if names is None:
+        with contextlib.suppress(AttributeError):
+            del obj._column_names
+        return
+    with contextlib.suppress(AttributeError):
+        obj._column_names = tuple(names)
+        _COLUMNS_USED = True
+
+
+_COLUMNS_DROPS = frozenset(
+    [
+        "melt",
+        "filter",
+        "stack",
+        "unstack",
+        "pivot",
+        "pivot_table",
+        "value_counts",
+        "memory_usage",
+        "duplicated",
+        "set_axis",
+        "T",
+        "transpose",
+    ]
+)
+"""The methods whose answer does not keep the name of the column axis, measured on pandas 3.0."""
+
+
+def _carry_columns(result: Any, source: Any, name: str) -> None:
+    """Passes the name of the column axis on from a frame to what was made of it.
+
+    A frame keeps it, as nearly every pandas method keeps the columns' index. A
+    column whose labels are the frame's columns, which is a reduction or one
+    row read across, takes it as the name of its labels.
+    """
+    if result is source or name in _COLUMNS_DROPS:
+        return
+    held = column_names(source)
+    if held is None:
+        return
+    kind = type(result)
+    if kind is type(source):
+        if column_names(result) is None:
+            result._column_names = held
+        if name in ("corr", "cov") and len(held) == 1 and held[0] is not None:
+            _name_labels(result, source, held[0])
+    elif kind in _SLOTS and len(held) == 1 and held[0] is not None:
+        _name_labels(result, source, held[0])
+
+
+def _name_labels(column: Any, frame: Any, name: Any) -> None:
+    """Names the labels of a column that are the columns of the frame it came from."""
+    labels = column.index
+    if labels.name is not None or len(labels) != frame._inner.width():
+        return
+    if labels.tolist() == frame.columns.tolist():
+        column._inner = column.rename_axis(name)._inner
+
+
+def _turning(fn: Callable[..., Any], source_of: Callable[[Any], Any]) -> Any:
+    """`T` or `transpose`, whose answer swaps the names of the two axes, as in pandas."""
+
+    @functools.wraps(fn)
+    def method(self: Any, *args: Any, **kwargs: Any) -> Any:
+        result = fn(self, *args, **kwargs)
+        source = source_of(self)
+        if result is source or type(result) is not type(source) or not hasattr(source, "columns"):
+            return result
+        held = column_names(source)
+        rows = source.index.names
+        if held is not None and len(held) == result.index.nlevels and any(held):
+            result._inner = result.rename_axis(list(held) if len(held) > 1 else held[0])._inner
+        if any(one is not None for one in rows):
+            hold_columns(result, rows)
+        return result
+
+    return method
 
 
 def _carry_freq(result: Any, source: Any) -> None:
@@ -402,15 +499,20 @@ def _keeping(
     @functools.wraps(fn)
     def method(self: Any, *args: Any, **kwargs: Any) -> Any:
         if not _USED:
-            if not (freq and _FREQ_USED):
+            if not (freq and _FREQ_USED) and not _COLUMNS_USED:
                 return fn(self, *args, **kwargs)
             result = fn(self, *args, **kwargs)
-            _carry_freq(result, source_of(self))
+            if freq and _FREQ_USED:
+                _carry_freq(result, source_of(self))
+            if _COLUMNS_USED:
+                _carry_columns(result, source_of(self), name)
             return result
         result = fn(self, *args, **kwargs)
         source = source_of(self)
         if freq and _FREQ_USED:
             _carry_freq(result, source)
+        if _COLUMNS_USED:
+            _carry_columns(result, source, name)
         if agreeing:
             other = _other_of(args, kwargs)
             others = other if isinstance(other, list | tuple) else [other]
@@ -442,9 +544,14 @@ def _grouping(fn: Callable[..., Any], source_of: Callable[[Any], Any]) -> Any:
     @functools.wraps(fn)
     def method(self: Any, *args: Any, **kwargs: Any) -> Any:
         if not _USED:
-            return fn(self, *args, **kwargs)
+            result = fn(self, *args, **kwargs)
+            if _COLUMNS_USED:
+                _carry_group_columns(result, source_of(self))
+            return result
         result = fn(self, *args, **kwargs)
         source = source_of(self)
+        if _COLUMNS_USED:
+            _carry_group_columns(result, source)
         held = carried(source)
         frame = getattr(result, "_frame", None)
         if held is not None and frame is not None and frame is not source:
@@ -454,7 +561,18 @@ def _grouping(fn: Callable[..., Any], source_of: Callable[[Any], Any]) -> Any:
     return method
 
 
-def _dropping(fn: Callable[..., Any], source_of: Callable[[Any], Any], freq: bool = False) -> Any:
+def _carry_group_columns(result: Any, source: Any) -> None:
+    """Gives the frame a group by keeps the name of its source's column axis."""
+    frame = getattr(result, "_frame", None)
+    if frame is not None and frame is not source and type(frame) is type(source):
+        held = column_names(source)
+        if held is not None and column_names(frame) is None:
+            frame._column_names = held
+
+
+def _dropping(
+    fn: Callable[..., Any], source_of: Callable[[Any], Any], name: str, freq: bool = False
+) -> Any:
     """`fn`, with its answer carrying nothing, for what pandas does not finalize.
 
     The frequency of the row labels is not part of that, since pandas keeps it
@@ -464,15 +582,20 @@ def _dropping(fn: Callable[..., Any], source_of: Callable[[Any], Any], freq: boo
     @functools.wraps(fn)
     def method(self: Any, *args: Any, **kwargs: Any) -> Any:
         if not _USED:
-            if not (freq and _FREQ_USED):
+            if not (freq and _FREQ_USED) and not _COLUMNS_USED:
                 return fn(self, *args, **kwargs)
             result = fn(self, *args, **kwargs)
-            _carry_freq(result, source_of(self))
+            if freq and _FREQ_USED:
+                _carry_freq(result, source_of(self))
+            if _COLUMNS_USED:
+                _carry_columns(result, source_of(self), name)
             return result
         result = fn(self, *args, **kwargs)
         _strip(result, source_of(self))
         if freq and _FREQ_USED:
             _carry_freq(result, source_of(self))
+        if _COLUMNS_USED:
+            _carry_columns(result, source_of(self), name)
         return result
 
     return method
@@ -491,9 +614,14 @@ def _aggregating(fn: Callable[..., Any], source_of: Callable[[Any], Any], groupe
     @functools.wraps(fn)
     def method(self: Any, *args: Any, **kwargs: Any) -> Any:
         if not _USED:
-            return fn(self, *args, **kwargs)
+            result = fn(self, *args, **kwargs)
+            if _COLUMNS_USED:
+                _carry_columns(result, source_of(self), "agg")
+            return result
         result = fn(self, *args, **kwargs)
         source = source_of(self)
+        if _COLUMNS_USED:
+            _carry_columns(result, source, "agg")
         func = args[0] if args else kwargs.get("func")
         named = isinstance(func, str) and func not in drops
         if grouped:
@@ -573,13 +701,24 @@ def _wrapped(
     """The right wrapper for one method of a class, by the lists above."""
     if name in _ITERATED:
         return _iterating(fn, source_of)
+    if name in ("T", "transpose") and not grouped:
+        return _turning(_keeping(fn, source_of, name, freq), source_of)
     if name == "groupby" or (grouped and name == "__getitem__"):
         return _grouping(fn, source_of)
     if drop_all or name in drops:
-        return _dropping(fn, source_of, freq and name not in _FREQ_DROPS)
+        return _dropping(fn, source_of, name, freq and name not in _FREQ_DROPS)
     if name in ("agg", "aggregate"):
         return _aggregating(fn, source_of, grouped)
     return _keeping(fn, source_of, name, freq)
+
+
+def _index_names(labels: Any) -> list[Any] | None:
+    """The names of an index handed in as labels, or None for none or a plain list."""
+    names = getattr(labels, "names", None)
+    if names is None or isinstance(labels, (list, tuple)):
+        return None
+    names = list(names)
+    return names if any(one is not None for one in names) else None
 
 
 def _holding_init(fn: Callable[..., Any]) -> Any:
@@ -593,6 +732,10 @@ def _holding_init(fn: Callable[..., Any]) -> Any:
         held = getattr(index, "freq", None) if index is not None else row_freq(data)
         if held is not None and not isinstance(held, str):
             hold_freq(self, held)
+        columns = kwargs["columns"] if "columns" in kwargs else args[2] if len(args) > 2 else None
+        named = _index_names(columns)
+        if named is not None and hasattr(self, "columns"):
+            hold_columns(self, named)
 
     return __init__
 
@@ -607,6 +750,8 @@ def _holding_axis(fn: Callable[..., Any]) -> Any:
         held = getattr(labels, "freq", None)
         if axis in (0, "index", "rows") and held is not None and not isinstance(held, str):
             hold_freq(result, held)
+        if axis in (1, "columns") and result is not None:
+            hold_columns(result, _index_names(labels))
         return result
 
     return set_axis
@@ -660,12 +805,17 @@ def _agreeing_function(
     @functools.wraps(fn)
     def function(*args: Any, **kwargs: Any) -> Any:
         if not _USED:
-            if not (freq and _FREQ_USED):
+            if not (freq and _FREQ_USED) and not _COLUMNS_USED:
                 return fn(*args, **kwargs)
             result = fn(*args, **kwargs)
-            _agreed_freq(result, inputs_of(*args, **kwargs), kwargs)
+            if freq and _FREQ_USED:
+                _agreed_freq(result, inputs_of(*args, **kwargs), kwargs)
+            if _COLUMNS_USED:
+                _agreed_columns(result, inputs_of(*args, **kwargs))
             return result
         result = fn(*args, **kwargs)
+        if _COLUMNS_USED:
+            _agreed_columns(result, inputs_of(*args, **kwargs))
         if freq and _FREQ_USED:
             _agreed_freq(result, inputs_of(*args, **kwargs), kwargs)
         held = agreed(inputs_of(*args, **kwargs))
@@ -676,6 +826,17 @@ def _agreeing_function(
         return result
 
     return function
+
+
+def _agreed_columns(result: Any, inputs: list[Any]) -> None:
+    """Gives a joined frame the name of the column axis every input frame shares."""
+    kind = type(result)
+    if not inputs or kind not in _SLOTS or not all(type(one) is kind for one in inputs):
+        return
+    held = [column_names(one) for one in inputs]
+    agreed = held[0] is not None and all(one == held[0] for one in held)
+    if agreed and column_names(result) is None:
+        result._column_names = held[0]
 
 
 def _agreed_freq(result: Any, inputs: list[Any], kwargs: dict[str, Any]) -> None:

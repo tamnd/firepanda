@@ -141,9 +141,10 @@ def test_rename_axis_refuses_a_sequence_of_any_other_length(firepanda):
         frame(firepanda).rename_axis(["row", "col"])
 
 
-def test_rename_axis_has_nowhere_to_put_a_name_for_the_columns(firepanda):
-    with pytest.raises(NotImplementedError, match="column axis"):
-        frame(firepanda).rename_axis("cols", axis=1)
+def test_rename_axis_names_the_columns_along_axis_one(firepanda):
+    made = frame(firepanda).rename_axis("cols", axis=1)
+    assert made.columns.name == "cols"
+    assert made.index.name == "k"
 
 
 def test_rename_axis_settles_in_place_and_answers_nothing(firepanda):

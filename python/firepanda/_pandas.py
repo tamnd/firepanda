@@ -1947,6 +1947,43 @@ def _one_name(value: Any) -> str | None:
     return _held_label(names[0])
 
 
+def _column_axis_names(frame: Any, value: Any, mapping: bool) -> tuple[Any, ...]:
+    """The new names of a frame's column axis, one a level, as `rename_axis(columns=)` reads them.
+
+    A name or a list of names sets them. Given as `columns=`, a mapping or a
+    function renames the names the axis has, as pandas does.
+
+    Raises:
+        InvalidArgumentError: For a count of names that does not match the levels.
+        TypeError: For a name pandas cannot hash, with pandas' message.
+    """
+    depth = frame.columns.nlevels
+    if mapping and (callable(value) or hasattr(value, "items")):
+        rename = value.__getitem__ if hasattr(value, "items") else value
+        current = list(frame.columns.names)
+        if hasattr(value, "items"):
+            return tuple(rename(one) if one in value else one for one in current)
+        return tuple(rename(one) for one in current)
+    if _list_like(value):
+        names = list(value)
+        if depth > 1 and len(names) != depth:
+            raise InvalidArgumentError(
+                "Length of names must match number of levels in MultiIndex."
+            )
+        if depth == 1 and len(names) != 1:
+            raise InvalidArgumentError(f"Length of new names must be 1, got {len(names)}")
+    elif depth > 1:
+        raise InvalidArgumentError("Names should be list-like for a MultiIndex")
+    else:
+        names = [value]
+    for one in names:
+        try:
+            hash(one)
+        except TypeError:
+            raise TypeError("Index.name must be a hashable type") from None
+    return tuple(names)
+
+
 def _axis_name(owner: Any, value: Any) -> str | None:
     """The new name of a frame's or a column's labels, one name a level for a `MultiIndex`."""
     if _has_levels(owner) and _list_like(value) and not hasattr(value, "items"):
@@ -9061,16 +9098,24 @@ def _moved_to(owner: Any, rows: Index | None, columns: list[Any] | None, fill_va
 def _column_labels(frame: DataFrame) -> Index:
     """A frame's column labels as an index, which is what `DataFrame.columns` hands out.
 
-    A frame without columns answers an empty `RangeIndex`, as pandas' does.
+    A frame without columns answers an empty `RangeIndex`, as pandas' does. The
+    name of the column axis, when the frame holds one, goes on the index.
     """
     from ._range_index import RangeIndex
 
     names = _names.shown_all(frame._inner.names())
-    if _column_depth(names) > 1:
+    depth = _column_depth(names)
+    held = getattr(frame, "_column_names", None)
+    if held is not None and len(held) != depth:
+        held = None
+    if depth > 1:
         from ._multi import MultiIndex
 
-        return MultiIndex.from_tuples(names)
-    return _names_index(names, None) if names else RangeIndex(0)
+        return MultiIndex.from_tuples(names, names=held)
+    made = _names_index(names, None) if names else RangeIndex(0)
+    if held is not None and held[0] is not None:
+        made.rename(held[0], inplace=True)
+    return made
 
 
 def _column_depth(labels: list[Any]) -> int:
@@ -10260,7 +10305,7 @@ class _Carries:
 class DataFrameMixin(_Carries):
     """The hand written half of `DataFrame`."""
 
-    __slots__ = ("_carried", "_inner", "_row_freq")
+    __slots__ = ("_carried", "_column_names", "_inner", "_row_freq")
     """The state, declared here rather than on the generated class.
 
     It has to be here because the constructor is here, and a class cannot assign
@@ -10268,7 +10313,9 @@ class DataFrameMixin(_Carries):
     `__slots__`, so an instance still has no `__dict__` and there is still
     exactly one place the extension object lives. `_carried` is the `attrs` and
     the flags, which `_attrs.py` explains, and it is unset on most frames.
-    `_row_freq` is the frequency of the row labels, unset unless they had one."""
+    `_row_freq` is the frequency of the row labels, unset unless they had one.
+    `_column_names` is the name of the column axis, one a level, which pandas
+    keeps on the columns' index, unset unless it was given one."""
 
     _inner: _firepanda.DataFrame
 
@@ -10644,14 +10691,23 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame
         from ._multi import MultiIndex
 
+        axis_name = _axis_names(self)[0]
         if not isinstance(self.index, MultiIndex):
             names = list(self.columns)
-            return concat([self[name] for name in names], keys=names)
+            made = concat([self[name] for name in names], keys=names)
+            if axis_name is not None:
+                made = made.rename_axis([axis_name, *made.index.names[1:]])
+            return made
         parts = [(name, self[name].unstack(level, fill_value, sort)) for name in self.columns]
         columns = {
             (name, head): part[head] for name, part in parts for head in part.columns
         }
-        return DataFrame(columns, index=parts[0][1].index) if parts else DataFrame()
+        if not parts:
+            return DataFrame()
+        made = DataFrame(columns, index=parts[0][1].index)
+        if not isinstance(level, list | tuple):
+            _hold_columns(made, [axis_name, self.index.names[self.index._level_number(level)]])
+        return made
 
     def __getitem__(self, key: Any) -> DataFrame | Series:
         """One column as a series, or several as a frame.
@@ -11198,7 +11254,7 @@ class DataFrameMixin(_Carries):
         labels = [
             (*(row if isinstance(row, tuple) else (row,)), name) for row in rows for name in columns
         ]
-        names = [*(self.index.names), None]
+        names = [*(self.index.names), _axis_names(self)[0]]
         stacked = Series(joined.take(order).tolist(), dtype=joined.dtype)
         return stacked.set_axis(MultiIndex.from_tuples(labels, names=names))
 
@@ -11625,7 +11681,7 @@ class DataFrameMixin(_Carries):
         rows = sorted(set(keys))
         names = _pivot_names(sorted(set(heads)), "pivot")
         printed = _word(self[values].dtype)
-        return _pivoted(rows, names, cells, printed, row_name=row_name)
+        return _pivoted(rows, names, cells, printed, row_name=row_name, column_name=across)
 
     def pivot_table(
         self,
@@ -11728,7 +11784,9 @@ class DataFrameMixin(_Carries):
             rows = [
                 row for row in rows if not all(_missing(cells.get((row, name))) for name in names)
             ]
-        return _pivoted(rows, names, cells, printed, row_name=down, fill_value=fill_value)
+        return _pivoted(
+            rows, names, cells, printed, row_name=down, fill_value=fill_value, column_name=across
+        )
 
     def isetitem(self, loc: Any, value: Any) -> None:
         """Sets the column at a position, or the columns at several, by position.
@@ -13932,7 +13990,9 @@ class DataFrameMixin(_Carries):
         if orient == "tight":
             if index:
                 parts.append(("index_names", [self.index.name]))
-            parts.append(("column_names", [None]))
+            depth = _column_depth(_shown_names(self))
+            held = _axis_names(self)
+            parts.append(("column_names", list(held) if len(held) == depth else [None] * depth))
         return mapping(parts)
 
     def rename_axis(
@@ -13956,32 +14016,32 @@ class DataFrameMixin(_Carries):
         the same as passing nothing, so the default here is the no default
         sentinel rather than `None`.
 
-        `columns=` and `axis=1` raise. In pandas they name the column axis, and
-        a pandas frame's `columns` is an `Index` with a name field to put it in.
-        Here `columns` is a list of strings, because a frame's columns are its
-        schema and a schema is not a column of data, so there is nowhere for the
-        name to go.
+        `columns=` and `axis=1` name the column axis, which the frame holds
+        beside its columns and hands out on `df.columns`. Given as `columns=`, a
+        mapping or a function renames the names there are, as in pandas.
         """
+        from ._attrs import column_names, hold_columns
         from ._frame import DataFrame
 
         inplace = _flag("inplace", inplace)
-        if columns is not NO_DEFAULT or axis in (1, "columns"):
-            raise NotImplementedError(
-                "naming the column axis is not supported yet, because a frame's"
-                " columns are its schema here rather than an index, so there is"
-                " no name field to write into"
-            )
-        if axis not in (0, "index"):
+        mapping = True
+        if mapper is not NO_DEFAULT and axis in (1, "columns"):
+            columns, mapper, mapping = mapper, NO_DEFAULT, False
+        elif axis not in (0, "index", 1, "columns"):
             raise InvalidArgumentError(f"No axis named {axis} for object type DataFrame")
         wanted = mapper if mapper is not NO_DEFAULT else index
-        if wanted is NO_DEFAULT:
-            return _settled(self, self.copy(), inplace)
+        named = None if columns is NO_DEFAULT else _column_axis_names(self, columns, mapping)
         try:
-            return _settled(
-                self, DataFrame._wrap(self._inner.renamed_axis(_axis_name(self, wanted))), inplace
-            )
+            if wanted is NO_DEFAULT:
+                answer = self.copy()
+            else:
+                answer = DataFrame._wrap(self._inner.renamed_axis(_axis_name(self, wanted)))
         except Exception as error:
             raise translate(error) from None
+        hold_columns(answer, named if named is not None else column_names(self))
+        if inplace:
+            hold_columns(self, column_names(answer))
+        return _settled(self, answer, inplace)
 
     def _get(self, key: Any, default: Any) -> Any:
         """One column, or a value of the caller's choosing when there is none.
@@ -15331,7 +15391,8 @@ class DataFrameMixin(_Carries):
         if not names:
             return Series([], dtype="bool")
         try:
-            return Series._wrap(self._inner.duplicated(names, word))
+            flags = self._inner.duplicated(names, word)
+            return Series._wrap(flags.relabel(_names.held(None)))
         except Exception as error:
             raise translate(error) from None
 
@@ -16410,7 +16471,13 @@ class SeriesMixin(_Carries):
         level_names = [index.names[n] for n in kept]
         row_name = level_names[0] if len(kept) == 1 else level_names
         return _pivoted(
-            order, names, cells, _word(self.dtype), row_name=row_name, fill_value=fill_value
+            order,
+            names,
+            cells,
+            _word(self.dtype),
+            row_name=row_name,
+            fill_value=fill_value,
+            column_name=index.names[number],
         )
 
     @classmethod
@@ -29893,7 +29960,8 @@ def _melt(
     else:
         values = [name for name in values if name not in ids]
     if var_name is None:
-        var_name = getattr(_shown_names(frame), "name", None) or "variable"
+        var_name = _axis_names(frame)[0]
+        var_name = "variable" if var_name is None else var_name
     label = "__firepanda_label__"
     keep = ids if ignore_index else [label, *ids]
     if len({*keep, var_name, value_name}) < len(keep) + 2:
@@ -29928,6 +29996,9 @@ def _melt(
         )
     if not ignore_index:
         out = out.set_index(label).rename_axis(frame.index.name)
+    from ._attrs import hold_columns
+
+    hold_columns(out, None)
     return out
 
 
@@ -31183,7 +31254,9 @@ def _pivot_margins(
         whole = data[values].agg(aggfunc, **kwargs)
         cells[margins_name] = [*(per_row.get(row) for row in rows), whole]
     labels = Index([*rows, margins_name], name=table.index.name)
-    return DataFrame({name: _readable(got) for name, got in cells.items()}, index=labels)
+    made = DataFrame({name: _readable(got) for name, got in cells.items()}, index=labels)
+    _hold_columns(made, list(table.columns.names))
+    return made
 
 
 def _pivoted(
@@ -31207,7 +31280,24 @@ def _pivoted(
         name: _pivot_column([cells.get((row, name)) for row in rows], printed, fill_value, labels)
         for name in names
     }
-    return DataFrame(columns, index=labels)
+    made = DataFrame(columns, index=labels)
+    _hold_columns(made, [kw.get("column_name")])
+    return made
+
+
+def _axis_names(frame: Any) -> tuple[Any, ...]:
+    """The names a frame holds for its column axis, or one None when it holds none."""
+    from ._attrs import column_names
+
+    return column_names(frame) or (None,)
+
+
+def _hold_columns(frame: Any, names: list[Any]) -> None:
+    """Names a new frame's column axis, one name a level, when any of them is set."""
+    from ._attrs import hold_columns
+
+    if any(one is not None for one in names):
+        hold_columns(frame, names)
 
 
 def pivot(data: Any, *, columns: Any, index: Any = NO_DEFAULT, values: Any = NO_DEFAULT) -> Any:
@@ -31495,7 +31585,7 @@ def crosstab(
     down = _crosstab_keys(index, "index")
     across = _crosstab_keys(columns, "columns")
     row_name = _crosstab_name(down, rownames, "row")
-    _crosstab_name(across, colnames, "col")
+    column_name = _crosstab_name(across, colnames, "col")
     labelled = [piece for piece in (down, across) if isinstance(piece, Series)]
     pieces = [down, across] if values is None else [down, across, values]
     lined = _crosstab_lined_up(pieces, labelled)
@@ -31568,7 +31658,9 @@ def crosstab(
         else:
             table = _crosstab_normalized(table, normalize)
     labels = Index(rows, name=row_name)
-    return DataFrame({name: _readable(got) for name, got in table.items()}, index=labels)
+    made = DataFrame({name: _readable(got) for name, got in table.items()}, index=labels)
+    _hold_columns(made, [column_name])
+    return made
 
 
 def from_dummies(data: Any, sep: Any = None, default_category: Any = None) -> Any:
@@ -33439,10 +33531,19 @@ def _text_table(
         size = max(*(len(x) for x in texts), width)
         blocks.append(_text_fixed(head, justify, size) + texts)
     if index:
+        corner = []
+        if listed or header:
+            corner = [""] * depth
+            held = _axis_names(frame)
+            if kw["index_names"] and len(held) == depth:
+                corner = ["" if one is None else _text_plain(one) for one in held]
         names = _text_fixed(
-            _text_labels(frame.index, named, widest), "left", int(spaces.get("", 0)), widest
+            corner + _text_labels(frame.index, named, widest),
+            "left",
+            int(spaces.get("", 0)),
+            widest,
         )
-        blocks.insert(0, [""] * depth + names if listed or header else names)
+        blocks.insert(0, names)
     tall = len(blocks[-1])
     if dots_col is not None:
         blocks.insert(dots_col + 1, [" ..."] * tall)
