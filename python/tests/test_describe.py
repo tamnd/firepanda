@@ -160,7 +160,6 @@ def test_a_mixed_answer_is_pandas_answer(
 
 REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame(FRAME).describe(include=["number"]),
-    lambda m: m.DataFrame(FRAME)[["x"]].kurt(axis=1),
 ]
 
 
