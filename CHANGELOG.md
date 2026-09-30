@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Series.compare with align_axis=0
+
+`Series.compare(align_axis=0)` answers a series with the two sides taking turns down the rows, labelled by the label and the side, as pandas does. An empty answer keeps its two levels, since setting no labels of several levels on a column now keeps them as text.
+
 ### Added: at on a repeated label
 
 `DataFrame.at` and `Series.at` answer a label that is there more than once as pandas does, with every value under it as a series, where they used to refuse it.

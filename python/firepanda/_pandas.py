@@ -8908,7 +8908,7 @@ def _with_row_labels(owner: Any, labels: list[Any]) -> Any:
     index is not assigned to directly here. A `MultiIndex`, or labels that are
     all tuples, go in written as the text labels that hold them.
     """
-    from ._frame import DataFrame
+    from ._frame import DataFrame, Series
     from ._levels import labels_of
     from ._multi import MultiIndex
 
@@ -8921,6 +8921,9 @@ def _with_row_labels(owner: Any, labels: list[Any]) -> Any:
         multi = labels if isinstance(labels, MultiIndex) else MultiIndex.from_tuples(labels)
         written = labels_of(multi)
         labels, name = written.tolist(), written.name
+        if not labels:
+            # No labels would go in as numbers, and written labels are text.
+            labels = Series([], dtype="str", index=owner.index)
     values, held = "__firepanda_values", "__firepanda_labels"
     frame = isinstance(owner, DataFrame)
     work = owner if frame else owner.to_frame(values)
@@ -9346,6 +9349,27 @@ def _zoned_level(
     arrays[number] = getattr(DatetimeIndex(arrays[number]), method)(tz, *extra)
     moved = MultiIndex.from_arrays(arrays, names=list(labels.names))
     return owner.set_axis(moved, axis=0)
+
+
+def _sides_stacked(sides: list[Any], result_names: tuple[Any, ...], name: Any) -> Any:
+    """Two sides of a `Series.compare` taking turns down the rows.
+
+    Each label comes twice, once for each side, and the rows are labelled by
+    the pair of the label and the side, as pandas' `align_axis=0` does.
+    """
+    from ._multi import MultiIndex
+
+    count = len(sides[0])
+    order = [place + side * count for place in range(count) for side in (0, 1)]
+    stacked = concat([sides[0].rename(name), sides[1].rename(name)], ignore_index=True)
+    labels = sides[0].index.tolist()
+    tuples = [
+        (*(label if isinstance(label, tuple) else (label,)), side)
+        for label in labels
+        for side in result_names
+    ]
+    labelled = MultiIndex.from_tuples(tuples, names=[None] * (sides[0].index.nlevels + 1))
+    return stacked.take(order).set_axis(labelled, axis=0)
 
 
 def _align_axis(axis: Any, owner: str, allowed: tuple[int, ...]) -> int | None:
@@ -17449,9 +17473,8 @@ class SeriesMixin(_Carries):
         Raises:
             ValueError: When the labels differ, with pandas' words.
             TypeError: For result names that are not a tuple, with pandas' words.
-            NotImplementedError: For the sides stacked, which labels the rows
-                with a MultiIndex, and for true or false values pandas answers
-                as objects.
+            NotImplementedError: For true or false values pandas answers as
+                objects.
         """
         from ._frame import DataFrame, Series
 
@@ -17462,11 +17485,9 @@ class SeriesMixin(_Carries):
             )
         if not self.index.equals(other.index):
             raise ValueError("Can only compare identically-labeled Series objects")
-        if align_axis not in (1, "columns"):
-            raise NotImplementedError(
-                "compare: align_axis=0 labels the rows with a MultiIndex, which firepanda"
-                " does not have"
-            )
+        stacked = align_axis in (0, "index")
+        if not stacked and align_axis not in (1, "columns"):
+            raise InvalidArgumentError(f"No axis named {align_axis} for object type DataFrame")
         pairs = list(zip(self.tolist(), other.tolist(), strict=True))
         differs = [
             not (_missing(mine) and _missing(theirs)) and mine != theirs for mine, theirs in pairs
@@ -17486,6 +17507,8 @@ class SeriesMixin(_Carries):
         if not keep_shape:
             kept = [place for place, different in enumerate(differs) if different]
             sides = [side.take(kept) for side in sides]
+        if stacked:
+            return _sides_stacked(sides, result_names, self.name)
         return DataFrame(
             {str(result_names[0]): sides[0], str(result_names[1]): sides[1]},
             index=sides[0].index,
