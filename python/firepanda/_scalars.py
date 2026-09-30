@@ -1718,31 +1718,58 @@ class Timestamp(_datetime.datetime):
         return base
 
     # The comparisons are `datetime`'s own, except against `NaT`, which is a
-    # `datetime` too and would otherwise be read as the first moment of year 1.
+    # `datetime` too and would otherwise be read as the first moment of year 1,
+    # and against another `Timestamp` of the same kind, which pandas compares
+    # by the instant to the nanosecond. `datetime` compares two readings in one
+    # zone by the clock, which makes the two sides of a repeated hour equal.
+
+    def _instants(self, other: Any) -> tuple[int, int] | None:
+        """Both instants in nanoseconds, for another `Timestamp` with or without a zone alike."""
+        if isinstance(other, Timestamp) and (self.tzinfo is None) == (other.tzinfo is None):
+            return self._total, other._total
+        return None
 
     def __eq__(self, other: object) -> bool:
         """Equality, which is False against `NaT`."""
-        return other is not NaT and _datetime.datetime.__eq__(self, other)
+        if other is NaT:
+            return False
+        both = self._instants(other)
+        return _datetime.datetime.__eq__(self, other) if both is None else both[0] == both[1]
 
     def __ne__(self, other: object) -> bool:
         """Inequality, which is True against `NaT`."""
-        return other is NaT or _datetime.datetime.__ne__(self, other)
+        if other is NaT:
+            return True
+        both = self._instants(other)
+        return _datetime.datetime.__ne__(self, other) if both is None else both[0] != both[1]
 
     def __lt__(self, other: Any) -> Any:
         """Before, which is False against `NaT`."""
-        return False if other is NaT else _datetime.datetime.__lt__(self, other)
+        if other is NaT:
+            return False
+        both = self._instants(other)
+        return _datetime.datetime.__lt__(self, other) if both is None else both[0] < both[1]
 
     def __le__(self, other: Any) -> Any:
         """At or before, which is False against `NaT`."""
-        return False if other is NaT else _datetime.datetime.__le__(self, other)
+        if other is NaT:
+            return False
+        both = self._instants(other)
+        return _datetime.datetime.__le__(self, other) if both is None else both[0] <= both[1]
 
     def __gt__(self, other: Any) -> Any:
         """After, which is False against `NaT`."""
-        return False if other is NaT else _datetime.datetime.__gt__(self, other)
+        if other is NaT:
+            return False
+        both = self._instants(other)
+        return _datetime.datetime.__gt__(self, other) if both is None else both[0] > both[1]
 
     def __ge__(self, other: Any) -> Any:
         """At or after, which is False against `NaT`."""
-        return False if other is NaT else _datetime.datetime.__ge__(self, other)
+        if other is NaT:
+            return False
+        both = self._instants(other)
+        return _datetime.datetime.__ge__(self, other) if both is None else both[0] >= both[1]
 
     def __hash__(self) -> int:
         """The hash, which agrees with equality on both sides of the nanosecond.
