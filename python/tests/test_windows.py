@@ -1170,3 +1170,24 @@ def test_an_integer_frame_comes_back_as_float64(firepanda: ModuleType) -> None:
     got = mine.rolling(2).sum()
     assert [str(got[name].dtype) for name in list(got.columns)] == ["float64", "float64"]
     assert matching(got, them.rolling(2).sum())
+
+
+@needs_pandas
+def test_rolling_max_takes_and_drops_what_pandas_takes_and_drops(firepanda: ModuleType) -> None:
+    """`Rolling.max` is the one reduction pandas declares with `*args` and
+    `**kwargs`, and its body never reads them, so extra arguments are dropped
+    rather than refused. `Expanding.max` declares neither and still refuses."""
+    import inspect
+
+    import pandas
+
+    mine = inspect.signature(firepanda.Series([1.0]).rolling(1).max)
+    theirs = inspect.signature(pandas.Series([1.0]).rolling(1).max)
+    assert [(p.name, p.kind) for p in mine.parameters.values()] == [
+        (p.name, p.kind) for p in theirs.parameters.values()
+    ]
+    for lib in (firepanda, pandas):
+        answer = lib.Series(ROWS).rolling(2).max(False, 1, out=None)
+        assert answer.tolist()[1:] == [value + 1.0 for value in ROWS[:-1]]
+        with pytest.raises(TypeError):
+            lib.Series(ROWS).expanding().max(out=None)

@@ -1840,8 +1840,16 @@ def _window_members(py: str) -> tuple[Member, ...]:
         signature = "numeric_only: bool = False"
         if own:
             signature = f"{own}, {signature}"
+        # `Rolling.max` is the one reduction pandas declares with `*args` before
+        # the engine arguments and `**kwargs` after them. Neither is read, and
+        # both are copied because the signature is the surface being matched.
+        loose = py == "Rolling" and name == "max"
+        if loose:
+            signature = f"{signature}, *args: Any"
         if engined:
             signature = f"{signature}, {engines}"
+        if loose:
+            signature = f"{signature}, **kwargs: Any"
         arguments = "numeric_only"
         if engined:
             arguments = f"{arguments}, engine, engine_kwargs"
