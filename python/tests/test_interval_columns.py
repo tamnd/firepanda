@@ -153,6 +153,19 @@ RANGES: dict[str, Callable[[ModuleType], Any]] = {
         lib.Timedelta("0h"), lib.Timedelta("3h"), periods=4
     ),
     "instant-and-number": lambda lib: lib.interval_range(lib.Timestamp("2024-01-01"), 5),
+    "series-of-range": lambda lib: lib.Series(lib.interval_range(0, 3)),
+    "series-of-days": lambda lib: lib.Series(
+        lib.interval_range(lib.Timestamp("2024-01-01"), periods=2), name="d"
+    ),
+    "series-with-gap": lambda lib: lib.Series(lib.IntervalIndex.from_tuples([(0, 1), None])),
+    "frame-of-days": lambda lib: lib.DataFrame(
+        {"i": lib.interval_range(lib.Timestamp("2024-01-01"), periods=2)}
+    ),
+    "frame-placed": lambda lib: lib.DataFrame(
+        {"a": lib.Series([5, 6], index=[3, 4]), "i": lib.interval_range(0, 2)}
+    ),
+    "frame-types": lambda lib: lib.DataFrame({"a": [1, 2], "i": lib.interval_range(0, 2)}).dtypes,
+    "to-series": lambda lib: lib.interval_range(lib.Timestamp("2024-01-01"), periods=2).to_series(),
     "days-left": lambda lib: lib.interval_range(
         lib.Timestamp("2024-01-01"), periods=2, closed="left", name="k"
     ),

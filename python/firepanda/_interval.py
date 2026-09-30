@@ -700,10 +700,11 @@ class IntervalIndex:
         return interval_arrow(self._values, str(self._dtype))
 
     def to_series(self, index: Any = None, name: Any = None) -> Any:
-        """The intervals as an interval column."""
+        """The intervals as an interval column, labelled by themselves unless `index` says."""
         from ._frame import Series
 
-        return Series(self._values, index=index, name=self.name if name is None else name)
+        index = self if index is None else index
+        return Series(self, index=index, name=self.name if name is None else name)
 
     def __len__(self) -> int:
         return len(self._values)
