@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: reset_index on columns that are a MultiIndex
+
+`DataFrame.reset_index` on a frame whose columns are a `MultiIndex` used to leave a flat mix of the label's name and tuples, and refused `col_level` and `col_fill`. It now names each new column by a tuple the way pandas does: the label's name at `col_level`, a level number or name, and `col_fill` at every other level, or the name at every level when `col_fill` is None. On columns of one level both arguments are passed over, as pandas passes them over.
+
 ### Added: to_datetime with exact=False
 
 `to_datetime(format=..., exact=False)` lets the format match part of each row, the first place it can, the way pandas' search does, where it used to be refused. A row the format matches nowhere raises pandas' own "doesn't match format" error, or is missing under `errors="coerce"`. The unit is microseconds, and nanoseconds where pandas' ISO 8601 reader takes a row past the end of an ISO format, as it does for a time after a day.
