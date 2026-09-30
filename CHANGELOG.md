@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.sql runs a query with the frame as self
+
+`df.sql("SELECT a, sum(b) FROM self GROUP BY a")` runs one statement in DuckDB's dialect with the frame under the name `self`, and every other name is found as `firepanda.sql` finds it, among the registered frames and then the caller's variables. `self` comes before a frame registered under that name, and `capture=False` leaves the caller's variables out.
+
+### Added: firepanda.sql runs a query over the frames in scope
+
+`firepanda.sql("SELECT ... FROM orders")` runs one statement in DuckDB's dialect and answers a frame. A table name is looked for among the frames given to `firepanda.register`, then the caller's local variables, then its globals, and only a `DataFrame` or a `Series` is taken, so a variable of another kind hides nothing. SQL folds names to lower case, so `Orders` reaches a variable called `orders`, and two variables whose names differ only in case are refused as ambiguous. `capture=False` leaves the caller's variables out. Each call runs over a catalog of its own, so a table one call creates is gone in the next. A statement firepanda does not run yet raises NotImplementedError and one that does not parse or bind raises ValueError with DuckDB's message.
+
 ### Added: sort_index with a direction per level
 
 `sort_index(ascending=[...])` sorts the labels of a MultiIndex on each level in the direction given for it, and with `level=` on those levels alone, leaving the rest in the order they came in, as pandas does. On labels of one level the list is read as pandas reads it: left as they are when every flag agrees with their order, and otherwise sorted upward unless the list is empty.

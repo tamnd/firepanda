@@ -13314,6 +13314,24 @@ class DataFrameMixin(_Carries):
         """
         return _melt(self, id_vars, value_vars, var_name, value_name, col_level, ignore_index)
 
+    def sql(self, query: str, *, capture: bool = True) -> DataFrame:
+        """Runs one SQL statement in DuckDB's dialect with this frame as `self`.
+
+        Every other name is found as `firepanda.sql` finds it, among the
+        registered frames and then the caller's variables.
+
+        Args:
+            query: The statement, which reads this frame as `FROM self`.
+            capture: Whether the caller's local and global variables are in
+                scope behind this frame and the registered ones.
+
+        Returns:
+            What the statement answers.
+        """
+        from ._sql_query import _run
+
+        return _run(query, capture, self)
+
     def query(
         self,
         expr: str,
