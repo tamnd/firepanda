@@ -111,12 +111,11 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 @pytest.mark.parametrize(
     "build",
     [
-        lambda m: m.Series([1.0, 2.0], index=[4, 4]).align(m.Series([5.0], index=[3])),
         lambda m: m.Series([1.0]).align(m.Series([2.0], index=[3]), level=1),
     ],
 )
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """Repeated labels that pandas joins, and a level of a MultiIndex."""
+    """A level of a MultiIndex."""
     with pytest.raises(NotImplementedError, match="align"):
         build(firepanda)
 

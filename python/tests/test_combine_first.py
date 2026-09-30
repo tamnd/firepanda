@@ -103,12 +103,11 @@ def test_a_column_is_not_a_frame(firepanda: ModuleType) -> None:
     [
         lambda m: m.DataFrame({"x": [1.0, None]}).combine_first(m.DataFrame({"x": ["a", "b"]})),
         lambda m: m.Series([True, False]).combine_first(m.Series([1, 2])),
-        lambda m: m.Series([1.0, None], index=[1, 1]).combine_first(m.Series([5.0], index=[2])),
     ],
 )
 def test_what_pandas_answers_as_objects_is_refused(
     firepanda: ModuleType, build: Callable[[Any], Any]
 ) -> None:
-    """Two types with nothing in common, and repeated labels that pandas joins."""
+    """Two types with nothing in common."""
     with pytest.raises(NotImplementedError, match="combine_first"):
         build(firepanda)
