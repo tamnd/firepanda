@@ -261,19 +261,18 @@ def test_every_row_is_held_to_the_first_row_format(firepanda: ModuleType) -> Non
 @pytest.mark.parametrize(
     ("argument", "value"),
     [
-        ("origin", "julian"),
         ("exact", False),
     ],
 )
 def test_a_declared_argument_that_is_not_implemented_says_so(
     firepanda: ModuleType, argument: str, value: Any
 ) -> None:
-    """Two refusals, each naming the argument the caller passed.
+    """A refusal naming the argument the caller passed.
 
-    They are declared rather than left out for the reason document 18 section 4
-    gives. A caller who passes one gets a message about that argument instead of
-    a TypeError about an unexpected keyword, and the day one of them is
-    implemented no signature changes.
+    It is declared rather than left out for the reason document 18 section 4
+    gives. A caller who passes it gets a message about that argument instead of
+    a TypeError about an unexpected keyword, and the day it is implemented no
+    signature changes.
     """
     with pytest.raises(NotImplementedError, match=argument):
         firepanda.to_datetime(["2026-01-01"], **{argument: value})
