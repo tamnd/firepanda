@@ -20682,7 +20682,10 @@ class _ReadingMixin:
                 shown = "str" if dtype in ("str", "string") else dtype
                 raise DataError(f"Cannot aggregate non-numeric type: {shown}")
             raise DataError("No numeric types to aggregate")
-        return [None if _missing(value) else float(value) for value in column.tolist()]
+        return [
+            None if _missing(value) or math.isinf(value) else float(value)
+            for value in column.tolist()
+        ]
 
     def _only_numbers(self, numeric_only: bool) -> None:
         """Holds `numeric_only` at False over a frame, as `WindowMixin._reduce` does."""

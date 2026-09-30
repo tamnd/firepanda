@@ -461,20 +461,14 @@ def test_an_integer_column_answers_float64() raises:
     )
 
 
-def test_a_median_over_a_window_holding_an_infinity_is_a_value() raises:
-    """Pandas answers `[1, 1, 1.5, 2.5, 3]` over `[1, inf, 2, 3, 4]` asking for
-    one value, because it replaces every infinity in the column with a missing
-    row before any window is formed. Here an infinity is a value and it sorts
-    above every finite one, so the window holding it has two values and not
-    one, and rows one and two are `inf` and `2` rather than `1` and `1.5`.
+def test_a_median_over_a_window_holding_an_infinity_skips_it() raises:
+    """pandas answers `[1, 1, 1.5, 2.5, 3]` over `[1, inf, 2, 3, 4]` asking for
+    one value, because it turns every infinity in the column into a missing row
+    before any window is formed, and this does the same.
     """
     var reaching = column([1.0, Float64.MAX * 2.0, 2.0, 3.0, 4.0])
     var got = rolled(reaching, 3, Optional(1))
-    assert_equal(got[0], 1.0, "one row, one value")
-    assert_true(isinf(got[1]), "the middle of one and an infinity is neither")
-    assert_equal(got[2], 2.0, "the middle of one, an infinity and two is two")
-    assert_equal(got[3], 3.0, "the middle of an infinity, two and three")
-    assert_equal(got[4], 3.0, "the middle of two, three and four")
+    assert_rows(got, [1.0, 1.0, 1.5, 2.5, 3.0], "the finite rows only")
 
 
 def test_two_huge_values_have_a_median_that_pandas_overflows() raises:

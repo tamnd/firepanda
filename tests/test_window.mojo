@@ -348,51 +348,53 @@ def test_the_extremes_hold_the_best_row_still_in_the_window() raises:
     )
 
 
-def test_an_infinity_leaves_the_window_again() raises:
-    """The one place this deliberately answers something pandas does not.
-
-    Pandas carries one running total, so adding an infinity makes it infinite
-    and subtracting the infinity again gives a NaN rather than the total back.
-    It answers `[nan, nan, nan, nan, nan, 12, 15]` over `[1, 2, inf, 3, 4, 5,
-    6]`, where the last two rows are right and rows three and four are not: the
-    window at row three is `[2, inf, 3]` and sums to infinity, and the window
-    at row four is `[inf, 3, 4]` and does too.
+def test_an_infinity_is_a_missing_row() raises:
+    """pandas' `_prep_values` turns every infinity into a missing value before a
+    window reads the column, and this does too. So over `[1, 2, inf, 3, 4, 5, 6]`
+    every window of three holding the infinity has two values and answers NaN,
+    and the total is back once it has left.
     """
     var big = Float64.MAX
     var poisoned = column([1.0, 2.0, big, 3.0, 4.0, 5.0, 6.0])
-    var summed = rolled(poisoned, "sum", 3)
-    assert_true(isnan(summed[0]))
-    assert_true(isnan(summed[1]))
-    assert_true(isinf(summed[2]), "the window holding it sums to infinity")
-    assert_true(isinf(summed[3]))
-    assert_true(isinf(summed[4]))
-    assert_equal(summed[5], 12.0, "and the total comes back afterwards")
-    assert_equal(summed[6], 15.0)
+    assert_rows(
+        rolled(poisoned, "sum", 3),
+        [GONE, GONE, GONE, GONE, GONE, 12.0, 15.0],
+        "sum",
+    )
+    assert_rows(
+        rolled(poisoned, "sum", 3, min_periods=1),
+        [1.0, 3.0, 3.0, 5.0, 7.0, 12.0, 15.0],
+        "the finite rows either side of it",
+    )
 
 
-def test_a_window_holding_both_infinities_is_not_a_number() raises:
-    """Which is true rather than merely being what pandas says, and it also has
-    to survive both of them leaving again."""
+def test_a_count_still_counts_an_infinity() raises:
+    """pandas counts before it turns infinities into missing values, so an
+    infinity is a value to `count` and to nothing else."""
+    var big = Float64.MAX
+    var poisoned = column([1.0, big, 2.0, 3.0])
+    assert_rows(
+        rolled(poisoned, "count", 2), [GONE, 2.0, 2.0, 2.0], "count"
+    )
+
+
+def test_a_window_holding_both_infinities_holds_neither() raises:
+    """An infinity of each sign is two missing rows, and the windows after them
+    are the finite rows alone."""
     var high = Float64.MAX
     var low = Float64.MIN
     var both = column([high, low, 1.0, 2.0, 3.0, 4.0])
-    var summed = rolled(both, "sum", 3)
-    assert_true(isnan(summed[2]), "an infinity of each sign is not a number")
-    assert_true(isinf(summed[1] * 0) or isnan(summed[1]))
-    assert_equal(summed[4], 6.0, "and the window recovers")
-    assert_equal(summed[5], 9.0)
+    assert_rows(
+        rolled(both, "sum", 3), [GONE, GONE, GONE, GONE, 6.0, 9.0], "sum"
+    )
 
 
-def test_an_extreme_over_a_window_holding_an_infinity_is_the_infinity() raises:
-    """Pandas answers a NaN here, because it seeds its running maximum with
-    negative infinity and reads a result equal to that seed as an empty window.
-    An infinity in the column is an ordinary value and this answers it."""
+def test_an_extreme_over_a_window_holding_an_infinity_skips_it() raises:
+    """The infinity is a missing row, so a window of two holding it has one
+    value and answers NaN when two were asked for, as pandas does."""
     var high = Float64.MAX
     var reaching = column([1.0, high, 2.0, 3.0])
-    var biggest = rolled(reaching, "max", 2)
-    assert_true(isinf(biggest[1]))
-    assert_true(isinf(biggest[2]))
-    assert_equal(biggest[3], 3.0)
+    assert_rows(rolled(reaching, "max", 2), [GONE, GONE, GONE, 3.0], "max")
 
 
 def test_the_compensation_keeps_the_bits_a_subtraction_would_lose() raises:

@@ -418,21 +418,29 @@ def test_the_missing_rows_are_stepped_over_and_still_counted_against() raises:
     )
 
 
-def test_a_window_holding_an_infinity_is_not_a_number() raises:
-    """Pandas answers `[0, 0, 0, 0.25, 0.25]` here and every one of the first
-    three is wrong.
-
-    Its window layer replaces every infinity with a missing value before the
-    kernel runs, so the window over row nought and row one is a window over one
-    row to pandas, and it answers the variance of a single value. The mean of a
-    set holding an infinity is an infinity, the deviations from it are an
-    infinity minus an infinity, and there is no number there, so this answers a
-    NaN and the registry in the conformance suite records the difference.
+def test_a_window_holding_an_infinity_reads_the_rest() raises:
+    """pandas' window layer turns every infinity into a missing value before the
+    kernel runs, and so does this one, so the window over row nought and row one
+    is a window over one row and answers the variance of a single value.
     """
     var reaching = column([1.0, Float64.MAX, 2.0, 3.0, 4.0])
     assert_rows(
         rolled(reaching, "var", 2, ddof=0, min_periods=1),
-        [0.0, GONE, GONE, 0.25, 0.25],
+        [0.0, 0.0, 0.0, 0.25, 0.25],
+    )
+
+
+def test_a_standard_error_divides_by_a_count_holding_the_infinity() raises:
+    """pandas writes `sem` as the spread over the root of `count`, and `count`
+    reads the column before its infinities are made missing. So the window
+    `[1, inf, 2]` is the spread of one and two over the root of three."""
+    var reaching = column([1.0, Float64.MAX, 2.0, 3.0, 4.0, 5.0])
+    var half = sqrt(0.5) / sqrt(3.0)
+    var whole = 1.0 / sqrt(3.0)
+    assert_near(
+        rolled(reaching, "sem", 3, min_periods=1),
+        [GONE, GONE, half, half, whole, whole],
+        "the spread of the finite rows over the root of every row",
     )
 
 
@@ -788,15 +796,9 @@ def test_a_shape_counts_values_and_steps_over_the_missing_rows() raises:
     )
 
 
-def test_a_shape_over_a_window_holding_an_infinity_is_not_a_number() raises:
-    """The same argument as the spread, one power further along.
-
-    The mean of a set holding an infinity is an infinity and every deviation
-    from it is an infinity minus an infinity, so there is no shape there.
-    pandas had already replaced the infinity with a missing value, so its
-    window over the rows either side answers their skewness, and this refuses.
-    The rows after the infinity has left come back, which is what the count to
-    one side is for.
+def test_a_shape_over_a_window_holding_an_infinity_reads_the_rest() raises:
+    """The same rule as the spread. The infinity is a missing row, so every
+    window of three holding it has two values and answers NaN, as pandas does.
     """
     var series = column(
         [1.0, Float64.MAX * 2.0, 2.0, 3.0, 4.0, 5.0],
@@ -804,7 +806,7 @@ def test_a_shape_over_a_window_holding_an_infinity_is_not_a_number() raises:
     assert_rows(
         rolled(series, "skew", 3),
         [GONE, GONE, GONE, GONE, 0.0, 0.0],
-        "and it recovers once the infinity is out of the window",
+        "and it answers once the infinity is out of the window",
     )
 
 

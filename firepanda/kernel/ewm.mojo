@@ -84,23 +84,19 @@ the ten rows by one unit in the last place. It is a fact about a compiler and no
 about pandas, so this file does not chase it, and the gap is four orders of
 magnitude inside the tightest tolerance the conformance board applies.
 
-## An infinity never leaves this window
+## An infinity is a missing row
 
 pandas replaces every infinity in a column with a missing value before any
 window kernel sees it, which document 31 section 3 records and which applies
-here too, since `ExponentialMovingWindow` is a `BaseWindow`. Here an infinity is
-a value. The difference from the rolling side is that a rolling window
-eventually drops the row that carried it and recovers, and this one never drops
-a row, so an infinity is carried to the bottom of the column.
+here too, since `ExponentialMovingWindow` is a `BaseWindow`. The rolling side
+does the same in `drop_infinities`, and so does this one, so an infinity takes
+part in the decay exactly as a NaN would and is never carried to the bottom of
+the column.
 
-One of each sign is the case worth naming. The fold reaches `inf` plus `-inf`,
-the carried value becomes a NaN, and the test at the top of the loop for whether
-the recurrence has started is `weighted == weighted`, which is pandas' own
-sentinel and is copied. So a cancelled infinity reads as nothing having arrived
-yet and the next value starts the recurrence again. The conflation is only
-reachable through an infinity, because a NaN in the data is turned into a
-missing row before it reaches the fold, and keeping the sentinel is what makes
-the two engines agree again from the row after the cancellation.
+The test at the top of the loop for whether the recurrence has started is
+`weighted == weighted`, which is pandas' own sentinel and is copied. With no
+infinity in the fold a NaN cannot arise there, so the sentinel only ever reads
+the start of the column.
 
 ## The variance carries two weight totals and a correction
 
@@ -139,6 +135,7 @@ from firepanda.dtype.logical import LogicalType
 
 from .cast import cast_any
 from .nulls import present_bitmap_any
+from .window import drop_infinities
 
 comptime EWM_MEAN = 0
 """Operation code for the exponentially weighted mean."""
@@ -380,6 +377,8 @@ def ewm_agg(col: AnyArray, op: EwmOp, spec: EwmSpec) raises -> AnyArray:
         col, DType.float64
     )
     var src = wide.unsafe_ptr[DType.float64]()
+    if col.dtype().is_floating_point():
+        _ = drop_infinities(src, present, rows)
     if op.spreads():
         return AnyArray(_spread(src, present, rows, spec, op == EwmOp.STD))
     return AnyArray(_weighted(src, present, rows, spec, op == EwmOp.SUM))

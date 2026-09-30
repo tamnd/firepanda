@@ -469,31 +469,22 @@ def test_the_four_reductions_are_named_after_the_pandas_methods() raises:
         _ = ewm_named("median")
 
 
-def test_an_infinity_is_carried_to_the_bottom_of_the_column() raises:
-    """This window never drops a row, so there is nothing to recover from.
-
-    A rolling window loses an infinity and gets the column back once the row
-    that carried it has left. Here every row stays in the window forever and its
-    weight only shrinks, so the weighted average of an infinity and a finite
-    number is that infinity however far down the column it is asked.
+def test_an_infinity_is_a_missing_row() raises:
+    """pandas turns every infinity into a missing value before the decay reads
+    the column, since `ExponentialMovingWindow` is a `BaseWindow`, and so does
+    this. The infinity takes a slot in the decay the way a NaN does.
     """
     var values: List[Float64] = [1.0, inf[DType.float64](), 2.0, 3.0, 4.0]
     var got = rows(column(values).ewm(EwmOp.MEAN, spec(0.3, True, False)))
     assert_equal(got[0], 1.0)
-    assert_true(isinf(got[1]) and got[1] > 0.0)
-    assert_true(isinf(got[4]) and got[4] > 0.0)
+    assert_equal(got[1], 1.0, "the infinity is not a value")
+    assert_near(got[2], 1.6711409395973154)
+    assert_near(got[4], 3.012262869840747)
 
 
-def test_a_cancelled_infinity_starts_the_recurrence_again() raises:
-    """The one place a NaN means two things, and it is pandas' sentinel.
-
-    Folding a positive infinity against a negative one gives a NaN, and the test
-    for whether the recurrence has started is whether the carried value equals
-    itself. So the row after the cancellation starts again from its own value,
-    which is what pandas' kernel would do if pandas let an infinity reach it.
-    The conflation is only reachable this way, because a NaN in the data is read
-    as a missing row before it ever reaches the fold.
-    """
+def test_infinities_of_both_signs_before_any_value_are_nothing() raises:
+    """Two infinities are two missing rows, so the decay starts at the first
+    finite value, which is pandas' answer too."""
     var values: List[Float64] = [
         inf[DType.float64](),
         -inf[DType.float64](),
@@ -501,7 +492,7 @@ def test_a_cancelled_infinity_starts_the_recurrence_again() raises:
         7.0,
     ]
     var got = rows(column(values).ewm(EwmOp.MEAN, spec(0.3, True, False)))
-    assert_true(isinf(got[0]) and got[0] > 0.0)
+    assert_true(isnan(got[0]))
     assert_true(isnan(got[1]))
     assert_equal(got[2], 5.0)
     assert_near(got[3], (0.7 * 5.0 + 1.0 * 7.0) / 1.7)
