@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: running scans across the rows of a frame
+
+`cumsum`, `cumprod`, `cummax` and `cummin` take `axis=1`, run as pandas runs them on the frame turned on its side, where they were refused before. An object column is scanned in Python's own arithmetic, with a gap passed over as the value that leaves the scan where it was, so flags beside numbers scan as pandas scans them.
+
 ### Added: SET, RESET and PRAGMA, with default_order and default_null_order
 
 `SET`, `RESET` and `PRAGMA` now run. A setting that changes how a query runs and not what it answers, such as `threads`, `memory_limit` or the profiler, is accepted and remembered, so a script that sets one runs as it does in DuckDB. `default_order` and `default_null_order` change what an `ORDER BY` that did not say a direction or a null placement means, in a window's and an ordered aggregate's order too, with each of DuckDB's spellings and its message for a value it does not take. A setting that would change an answer and is not held, such as `TimeZone`, is refused by name rather than accepted and dropped.
