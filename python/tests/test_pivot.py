@@ -35,6 +35,11 @@ def base(m: ModuleType) -> Any:
     )
 
 
+def gappy(m: ModuleType) -> Any:
+    """`base` with gaps in `w`, which the totals leave out and the body keeps."""
+    return base(m).assign(w=[1.5, None, 3.5, None, 5.5])
+
+
 def twice(m: ModuleType) -> Any:
     """Every row of `base` twice, so each pair has two rows."""
     return m.concat([base(m), base(m)])
@@ -84,6 +89,20 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: twice(m).pivot_table(
         index="r", columns="c", values="w", aggfunc=lambda s: s.sum() / 2
     ),
+    lambda m: base(m).pivot_table(index="r", values=["w", "v"], aggfunc="sum"),
+    lambda m: base(m).pivot_table(index="r", values=["w", "v"], aggfunc="sum", sort=False),
+    lambda m: base(m).pivot_table(index="r", columns="c", values="v", margins=True),
+    lambda m: twice(m).pivot_table(
+        index="r", columns="c", values="v", aggfunc="sum", fill_value=0, margins=True
+    ),
+    lambda m: gappy(m).pivot_table(
+        index="r", columns="c", values="w", aggfunc="count", margins=True, margins_name="T"
+    ),
+    lambda m: gappy(m).pivot_table(index="r", values=["v", "w"], aggfunc="sum", margins=True),
+    lambda m: gappy(m).pivot_table(index="r", values="w", margins=True, sort=False),
+    lambda m: gappy(m).pivot_table(index="r", values="w"),
+    lambda m: gappy(m).pivot_table(index="r", columns="c", values="w"),
+    lambda m: gappy(m).pivot_table(index="r", values="w", dropna=False),
 ]
 
 
@@ -111,7 +130,11 @@ def test_a_repeated_pair_is_pandas_mistake(firepanda: ModuleType) -> None:
     [
         lambda m: base(m).pivot(index="r", columns="c"),
         lambda m: base(m).pivot(index="r", columns="c", values=["v", "w"]),
-        lambda m: base(m).pivot_table(index="r", columns="c", values="v", margins=True),
+        lambda m: (
+            base(m)
+            .assign(r=[1, 2, 1, 2, 3])
+            .pivot_table(index="r", columns="c", values="v", margins=True)
+        ),
         lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc=["sum"]),
         lambda m: base(m).pivot_table(index="r", columns="c", values=["v", "w"]),
     ],
@@ -119,7 +142,7 @@ def test_a_repeated_pair_is_pandas_mistake(firepanda: ModuleType) -> None:
 def test_what_pandas_labels_with_levels_or_numbers_is_refused(
     firepanda: ModuleType, build: Callable[[Any], Any]
 ) -> None:
-    """A MultiIndex, margins and columns named by numbers are not firepanda's."""
+    """A MultiIndex, totals beside numbers and columns named by numbers are not firepanda's."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 
