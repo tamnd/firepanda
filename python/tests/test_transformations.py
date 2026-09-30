@@ -259,7 +259,6 @@ def test_an_empty_column_transforms_to_an_empty_column(firepanda: ModuleType) ->
         ("Series", "shift", {"periods": [1, 2]}, "single number"),
         ("Series", "shift", {"suffix": "_x"}, "suffix"),
         ("Series", "pct_change", {"fill_method": "pad"}, "fill_method"),
-        ("DataFrame", "rank", {"axis": 1}, "axis=1"),
     ],
 )
 def test_a_declared_argument_that_is_not_implemented_refuses(

@@ -169,10 +169,12 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     assert str(mine.value).split("\n")[0] == str(theirs.value).split("\n")[0]
 
 
-def test_a_rank_across_a_row_is_refused(firepanda: ModuleType) -> None:
-    """Refused by name rather than answered down the columns."""
-    with pytest.raises(NotImplementedError):
-        firepanda.DataFrame(FRAME).rank(axis=1)
+def test_a_rank_across_a_row_is_pandas(firepanda: ModuleType) -> None:
+    """Ranked across each row, as pandas ranks the frame turned on its side."""
+    import pandas as pd
+
+    frame = {"a": [1, 2], "b": [3, 1], "c": [5, 6]}
+    assert repr(firepanda.DataFrame(frame).rank(axis=1)) == repr(pd.DataFrame(frame).rank(axis=1))
 
 
 OWNERS: list[Callable[[Any], Any]] = [

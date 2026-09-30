@@ -2340,7 +2340,7 @@ def _transformations(py: str) -> tuple[Member, ...]:
             signature=(
                 "periods: int = 1, fill_method: Any = None, freq: Any = None, **kwargs: Any"
             ),
-            body="self._pct_change(periods, fill_method, freq)",
+            body="self._pct_change(periods, fill_method, freq, **kwargs)",
             doc="The fractional change between each row and the one that many rows before it.",
             returns=gives,
         )

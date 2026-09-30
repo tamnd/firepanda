@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: rank, shift, diff, pct_change and fills across the rows of a frame
+
+`rank`, `ffill`, `bfill` and `interpolate` take `axis=1`, worked out down the frame turned on its side as pandas does. `shift(axis=1)` moves whole columns along, each keeping its type, and `diff` and `pct_change` along `axis=1` are the frame against those shifted columns. `pct_change(axis=1)` used to answer down the columns without a word, and now answers across the rows.
+
 ### Added: running scans across the rows of a frame
 
 `cumsum`, `cumprod`, `cummax` and `cummin` take `axis=1`, run as pandas runs them on the frame turned on its side, where they were refused before. An object column is scanned in Python's own arithmetic, with a gap passed over as the value that leaves the scan where it was, so flags beside numbers scan as pandas scans them.

@@ -6679,6 +6679,28 @@ def _replacing(column: Any, old: Any, new: Any, printed: str, labels: list[Any])
     return kept, _fallback(printed, new, column if printed == "category" else None)
 
 
+def _columns_shifted(frame: Any, periods: int, fill_value: Any) -> Any:
+    """A frame with its columns moved along by `periods`, as pandas shifts along `axis=1`.
+
+    Each column takes the values of the column `periods` before it and keeps
+    their type, and a column with nothing to take is NaN, or `fill_value` when
+    one is given.
+    """
+    from ._frame import DataFrame, Series
+
+    width, height = frame.shape[1], len(frame)
+    parts = {}
+    for at in range(width):
+        source = at - periods
+        if 0 <= source < width:
+            parts[at] = frame.iloc[:, source].reset_index(drop=True)
+        elif fill_value is NO_DEFAULT:
+            parts[at] = Series([math.nan] * height, dtype="float64")
+        else:
+            parts[at] = Series([fill_value] * height)
+    return DataFrame(parts).set_axis(frame.index, axis=0).set_axis(frame.columns, axis=1)
+
+
 def _transforming_axis(axis: Any, owner: str) -> None:
     """Refuses a transformation along the second axis.
 
@@ -13084,9 +13106,11 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        _transforming_axis(axis, "DataFrame")
         _rank_options(method, na_option)
         read = self._numeric_part() if numeric_only else self
+        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            # pandas ranks across the rows by ranking down the frame turned on its side.
+            return read.T.rank(0, method, False, na_option, ascending, pct).T
         try:
             return DataFrame._wrap(
                 read._inner.group_rank([], method, bool(ascending), na_option, bool(pct), True)
@@ -15087,8 +15111,13 @@ class DataFrameMixin(_Carries):
         left alone here too, and the first column pandas refuses stops the call.
         """
         keep = _flag("inplace", inplace)
-        _transforming_axis(axis, "DataFrame")
         frame = cast("DataFrame", self)
+        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            # pandas fills across the rows by filling down the frame turned on its side.
+            turned = frame.T._interpolate(
+                method, 0, limit, False, limit_direction, limit_area, kwargs
+            )
+            return _kept(frame, turned.T, keep)
         if frame.empty:
             return _kept(frame, frame.copy(), keep)
         direction = _interpolation_direction(method, limit_direction)
@@ -15102,7 +15131,9 @@ class DataFrameMixin(_Carries):
             )
             if answer is not column:
                 changed[name] = answer
-        out = work.assign(**changed) if changed else work.copy()
+        out = work.copy()
+        for name, answer in changed.items():
+            out[name] = answer
         if work is not frame:
             out = out.set_axis(index)
         return _kept(frame, out, keep)
@@ -16046,6 +16077,10 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
+        if kind == "diff" and _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            # pandas takes the difference across the rows as the frame less its
+            # columns shifted along, which keeps whole numbers whole.
+            return self - _columns_shifted(self, periods, NO_DEFAULT)
         _transforming_axis(axis, "DataFrame")
 
         try:
@@ -16062,6 +16097,10 @@ class DataFrameMixin(_Carries):
             " outside them, needs the fill to know where the ends are and it"
             " walks the column without looking",
         )
+        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            # pandas fills across the rows by filling down the frame turned on its side.
+            filled = self.T._transformed(kind, _limit_wanted(limit), 0).T
+            return _kept(self, filled, _flag("inplace", inplace))
         return _kept(
             self, self._transformed(kind, _limit_wanted(limit), axis), _flag("inplace", inplace)
         )
@@ -16083,6 +16122,8 @@ class DataFrameMixin(_Carries):
                 "periods has to be a single number for now, because a list of them"
                 " answers a frame with one set of columns per period"
             )
+        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            return _columns_shifted(self, periods, fill_value)
         shifted = self._transformed("shift", periods, axis)
         if fill_value is NO_DEFAULT:
             if periods and len(self):
@@ -16096,10 +16137,19 @@ class DataFrameMixin(_Carries):
             shifted[name] = self[name]._shift(periods, None, 0, fill_value, None)
         return shifted
 
-    def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> DataFrame:
-        """The fractional change between each row and the one before it."""
+    def _pct_change(
+        self, periods: int, fill_method: Any, freq: Any, axis: Any = 0, **kwargs: Any
+    ) -> DataFrame:
+        """The fractional change between each row and the one before it.
+
+        Across the rows it is each column over the column `periods` before it,
+        less one, which is how pandas works it out along that axis.
+        """
         _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
         _refuse("freq", freq, "it needs the offset vocabulary, which is the resampling milestone")
+        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            fill_value = kwargs.pop("fill_value", NO_DEFAULT)
+            return self / _columns_shifted(self, periods, fill_value) - 1
         return self._transformed("pct_change", periods)
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> DataFrame:
@@ -19494,10 +19544,13 @@ class SeriesMixin(_Carries):
             joined = concat(pieces, ignore_index=True)
         return joined.set_axis(self.index)
 
-    def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> Series:
+    def _pct_change(
+        self, periods: int, fill_method: Any, freq: Any, axis: Any = 0, **kwargs: Any
+    ) -> Series:
         """The fractional change between each row and the one before it."""
         _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
         _refuse("freq", freq, "it needs the offset vocabulary, which is the resampling milestone")
+        _axis_number(axis, "Series", 0, (0,))
         return self._transformed("pct_change", periods)
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> Series:
