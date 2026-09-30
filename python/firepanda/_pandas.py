@@ -22062,9 +22062,7 @@ class StringMixin:
         The one name on this accessor whose answer is a frame, and the only one
         of its arguments that needed a decision is `expand`. pandas defaults it
         to True and answers a frame, and `expand=False` answers one column of
-        three element tuples. There is no column type here that holds a tuple,
-        so the second is refused rather than approximated, and the refusal says
-        which of the two shapes is missing rather than saying the method is.
+        three element tuples, an object column, with a missing row missing.
 
         The separator is checked here because pandas checks it here, and both
         refusals are pandas' own sentences. An empty separator is a `ValueError`
@@ -22087,11 +22085,14 @@ class StringMixin:
         if sep == "":
             raise InvalidArgumentError("firepanda:value: empty separator")
         if not expand:
-            raise UnsupportedError(
-                f"firepanda:unsupported: str.{name} with expand=False answers a column of"
-                " tuples and there is no column type for one yet, so only expand=True is"
-                " written"
-            )
+            from ._frame import Series
+
+            cut = str.rpartition if from_right else str.partition
+            held = _held_values(self._series._inner)
+            rows = [math.nan if row is None else cut(row, sep) for row in held]
+            if all(row is math.nan for row in rows):
+                return self._series.copy()
+            return Series(rows, index=self._series.index, name=self._series.name)
         try:
             parts = self._series._inner.string_partition(sep, from_right)
         except Exception as error:
@@ -25566,6 +25567,11 @@ class IndexStrings:
             return answer
         if _word(answer.dtype) in ("bool", "boolean"):
             return answer.to_numpy()
+        if _object_kind(answer._inner) == "object":
+            raise NotImplementedError(
+                f"str.{name}: the answer is an index of objects in pandas, which firepanda"
+                " does not hold"
+            )
         return Index(answer.rename(self._index.name))
 
 

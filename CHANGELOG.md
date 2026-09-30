@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `str.partition` and `str.rpartition` with `expand=False`
+
+With `expand=False` the pair now answers one object column of three element tuples, with a missing row left missing and the index and name kept, as pandas does, where it used to refuse. On an index pandas answers an index of tuples, which firepanda does not hold, so the index accessor now refuses any answer that is a column of objects by name rather than handing back an index of mangled text.
+
 ### Changed: A list of integers with a gap reads as float64
 
 `Series`, `Index` and `DataFrame` built from a list of integers with a None in it are float64 with a NaN, as in pandas, rather than int64 with a hole, and so are the same lists given to `DataFrame.from_dict`, `DataFrame.from_records`, `assign` and a column set with `[]`. A mapping read as a series widens the same way when a label finds no value. Only lists that come from outside firepanda widen, since its own layer builds integer columns with gaps on purpose. A float gap stays a null, and flags and text keep their types.
