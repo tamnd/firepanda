@@ -12517,6 +12517,8 @@ class DataFrameMixin(_Carries):
                 whose values are not text, and for a list of value columns of
                 several types that pandas holds as objects.
         """
+        if _several(columns):
+            return _pivot_several(self, columns, index, values)
         across = _one_key(columns, "columns", "pivot")
         if values is NO_DEFAULT or isinstance(values, list | tuple):
             return _pivot_values(self, across, index, values)
@@ -12567,6 +12569,9 @@ class DataFrameMixin(_Carries):
         levelled = isinstance(aggfunc, list | tuple | dict) or (
             columns is not None and (values is None or isinstance(values, list | tuple))
         )
+        if _several(columns) and dropna and not margins and not isinstance(aggfunc, list | dict):
+            rest = (fill_value, observed, sort)
+            return _pivot_table_several(self, values, index, columns, aggfunc, rest, kwargs)
         if margins:
             if isinstance(index, list | tuple) and len(index) == 1:
                 index = index[0]
@@ -13093,6 +13098,8 @@ class DataFrameMixin(_Carries):
         # not going to look at a single value in it.
         types = dict(zip(held, self._inner.dtypes(), strict=True))
         gaps = dict(zip(held, self._inner.null_counts(), strict=True))
+        # A name of several levels is shown as a tuple and held as text.
+        keys = dict(zip(held, self._inner.names(), strict=True))
         answer = self.copy()
         labels = None
         for name, one in wanted.items():
@@ -13102,7 +13109,7 @@ class DataFrameMixin(_Carries):
             # bits call complete is asked again, and that question is the one
             # place here that reads values before it knows there is work.
             if gaps[name] == 0 and (
-                types[name] not in _FLOATING or answer._inner.column(name).null_count() == 0
+                types[name] not in _FLOATING or answer._inner.column(keys[name]).null_count() == 0
             ):
                 continue
             # A category column is the one type that has to be looked at rather
@@ -13111,19 +13118,19 @@ class DataFrameMixin(_Carries):
             # a column. It pays only when there is a gap in that column.
             looked = None
             if types[name] == "category":
-                looked = Series._wrap(answer._inner.column(name))
+                looked = Series._wrap(answer._inner.column(keys[name]))
             if _is_object(one):
                 # The labels are read once and only when a fallback that
                 # carries rows actually arrives, since a scalar fill never asks
                 # where the rows are. Which rows are missing is a question per
                 # column, so that one is asked per column.
                 labels = self._inner.labels().to_list() if labels is None else labels
-                gone = answer._inner.column(name).transform("isna", 0)
+                gone = answer._inner.column(keys[name]).transform("isna", 0)
                 filled = _fill_column(types[name], one, labels, gone, looked)
             else:
                 filled = _fallback(types[name], one, looked)
             try:
-                answer = DataFrame._wrap(answer._inner.fill_null(name, filled))
+                answer = DataFrame._wrap(answer._inner.fill_null(keys[name], filled))
             except Exception as error:
                 raise translate(error) from None
         return _kept(self, answer, inplace)
@@ -17088,7 +17095,7 @@ class DataFrameMixin(_Carries):
         if isinstance(dtype, dict):
             present = set(self._inner.names())
             for one in dtype:
-                if not isinstance(one, (str, int, float)) or _names.held(one) not in present:
+                if not isinstance(one, (str, int, float, tuple)) or _names.held(one) not in present:
                     raise ColumnNotFoundError(
                         "Only a column name can be used for the key in a dtype"
                         f" mappings argument. '{one}' not found in columns."
@@ -32922,6 +32929,63 @@ def _downcast(values: Any, downcast: str) -> Any:
         if values.dtype == wanted:
             break
     return values
+
+
+def _several(key: Any) -> bool:
+    """Whether a `pivot` or `pivot_table` key names more than one column."""
+    return isinstance(key, list | tuple) and len(key) > 1
+
+
+def _pivot_several(frame: Any, columns: Any, index: Any, values: Any) -> Any:
+    """`pivot` over several columns keys, which is pandas' own recipe.
+
+    The rows are labelled by the index keys, or by the row labels when there
+    are none, and the columns keys beside them, and the columns keys are then
+    unstacked into levels of the answer's columns.
+    """
+    across = list(columns)
+    if index is NO_DEFAULT:
+        indexed = frame.set_index(across, append=True)
+        indexed.index = indexed.index.set_names([frame.index.name, *across])
+    else:
+        down = list(index) if isinstance(index, list | tuple) else [index]
+        indexed = frame.set_index(down + across)
+    if values is not NO_DEFAULT:
+        indexed = indexed[list(values) if isinstance(values, list | tuple) else values]
+    return indexed.unstack(across)
+
+
+def _pivot_table_several(
+    frame: Any, values: Any, index: Any, columns: Any, aggfunc: Any, rest: tuple, kwargs: Any
+) -> Any:
+    """`pivot_table` over several columns keys, which is pandas' own recipe.
+
+    The aggregates are taken over every row key and columns key together, the
+    columns keys are unstacked into levels of the answer's columns, and with
+    no row keys the answer is turned so the value columns are its rows.
+    """
+    fill_value, observed, sort = rest
+    across = list(columns)
+    down = [] if index is None else list(index) if isinstance(index, list | tuple) else [index]
+    keys = down + across
+    several = isinstance(values, list | tuple)
+    if values is None:
+        names = [name for name in _shown_names(frame) if name not in keys]
+    else:
+        names = list(values) if several else [values]
+    grouped = frame.groupby(keys, observed=observed, sort=sort)[names]
+    table = grouped.agg(aggfunc, **kwargs).dropna(how="all")
+    if down:
+        table = table.unstack(across, fill_value=fill_value)
+    if sort:
+        table = table.sort_index(axis=1)
+    if fill_value is not None:
+        table = table.fillna(fill_value)
+    if values is not None and not several and table.columns.nlevels > 1:
+        table.columns = table.columns.droplevel(0)
+    if not down:
+        table = table.T
+    return table.dropna(how="all", axis=1)
 
 
 def _one_key(key: Any, what: str, caller: str) -> Any:
