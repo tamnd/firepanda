@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: resample over periods
+
+`resample` over rows labelled by periods works the way pandas' `PeriodIndexResampler` does. Going to a coarser frequency, months to quarters or to an anchored year, each row joins the bin of the period it falls in and the bins cover every period between the first row's and the last's, counted bins such as `2Q` included, so every reduction, `ohlc`, `agg` and `groups` answer pandas' labels. Going to a finer frequency, each row lands at the start or the end of its period as `convention` says, and `asfreq`, `ffill`, `bfill` and `interpolate` fill the periods between. A reduction to an equal or finer frequency is that upsample, and one between frequencies neither of which divides the other raises IncompatibleFrequency. A `Period` built from a period of the same base frequency keeps it as it is, so `period_range` over counted frequencies such as `12h` starts where pandas starts.
+
 ### Added: an alias on a table function
 
 `FROM range(5) AS r(i)` names the relation and its column, so `r.i` and `i` both reach it, and `FROM range(3) r` names the relation while the column keeps the function's name, as in DuckDB. A column list longer than the columns the function produces is cut to them, since DuckDB drops the extra names of a table function rather than refusing them, and `unnest([4, 5]) u(x)` names its column the same way. Two aliased table functions join like any two tables.

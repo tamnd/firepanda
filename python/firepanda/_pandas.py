@@ -23976,9 +23976,10 @@ def _resample(
 ) -> Resampler:
     """Builds the object `s.resample(...)` and `df.resample(...)` hand back.
 
-    Written rather than generated for the reason `_rolling` gives. `convention`
-    only means something for a period index, which firepanda does not have, so
-    it is checked and set aside as pandas sets it aside for timestamps, and
+    Written rather than generated for the reason `_rolling` gives. Rows
+    labelled by periods resample by `PeriodResampler`, where `convention` says
+    whether a period lands on the start or the end of the finer ones; over
+    timestamps it is checked and set aside as pandas sets it aside, and
     `group_keys` puts the bins in front of what `apply` answers.
 
     Args:
@@ -23999,10 +24000,13 @@ def _resample(
     Raises:
         InvalidArgumentError: For a `convention` pandas does not know.
     """
+    from ._period_resample import PeriodResampler, is_periods
     from ._resample import Resampler
 
     if convention not in ("start", "end", "s", "e"):
         raise InvalidArgumentError(f"Unsupported value {convention} for `convention`")
+    if on is None and level is None and is_periods(data.index):
+        return PeriodResampler(data, rule, convention, group_keys)
     return Resampler(data, rule, closed, label, on, level, origin, offset, group_keys=group_keys)
 
 
