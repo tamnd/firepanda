@@ -14920,15 +14920,13 @@ class DataFrameMixin(_Carries):
         )
         wanted, alone = _quantiles_asked(q)
         _interpolation_written(interpolation)
+        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+            # pandas takes a quantile across each row as one down the frame turned on its side.
+            read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+            return read.T._quantile(q, 0, False, interpolation, method)
         if alone and interpolation == "linear":
             return self._reduce("quantile", wanted[0], axis, True, numeric_only, 0).rename(
                 float(wanted[0])
-            )
-        if axis not in (0, "index"):
-            raise NotImplementedError(
-                "axis=1 is not supported yet with a list of quantiles or an"
-                " interpolation other than linear, because each row would be"
-                " sorted on its own"
             )
         read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
         names = read._inner.names()
