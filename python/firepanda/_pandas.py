@@ -7062,6 +7062,10 @@ def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
         return ("every",)
     if _is_numpy(key) and key.ndim == 1:
         key = key.tolist()
+    if isinstance(key, SeriesMixin) and str(key.dtype) == "boolean":
+        # A mask of flags that can be missing picks the rows it holds true
+        # for, and pandas reads a missing flag as false.
+        key = type(key)([flag is True for flag in key.tolist()], index=key.index)
     if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
         return ("mask", _aligned_mask(index, key)._inner)
     if isinstance(key, slice):
@@ -11063,7 +11067,9 @@ class DataFrameMixin(_Carries):
 
         if callable(key) and not isinstance(key, (SeriesMixin, DataFrameMixin)):
             return self[applied(key, self)]
-        if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
+        if isinstance(key, SeriesMixin) and (
+            key._inner.dtype() == "bool" or str(key.dtype) == "boolean"
+        ):
             return self.loc[key]
         if _is_numpy(key) and key.ndim == 1 and key.dtype.kind == "b":
             key = key.tolist()
@@ -11799,9 +11805,11 @@ class DataFrameMixin(_Carries):
 
     def mode(self, axis: Any = 0, numeric_only: bool = False, dropna: bool = True) -> DataFrame:
         """The most common values of each column, NaN where a column has fewer."""
-        if _align_axis(axis, "DataFrame", (0, 1)) == 1:
-            raise NotImplementedError("mode: axis=1 is the mode of each row, not done yet")
         frame = self.select_dtypes("number") if numeric_only else self
+        if _align_axis(axis, "DataFrame", (0, 1)) == 1:
+            # The most common values of each row are those of each column of the
+            # frame turned on its side, turned back.
+            return frame.T.mode(0, False, dropna).T
         pieces = {name: frame[name].mode(dropna=dropna).tolist() for name in _shown_names(frame)}
         return type(self)(_padded(pieces))
 
@@ -11865,7 +11873,11 @@ class DataFrameMixin(_Carries):
             index=self._inner.names(),
         )
         if len(types) == 1 and labels:
-            answer = answer.astype(types.pop())
+            kind = types.pop()
+            if kind == "string" and all(str(self[name].dtype) == "str" for name in names):
+                # Text with NaN for its gaps stays that text, as in pandas.
+                kind = "str"
+            answer = answer.astype(kind)
         return answer
 
     def update(
