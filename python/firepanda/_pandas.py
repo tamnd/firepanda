@@ -6701,6 +6701,29 @@ def _columns_shifted(frame: Any, periods: int, fill_value: Any) -> Any:
     return DataFrame(parts).set_axis(frame.index, axis=0).set_axis(frame.columns, axis=1)
 
 
+def _no_repeated_columns(columns: Any) -> None:
+    """Refuses column labels that repeat, rather than keeping one of each.
+
+    pandas builds a frame with two columns under one name here. A firepanda
+    frame names each column once, and building it anyway would quietly lose
+    all but one of them.
+
+    Raises:
+        NotImplementedError: When a column label is there twice.
+    """
+    if columns is None or isinstance(columns, str) or not _list_like(columns):
+        return
+    labels = list(columns)
+    try:
+        repeated = len(set(labels)) != len(labels)
+    except TypeError:
+        return
+    if repeated:
+        raise NotImplementedError(
+            "DataFrame: the column labels repeat, and a firepanda frame names each column once"
+        )
+
+
 def _transforming_axis(axis: Any, owner: str) -> None:
     """Refuses a transformation along the second axis.
 
@@ -10603,6 +10626,7 @@ class DataFrameMixin(_Carries):
         """
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         index = _written_index(index)
+        _no_repeated_columns(columns)
         listed = set()
         if isinstance(data, collections.abc.Mapping):
             if dtype is None and _from_outside():
@@ -15173,11 +15197,12 @@ class DataFrameMixin(_Carries):
 
         inplace = _flag("inplace", inplace)
         if verify_integrity is not NO_DEFAULT and verify_integrity:
-            raise NotImplementedError(
-                "verify_integrity=True is not supported yet, because checking"
-                " that the new labels are unique is a pass over them that"
-                " nothing else here needs"
-            )
+            answer = self._set_index(keys, drop, append, False, NO_DEFAULT)
+            labels = answer.index
+            if not labels.is_unique:
+                repeated = labels[labels.duplicated()].unique()
+                raise InvalidArgumentError(f"Index has duplicate keys: {repeated}")
+            return _settled(self, answer, inplace)
         wanted = list(keys) if isinstance(keys, (list, tuple)) else [keys]
         for key in wanted:
             if isinstance(key, range):
@@ -18922,12 +18947,15 @@ class SeriesMixin(_Carries):
 
         A category column counts every category, the ones that never occur
         included, in the order of the categories, which `_category_counts`
-        explains. `bins` is refused.
+        explains. `bins` counts the values in each of that many equal bins, or
+        between each pair of edges, as the categories `cut` makes, the lowest
+        edge included. pandas leaves the gaps out of the bins whatever `dropna`
+        says, and the bins unnamed.
         """
         if bins is not None:
-            raise UnsupportedError(
-                "value_counts with bins= is not supported yet, because it needs cut"
-            )
+            binned = cut(self, bins, include_lowest=True)
+            counted = binned.value_counts(normalize=normalize, sort=sort, ascending=ascending)
+            return counted.rename_axis(None)
         if self._inner.dtype() == "category":
             counts = self._category_counts(dropna)
         else:

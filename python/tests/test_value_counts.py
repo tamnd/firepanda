@@ -70,7 +70,21 @@ def test_mode(firepanda: ModuleType, build: Any, dropna: bool) -> None:
     assert got.name == want.name
 
 
-def test_bins_are_refused(firepanda: ModuleType) -> None:
-    """They need `cut`, which firepanda has not written."""
-    with pytest.raises(NotImplementedError):
-        firepanda.Series([1.0, 2.0]).value_counts(bins=2)
+BINNED: dict[str, Callable[[Any], Any]] = {
+    "bins": lambda lib: lib.Series([1, 2, 2, 3, 7, 9, 10], name="v").value_counts(bins=3),
+    "edges": lambda lib: lib.Series([1, 2, 2, 3, 7, 9, 10]).value_counts(bins=[0, 5, 10]),
+    "normalize": lambda lib: lib.Series([1, 2, 2, 3, 7]).value_counts(bins=2, normalize=True),
+    "unsorted": lambda lib: lib.Series([1, 2, 2, 3, 7, 9]).value_counts(bins=3, sort=False),
+    "ascending": lambda lib: lib.Series([1, 2, 2, 3, 7, 9]).value_counts(bins=3, ascending=True),
+    "empty bin": lambda lib: lib.Series([1, 2, 2, 3, 7]).value_counts(bins=[0, 1, 5, 20, 30]),
+    "gaps left out": lambda lib: lib.Series([1.0, None, 4.0, 4.5, 8.0]).value_counts(
+        bins=2, dropna=False
+    ),
+}
+
+
+@pytest.mark.parametrize("make", BINNED.values(), ids=BINNED.keys())
+def test_bins_are_counted_as_pandas_counts_them(firepanda: ModuleType, make: Any) -> None:
+    import pandas as pd
+
+    assert repr(make(firepanda)) == repr(make(pd))
