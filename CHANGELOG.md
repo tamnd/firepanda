@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: set_index takes labels as well as column names
+
+`set_index` now takes an index, a column, an array, an iterator or a list as the new row labels, read by position as pandas reads them, alone or beside the names of columns and with `append`. A lone index becomes the row labels whole, so `df.set_index(pd.date_range(...))` keeps its step and can be resampled or rolled by time. Labels of another length are refused with pandas' sentence, and a range is looked up among the columns as pandas does.
+
 ### Changed: Windows refuse a column that is not numbers with pandas' DataError
 
 A rolling, expanding or exponentially weighted reduction over text, instants or categories now raises `firepanda.errors.DataError` with pandas' sentence, `No numeric types to aggregate` on a column and `Cannot aggregate non-numeric type: <type>` on a frame, instead of a `DTypeError` naming the column. `count` over such a column now counts the values present in each window, as pandas does.
