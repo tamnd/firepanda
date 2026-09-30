@@ -19710,6 +19710,7 @@ def _grouped(
     keys = GroupByMixin._keys(frame, names, None)
     masks = {name: _masked.masked_of(frame[name]) for name in keys}
     masks = {name: kind for name, kind in masks.items() if kind is not None}
+    values = _masked_values(frame, keys)
     frame = _unmasked_frame(frame)
     frame, categories = _category_keys(frame, keys)
     if dropna:
@@ -19720,7 +19721,7 @@ def _grouped(
             "observed=False over several keys makes a group of every mix of their"
             " categories, which is labelled by a MultiIndex"
         )
-    showing = shown or categories or masks
+    showing = shown or categories or masks or values
     kind = _key_showing(DataFrameGroupBy) if showing else DataFrameGroupBy
     grouped = kind(frame, keys, as_index, sort, dropna)
     grouped._single = single
@@ -19730,8 +19731,126 @@ def _grouped(
         grouped._categories = categories
         grouped._every = every
         grouped._masks = masks
+        grouped._values = values
         grouped._busy = False
     return grouped
+
+
+def _masked_values(frame: DataFrame, keys: list[str]) -> dict[Any, str]:
+    """Each column other than a key whose type is masked, and that type."""
+    found = {}
+    for name in frame._inner.names():
+        if name in keys:
+            continue
+        kind = _masked.masked_of(frame[name])
+        if kind is not None:
+            found[name] = kind
+    return found
+
+
+_MASKED_SUMS = frozenset({"sum", "prod", "cumsum", "cumprod"})
+_MASKED_FLOATS = frozenset(
+    {"mean", "median", "std", "var", "sem", "quantile", "skew", "kurt", "pct_change", "rank"}
+)
+_MASKED_CALLED = "a function"
+"""What a column made by a function handed to `agg` or `transform` counts as, keeping its type."""
+_MASKED_SKIPPED = frozenset(
+    {"nunique", "idxmax", "idxmin", "cumcount", "ngroup", "value_counts", "apply", "corr", "cov"}
+)
+
+
+def _masked_answer(op: Any, source: str) -> str | None:
+    """The masked type pandas answers `op` with over a column of type `source`, or None.
+
+    Sums of flags count, so they are whole numbers. The statistics are floats,
+    kept at 32 bits for a 32 bit float column, counts are `Int64`, `any` and
+    `all` are flags, and whatever picks or moves values keeps the column's type.
+    """
+    if not isinstance(op, str) or op in _MASKED_SKIPPED:
+        return None
+    if op in _MASKED_SUMS:
+        return "Int64" if source == "boolean" else source
+    if op in _MASKED_FLOATS:
+        return "Float32" if source == "Float32" and op != "rank" else "Float64"
+    if op == "describe":
+        return "Float64"
+    if op in ("count", "size"):
+        return "Int64"
+    if op in ("any", "all"):
+        return "boolean"
+    return source
+
+
+def _masked_op(name: str, args: tuple[Any, ...], kwargs: dict[str, Any], column: Any) -> Any:
+    """The operation that made one column of an answer, read through `agg` and `transform`."""
+    if name not in ("agg", "aggregate", "transform"):
+        return name
+    func = args[0] if args else kwargs.get("func")
+    if isinstance(func, dict):
+        func = func.get(column[0] if isinstance(column, tuple) else column)
+    if isinstance(func, (list, tuple)) and isinstance(column, tuple):
+        func = column[-1]
+    if callable(func) and not isinstance(func, (list, tuple, dict)):
+        return _MASKED_CALLED
+    return func if isinstance(func, str) else None
+
+
+def _one_masked(column: Any, op: Any, source: str) -> Any:
+    """One answer column in the masked type `op` gives, or as it is when it cannot be."""
+    target = _masked_answer(op, source)
+    if target is None or _masked.masked_of(column):
+        return column
+    kind = _word(column.dtype)
+    if source == "string":
+        # Text keeps its type only where the answer is text; counts of it stay plain.
+        if kind not in ("string", "str") or target != "string":
+            return column
+    elif kind in ("string", "str", "object"):
+        # A column of nothing but gaps comes back as text, and flags beside a gap as objects.
+        held = [value for value in column.tolist() if not _objects.is_gap(value)]
+        if not all(isinstance(value, (bool, int, float)) for value in held):
+            return column
+    elif not kind.startswith(("int", "uint", "float", "bool")):
+        return column
+    try:
+        return _masked.as_masked(column, target)
+    except (TypeError, ValueError, OverflowError):
+        return column
+
+
+def _values_back(
+    owner: Any, name: str, args: tuple[Any, ...], kwargs: dict[str, Any], answer: Any
+) -> Any:
+    """`answer` with each column grouped from a masked column back in the type pandas gives."""
+    values = getattr(owner, "_values", None)
+    if not values:
+        return answer
+    if isinstance(answer, SeriesMixin):
+        if not isinstance(answer.name, (str, int)) or answer.name not in values:
+            return answer
+        op = _masked_op(name, args, kwargs, answer.name)
+        return _one_masked(answer, op, values[answer.name])
+    if not isinstance(answer, DataFrameMixin):
+        return answer
+    changed = False
+    selected = getattr(owner, "_column", None)
+    for column in list(answer.columns):
+        base = column[0] if isinstance(column, tuple) else column
+        if isinstance(selected, (str, int)) and selected in values:
+            # The columns of one selected column's answer are named for what made them.
+            base, column_op = selected, (selected, column)
+        elif isinstance(base, (str, int)) and base in values:
+            column_op = column
+        else:
+            continue
+        op = "describe" if name == "describe" else _masked_op(name, args, kwargs, column_op)
+        made = _one_masked(answer[column], op, values[base])
+        if made is not answer[column]:
+            if not changed:
+                answer = answer.copy()
+                changed = True
+            answer[column] = made
+    return answer
 
 
 def _category_keys(frame: DataFrame, keys: list[str]) -> tuple[DataFrame, dict[str, Any]]:
@@ -19940,7 +20059,7 @@ def _key_showing(base: type) -> Any:
     import inspect
 
     space: dict[str, Any] = {
-        "__slots__": ("_busy", "_categories", "_every", "_masks", "_shown"),
+        "__slots__": ("_busy", "_categories", "_every", "_masks", "_shown", "_values"),
         "__doc__": base.__doc__,
         "__module__": base.__module__,
         "__qualname__": base.__qualname__,
@@ -19975,9 +20094,13 @@ def _showing(method: Callable[..., Any], name: str) -> Callable[..., Any]:
         finally:
             self._busy = False
         if name == "__iter__":
-            return ((_key_back(self, key), _shown_as(self, group, True)) for key, group in answer)
+            return (
+                (_key_back(self, key), _shown_as(self, _values_back(self, "", (), {}, rows), True))
+                for key, rows in answer
+            )
         if self._every and name not in _KEPT_ROWS and name not in _PER_ROW:
             answer = _every_category(self, answer, _empty_fills(name, args, kwargs))
+        answer = _values_back(self, name, args, kwargs, answer)
         return _shown_as(self, answer, name in _KEPT_ROWS)
 
     return call
@@ -19991,7 +20114,10 @@ def _shown_as(owner: Any, answer: Any, rows: bool) -> Any:
     """
     shown = owner._shown
     if isinstance(answer, GroupByMixin):
-        return _rekeyed(answer, shown, owner._categories, owner._every)
+        keyed = _rekeyed(answer, shown, owner._categories, owner._every)
+        keyed._masks = owner._masks
+        keyed._values = owner._values
+        return keyed
     if isinstance(answer, DataFrameMixin | SeriesMixin):
         answer = _categories_back(owner, answer)
     if isinstance(answer, DataFrameMixin):
@@ -20037,6 +20163,7 @@ def _rekeyed(
     keyed._categories = categories or {}
     keyed._every = every
     keyed._masks = getattr(grouped, "_masks", {})
+    keyed._values = getattr(grouped, "_values", {})
     keyed._busy = False
     return keyed
 
