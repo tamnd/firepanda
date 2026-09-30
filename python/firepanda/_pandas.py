@@ -24976,21 +24976,28 @@ class GroupByMixin[Answer]:
         sorts them stably by the keys, as pandas does. `normalize` divides each
         count by its group's total.
 
-        Raises:
-            NotImplementedError: For a `dropna` that differs from the group by's,
-                since one group by drops a missing key and value together.
+        A `dropna` that differs from the group by's groups with every gap kept
+        and then drops the combinations with a gap in the keys, when the group by
+        drops those, or in the values, when `dropna` does.
         """
         from ._frame import Series
-
-        if bool(dropna) != bool(self._dropna):
-            raise NotImplementedError(
-                "value_counts with a dropna that differs from the group by's is not supported"
-                " yet, because the keys and the values are grouped together"
-            )
         from ._levels import written
 
         keys = len(self._by)
-        counts = self._frame.groupby([*self._by, *columns], sort=False, dropna=self._dropna).size()
+        together = bool(dropna) == bool(self._dropna)
+        grouped = self._frame.groupby(
+            [*self._by, *columns], sort=False, dropna=self._dropna if together else False
+        )
+        counts = grouped.size()
+        if not together:
+            parts = (slice(None, keys),) if self._dropna else (slice(keys, None),)
+            kept = [
+                at
+                for at, label in enumerate(counts.index.tolist())
+                if not any(_levels_gap(value) for part in parts for value in label[part])
+            ]
+            if len(kept) != len(counts):
+                counts = counts.take(kept)
         labels, values = counts.index.tolist(), counts.tolist()
         totals: dict[Any, int] = {}
         for label, value in zip(labels, values, strict=True):
