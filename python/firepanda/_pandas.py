@@ -14851,6 +14851,12 @@ class DataFrameMixin(_Carries):
                 " nothing else here needs"
             )
         wanted = list(keys) if isinstance(keys, (list, tuple)) else [keys]
+        for key in wanted:
+            if isinstance(key, range):
+                raise KeyError(f"None of [{key!r}] are in the columns")
+        if any(_labels_key(key) for key in wanted):
+            made = self._set_arrays(wanted, bool(drop), _flag("append", append))
+            return _settled(self, made, inplace)
         if len(wanted) != 1 or _flag("append", append):
             return _settled(self, self._set_levels(wanted, bool(drop), bool(append)), inplace)
         try:
@@ -14858,6 +14864,63 @@ class DataFrameMixin(_Carries):
             return _settled(self, DataFrame._wrap(made), inplace)
         except Exception as error:
             raise translate(error) from None
+
+    def _set_arrays(self, wanted: list[Any], drop: bool, append: bool) -> DataFrame:
+        """The frame labelled by labels handed in, an index, a column or a list, beside any columns.
+
+        pandas reads an array key by position, not by label, and names the level
+        after it: an index or a column keeps its name, and a list has none. A lone
+        index becomes the row labels whole, so its type and its step stay.
+
+        Raises:
+            InvalidArgumentError: For labels of another length than the frame, in pandas' words.
+        """
+        from ._frame import Index, Series
+        from ._multi import MultiIndex
+
+        rows = len(self)
+        wanted = [
+            list(key) if _labels_key(key) and not hasattr(key, "__len__") else key
+            for key in wanted
+        ]
+        for key in wanted:
+            if _labels_key(key):
+                given = len(key)
+                if given != rows:
+                    raise InvalidArgumentError(
+                        f"Length mismatch: Expected {rows} rows, received array of length {given}"
+                    )
+        named = [key for key in wanted if not _labels_key(key)]
+        missing = [key for key in named if key not in _shown_names(self)]
+        if missing:
+            raise KeyError(f"None of {missing} are in the columns")
+        out = self.drop(columns=named) if drop and named else self.copy()
+        if len(wanted) == 1 and not append:
+            key = wanted[0]
+            if isinstance(key, Series):
+                key = Index(key, name=key.name)
+            elif not isinstance(key, Index):
+                key = Index(key.tolist() if hasattr(key, "tolist") else list(key))
+            out.index = key
+            return out
+        columns, names = [], []
+        if append:
+            held = self.index
+            if isinstance(held, MultiIndex):
+                columns += [held.get_level_values(n).tolist() for n in range(held.nlevels)]
+                names += held.names
+            else:
+                columns.append(held.tolist())
+                names.append(held.name)
+        for key in wanted:
+            if _labels_key(key):
+                columns.append(key.tolist() if hasattr(key, "tolist") else list(key))
+                names.append(getattr(key, "name", None))
+            else:
+                columns.append(self[key].tolist())
+                names.append(key)
+        out.index = MultiIndex.from_arrays(columns, names=names)
+        return out
 
     def _set_levels(self, wanted: list[Any], drop: bool, append: bool) -> DataFrame:
         """The frame labelled by several of its columns, or by its labels and some columns."""
@@ -31583,6 +31646,15 @@ def pivot_table(
         sort=sort,
         **kwargs,
     )
+
+
+def _labels_key(key: Any) -> bool:
+    """Whether a `set_index` key is labels handed in rather than the name of a column.
+
+    A tuple is one label, as pandas reads it, since a column can be named by
+    one, and so is a range, which pandas looks up among the columns.
+    """
+    return _list_like(key) and not isinstance(key, tuple | range)
 
 
 def _list_like(value: Any) -> bool:
