@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: quantile over a category column
+
+`Series.quantile` and `DataFrame.quantile` read a categorical column through its codes the way pandas does. A picked interpolation answers a category, a blended one answers a float, and a frame's list of quantiles keeps the column a categorical. A group by quantile over categories raises pandas' TypeError instead of answering.
+
 ### Fixed: axis=None refused where pandas refuses it
 
 `axis=None` was read as the default axis by every method, where pandas reads it that way only on the reductions and the methods that fill, mask or align. `rank`, `shift`, `sort_values`, `sort_index`, `drop`, `take`, `set_axis`, `interpolate`, `idxmin` and `idxmax` on a frame or a series, and `diff`, `pct_change`, `dropna`, `mode`, `apply` and `corrwith` on a frame, now raise pandas' "No axis named None for object type" ValueError.
