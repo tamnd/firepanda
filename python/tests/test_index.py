@@ -132,16 +132,17 @@ def test_a_fresh_frame_has_a_range_index(firepanda: ModuleType, tmp_path: Path) 
     assert frame.index.tolist() == [0, 1, 2]
 
 
-def test_a_range_index_reports_no_bytes(firepanda: ModuleType, tmp_path: Path) -> None:
-    """A divergence, and one we prefer to the pandas answer.
+def test_a_range_index_reports_the_bytes_pandas_does(firepanda: ModuleType, tmp_path: Path) -> None:
+    """The size of the Python range and its three numbers, which is what pandas reports.
 
-    pandas says 132 for the `nbytes` of any `RangeIndex`, which is the size of
-    the Python object rather than of any labels, and is the same number for
-    three rows and for three hundred million. A range stores nothing, so this
-    says nothing.
+    It is the same number for three rows and for three hundred million, because a range stores
+    no labels, and stored labels are counted eight bytes each.
     """
-    assert _frame(firepanda, tmp_path).index.nbytes == 0
-    assert firepanda.Index([1, 2, 3]).nbytes > 0
+    import sys
+
+    parts = sys.getsizeof(range(3)) + sum(sys.getsizeof(part) for part in (0, 3, 1))
+    assert _frame(firepanda, tmp_path).index.nbytes == parts
+    assert firepanda.Index([1, 2, 3]).nbytes == 24
 
 
 def test_the_reported_type_is_both_spellings(firepanda: ModuleType) -> None:

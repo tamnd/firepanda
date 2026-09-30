@@ -3520,11 +3520,11 @@ class Series(SeriesMixin):
 
     @property
     def nbytes(self) -> int:
-        """The bytes the column's buffers occupy, which is what the data weighs rather than
-        what a numpy array holding it would.
+        """The bytes pandas would report for the column, which is what the numpy or Arrow
+        arrays it would hold weigh.
         """
         try:
-            return self._inner.nbytes()
+            return self._counted_bytes()
         except Exception as error:
             raise translate(error) from None
 
@@ -4658,9 +4658,9 @@ class Index(IndexMixin):
 
     @property
     def nbytes(self) -> int:
-        """The bytes the labels occupy, which is zero for a range that stores none."""
+        """The bytes pandas would report for the labels, which for a range is the range."""
         try:
-            return self._inner.nbytes()
+            return self._counted_bytes()
         except Exception as error:
             raise translate(error) from None
 

@@ -82,8 +82,8 @@ def test_a_text_column_spells_its_type_the_way_this_library_spells_it(
 ) -> None:
     """`string` where pandas 3 says `str`, which is the registered dtype divergence."""
     lines = report(firepanda.DataFrame(MIXED))
-    assert [line.split()[-1] for line in lines[5:8]] == ["string", "int64", "float64"]
-    assert lines[-2] == "dtypes: float64(1), int64(1), string(1)"
+    assert [line.split()[-1] for line in lines[5:8]] == ["str", "int64", "float64"]
+    assert lines[-2] == "dtypes: float64(1), int64(1), str(1)"
 
 
 def test_the_memory_line_is_the_frames_own_memory_usage(firepanda: ModuleType) -> None:
@@ -96,12 +96,28 @@ def test_the_memory_line_is_the_frames_own_memory_usage(firepanda: ModuleType) -
 def test_a_big_frame_reports_its_memory_in_larger_units(firepanda: ModuleType) -> None:
     """Powers of 1024 with one decimal, which is pandas' ladder and its rounding."""
     frame = firepanda.DataFrame({"v": list(range(4000))})
-    assert report(frame)[-1] == "memory usage: 31.7 KB"
+    assert report(frame)[-1] == "memory usage: 31.4 KB"
 
 
-def test_there_is_never_a_plus_after_the_memory(firepanda: ModuleType) -> None:
+def test_there_is_no_plus_after_the_memory_of_arrays(firepanda: ModuleType) -> None:
     """pandas puts one there when it left something out and there is nothing left out here."""
     assert "+" not in report(firepanda.DataFrame(MIXED))[-1]
+
+
+@needs_pandas
+@pytest.mark.parametrize("memory_usage", [None, "deep"])
+def test_an_object_column_is_reported_as_pandas_reports_it(
+    firepanda: ModuleType, memory_usage: Any
+) -> None:
+    """Its type spelt `object`, and a `+` after the memory unless the objects were measured."""
+    import pandas as pd
+
+    def made(module: Any) -> Any:
+        return module.DataFrame({"o": module.Series(["a", 1], dtype=object), "v": [1, 2]})
+
+    ours = report(made(firepanda), memory_usage=memory_usage)
+    theirs = report(made(pd), memory_usage=memory_usage)
+    assert ours[-2:] == theirs[-2:]
 
 
 # ---------------------------------------------------------------------------

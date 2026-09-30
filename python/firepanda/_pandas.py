@@ -196,6 +196,66 @@ def _spelt(kind: Any) -> Any:
     return kind
 
 
+_WIDTHS = {"bool": 1, "boolean": 1, "category": 0}
+
+
+def _item_width(word: str) -> int:
+    """The bytes one value of a type takes in the array pandas would hold it in."""
+    if word in _WIDTHS:
+        return _WIDTHS[word]
+    found = re.search(r"(\d+)$", word.split("[")[0])
+    if found:
+        return int(found.group(1)) // 8
+    if word.startswith("interval"):
+        return 16
+    return 8
+
+
+def _code_width(count: int) -> int:
+    """The bytes a category code takes, which pandas picks from how many categories there are."""
+    for width, limit in ((1, 127), (2, 32767), (4, 2147483647)):
+        if count < limit:
+            return width
+    return 8
+
+
+def _pandas_bytes(column: Any, deep: bool = False) -> int:
+    """How many bytes pandas would report for a column, which is what its arrays would weigh.
+
+    A numpy column weighs its width times its length. A masked one adds a byte a
+    row for the mask. Text in pandas 3 is an Arrow large string, which is eight
+    bytes of offset a row, the UTF-8 bytes themselves, and a validity bitmap
+    when a gap exists. A category is its codes and its categories, and pandas'
+    categories of text always carry a bitmap. An object column is a pointer a
+    row, and `deep` adds the size of every object pointed at, as pandas does.
+    """
+    rows = len(column)
+    dtype = column.dtype
+    word = str(dtype)
+    if word == "category":
+        labels = dtype.categories
+        weight = _code_width(len(labels)) * rows + _pandas_bytes(labels.to_series())
+        if len(labels) and _word(labels.dtype) == "string":
+            weight += (len(labels) + 7) // 8
+        return weight
+    if word in ("str", "string"):
+        if not rows:
+            return 0
+        values = column.tolist()
+        present = [value for value in values if isinstance(value, str)]
+        weight = 8 * rows + sum(len(value.encode("utf-8", "surrogatepass")) for value in present)
+        return weight + ((rows + 7) // 8 if len(present) < rows else 0)
+    if word == "object":
+        weight = 8 * rows
+        if deep:
+            weight += sum(sys.getsizeof(value) for value in column.tolist())
+        return weight
+    width = _item_width(word)
+    if word.startswith(("Int", "UInt", "Float")) or word == "boolean":
+        return (width + 1) * rows
+    return width * rows
+
+
 def _sparse_side(column: Any, other: Any) -> bool:
     """Whether a series, or the series it meets, is sparse."""
     if isinstance(column, SeriesMixin) and _sparse.sparse_of(column) is not None:
@@ -1191,6 +1251,22 @@ def _label_values(owner: Any) -> list[Any]:
 def _labels_of(index: Any) -> tuple[list[Any], Any]:
     """The labels an `index=` argument names, and the level name it carries."""
     return list(index), getattr(index, "name", None)
+
+
+def _plain_range(index: Any) -> bool:
+    """Whether an `index=` argument is the unnamed range from zero a new column gets anyway.
+
+    Such an index is left off rather than written in as labels, so the answer keeps its
+    `RangeIndex` the way pandas' does instead of turning into stored integers.
+    """
+    if isinstance(index, range):
+        return index.start == 0 and index.step == 1
+    if not isinstance(index, IndexMixin) or index.name is not None:
+        return False
+    found = getattr(index, "_range", None)
+    if isinstance(found, range):
+        return found.start == 0 and found.step == 1
+    return bool(index._inner.is_range()) and index._inner.start() == 0
 
 
 def _mismatched(values: int, labels: int) -> InvalidArgumentError:
@@ -3883,7 +3959,7 @@ INFO_UNITS = ("bytes", "KB", "MB", "GB", "TB")
 """The ladder `info` prints a byte count on, which is pandas' ladder and is powers of 1024."""
 
 
-def _info_size(total: int) -> str:
+def _info_size(total: int, qualifier: str = "") -> str:
     """A byte count written the way `info` writes it.
 
     Powers of 1024 with one decimal, `bytes` in lower case and everything above it in upper,
@@ -3891,12 +3967,12 @@ def _info_size(total: int) -> str:
     ends up on is read beside pandas' own often enough that a different rounding would look
     like a different measurement.
 
-    What is not copied is the trailing `+`. pandas puts one there when the number it printed
-    left something out, which is the object columns it did not follow pointers into, and there
-    is nothing here it leaves out.
+    The `+` pandas writes when the number left something out goes between the number and the
+    unit, which is where pandas puts it.
 
     Args:
         total: The bytes.
+        qualifier: The `+`, or nothing.
 
     Returns:
         The number and its unit, as one string.
@@ -3904,9 +3980,9 @@ def _info_size(total: int) -> str:
     size = float(total)
     for unit in INFO_UNITS:
         if size < 1024.0:
-            return f"{size:3.1f} {unit}"
+            return f"{size:3.1f}{qualifier} {unit}"
         size /= 1024.0
-    return f"{size:3.1f} PB"
+    return f"{size:3.1f}{qualifier} PB"
 
 
 def _info_index_line(index: Any, kind: str) -> str:
@@ -3966,6 +4042,18 @@ def _info_table(headers: list[str], rows: list[list[str]]) -> list[str]:
     made = [line(headers), line(["-" * len(head) for head in headers])]
     made.extend(line(row) for row in rows)
     return made
+
+
+def _info_qualifier(printed: list[str], labels: Any, deep: bool) -> str:
+    """The `+` pandas puts after the memory when it counted pointers rather than objects.
+
+    That is when a column or the index holds objects and `memory_usage="deep"` was not
+    asked for, because the objects themselves were left out of the number.
+    """
+    if deep:
+        return ""
+    held = "object" in printed or str(getattr(labels, "dtype", "")) == "object"
+    return "+" if held else ""
 
 
 def _info_dtypes(printed: list[str]) -> str:
@@ -9622,6 +9710,9 @@ class DataFrameMixin(_Carries):
                     typed[name] = cast_to
         labels, level = (None, None) if index is None else _labels_of(index)
         series = {name: v for name, v in found.items() if isinstance(v, SeriesMixin)}
+        ranged = _plain_range(index) if index is not None else bool(series)
+        ranged = ranged and all(_plain_range(v.index) for v in series.values())
+        ranged = ranged and len({len(v) for v in series.values()}) <= 1
         if series and labels is None:
             seen = [v.index.tolist() for v in series.values()]
             if all(mine == seen[0] for mine in seen):
@@ -9661,7 +9752,7 @@ class DataFrameMixin(_Carries):
                 out = out._assigned(name, instants)
         if widen:
             out = DataFrame._wrap(out._inner._widened_for_missing())
-        if labels is not None:
+        if labels is not None and not ranged:
             out = DataFrame._wrap(_put_labels(out._inner, labels, level))
         for name in series:
             if out[name].dtype != found[name].dtype:
@@ -9905,12 +9996,9 @@ class DataFrameMixin(_Carries):
         any other number, since a column does not get larger or smaller
         depending on whether the labels beside it were counted.
 
-        `deep` is accepted and changes nothing. In pandas it means to go and
-        measure the Python objects an object column points at rather than the
-        pointers, and there are no object columns here, so every number this
-        answers is already the deep one. Refusing the parameter would make a
-        caller who passed it think something was unavailable, when what is
-        unavailable is the shallow answer.
+        `deep` goes and measures the Python objects an object column points at
+        rather than counting a pointer a row, as it does in pandas. Every other
+        type holds its values in its arrays, so the flag changes nothing there.
 
         Neither flag is checked for being a boolean, which is deliberate and is
         not what the rest of the library does. Almost every flag here goes
@@ -9921,15 +10009,14 @@ class DataFrameMixin(_Carries):
         well, since a library that refuses what pandas accepts stops a working
         program for no gain.
 
-        The numbers are Arrow buffers and pandas' are numpy arrays, which is
-        `nbytes` divergence and is registered as one. It shows up here more than
-        it does on a column, because a frame is where somebody adds the numbers
-        up and compares the total against a file size.
+        Every number is the one pandas answers, counted from the numpy or Arrow
+        arrays pandas would hold the column in rather than from the buffers here,
+        because a frame is where somebody adds the numbers up and compares them
+        with what pandas said.
 
         Args:
             index: Whether to count the row labels as a row of the answer.
-            deep: Accepted for compatibility. Every number here is already the
-                deep one.
+            deep: Whether to add the size of every object an object column holds.
 
         Returns:
             A column of byte counts, labelled by column name.
@@ -9937,10 +10024,12 @@ class DataFrameMixin(_Carries):
         from ._frame import Series
 
         labels: list[Any] = list(self._inner.names())
-        counts: list[Any] = list(self._inner.column_nbytes())
+        counts: list[Any] = [
+            _pandas_bytes(self.iloc[:, place], bool(deep)) for place in range(len(labels))
+        ]
         if index:
             labels.insert(0, "Index")
-            counts.insert(0, self.index.nbytes)
+            counts.insert(0, int(self.index.memory_usage(deep=bool(deep))))
         made = _labelled(labels, counts)
         return Series._wrap(made._inner.relabel(None).renamed_axis(None))
 
@@ -10008,7 +10097,7 @@ class DataFrameMixin(_Carries):
             lines.append("Empty DataFrame")
             _info_write(lines, buf)
             return
-        printed = [str(name) for name in self._inner.dtypes()]
+        printed = [str(kind) for kind in self.dtypes.tolist()]
         limit = _config.get_option("display.max_info_columns") if max_cols is None else max_cols
         wide = len(names) > limit
         if verbose is False or (verbose is None and wide):
@@ -10029,7 +10118,10 @@ class DataFrameMixin(_Carries):
             lines.extend(_info_table(headers, cells))
         lines.append(_info_dtypes(printed))
         if memory_usage is None or memory_usage:
-            lines.append("memory usage: " + _info_size(int(self.memory_usage().sum())))
+            deep = memory_usage == "deep"
+            total = int(self.memory_usage(deep=deep).sum())
+            plus = _info_qualifier(printed, labels, deep)
+            lines.append("memory usage: " + _info_size(total, plus))
         _info_write(lines, buf)
 
     def asfreq(
@@ -14850,7 +14942,11 @@ class SeriesMixin(_Carries):
                     self._inner = _period_typed(self._inner, dtype)
                 if typed is not None and dtype is None:
                     self._inner = _retyped(self._inner, typed)
-                if index is not None:
+                if index is not None and _plain_range(index):
+                    rows = self._inner.length()
+                    if len(index) != rows:
+                        raise _mismatched(rows, len(index))
+                elif index is not None:
                     labels, level = _labels_of(index)
                     rows = self._inner.length()
                     if len(labels) != rows:
@@ -15078,21 +15174,25 @@ class SeriesMixin(_Carries):
         default answer for a column includes its index and `nbytes` does not.
         That is why both exist.
 
-        `deep` is accepted and changes nothing, for the reason the frame's
-        version gives, and neither flag is checked for being a boolean, for the
-        other reason the frame's version gives.
+        `deep` measures the objects an object column holds, as the frame's
+        version does, and neither flag is checked for being a boolean, for the
+        reason the frame's version gives.
 
         Args:
             index: Whether to add the bytes the row labels occupy.
-            deep: Accepted for compatibility. The number here is already deep.
+            deep: Whether to add the size of every object an object column holds.
 
         Returns:
             The size in bytes.
         """
-        out: int = self._inner.nbytes()
+        out = _pandas_bytes(self, bool(deep))
         if index:
-            out += self.index.nbytes
+            out += int(self.index.memory_usage(deep=bool(deep)))
         return out
+
+    def _counted_bytes(self) -> int:
+        """The column's `nbytes`, which is pandas' count of its arrays."""
+        return _pandas_bytes(self)
 
     def info(
         self,
@@ -15130,7 +15230,7 @@ class SeriesMixin(_Carries):
         Returns:
             None. The report is written rather than answered.
         """
-        printed = str(self._inner.dtype())
+        printed = str(self.dtype)
         labels = self.index
         lines = [
             "<class 'firepanda.Series'>",
@@ -15147,7 +15247,9 @@ class SeriesMixin(_Carries):
         lines.extend(_info_table(headers, [cells]))
         lines.append(_info_dtypes([printed]))
         if memory_usage is None or memory_usage:
-            lines.append("memory usage: " + _info_size(self.memory_usage()))
+            deep = memory_usage == "deep"
+            plus = _info_qualifier([printed], labels, deep)
+            lines.append("memory usage: " + _info_size(self.memory_usage(deep=deep), plus))
         _info_write(lines, buf)
 
     def repeat(self, repeats: Any, axis: None = None) -> Series:
@@ -26504,7 +26606,27 @@ class IndexMixin:
 
     def memory_usage(self, deep: bool = False) -> int:
         """The bytes the labels take, as the column of labels would count them."""
-        return int(self.to_series().memory_usage(index=False, deep=deep))
+        if self._range_of() is not None:
+            return self.nbytes
+        return _pandas_bytes(self.to_series(), bool(deep))
+
+    def _range_of(self) -> range | None:
+        """The range a range index stands for, or None when the labels are stored."""
+        found = getattr(self, "_range", None)
+        if isinstance(found, range):
+            return found
+        if self._inner.is_range():
+            start = self._inner.start()
+            return range(start, start + len(self))
+        return None
+
+    def _counted_bytes(self) -> int:
+        """The labels' `nbytes`, which for a range is the range object and its three numbers."""
+        found = self._range_of()
+        if found is None:
+            return _pandas_bytes(self.to_series())
+        parts = (found.start, found.stop, found.step)
+        return sys.getsizeof(found) + sum(sys.getsizeof(part) for part in parts)
 
     def astype(self, dtype: Any, copy: bool = True) -> Index:
         """The labels as another type, keeping the name."""
