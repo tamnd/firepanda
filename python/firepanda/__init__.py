@@ -37,6 +37,7 @@ from __future__ import annotations
 import sys
 
 from . import (
+    _assign,  # noqa: F401  (gives the axes and names their setters)
     _attrs,
     _firepanda,
     _pandas,
