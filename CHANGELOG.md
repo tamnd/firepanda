@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: The row labels keep their frequency
+
+A frame or series whose row labels come from `date_range`, `timedelta_range` or a resample now remembers the step, so the repr ends with `Freq: D` the way pandas prints it, and slicing, arithmetic, head, tail and joining keep or drop it by the same rules pandas uses. `shift(freq=)` now moves the labels rather than the values, and `freq="infer"` reads the step off the labels.
+
 ### Fixed: a VALUES column takes the type that holds every row
 
 `VALUES (1), (NULL)` and `VALUES (1), (3000000000)` now run, as they do in DuckDB. A column of a literal table takes the type its rows promote to, and a null or a narrower value is written in that type, where before a column whose rows were of two types was refused. Rows whose types nothing holds, such as a number and a text, are still refused with the row that broke it named.

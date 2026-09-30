@@ -368,7 +368,9 @@ class Resampler:
 
     def _labelled(self, out: DataFrame, fill: dict[str, Any] | None) -> DataFrame | Series:
         """A reduction by bin number put on every bin and labelled with its timestamp."""
+        from ._attrs import hold_freq
         from ._frame import Series
+        from ._frequency import _offset_of
 
         types = {name: str(out[name].dtype) for name in out.columns}
         if len(out) < self._count:
@@ -383,8 +385,9 @@ class Resampler:
         out = out.reset_index(drop=True).assign(**{_LABEL: labels})
         out = out.set_index(_LABEL).rename_axis(self._name)
         if isinstance(self._obj, Series):
-            answer = out[_VALUE]
-            return answer.rename(self._obj.name)
+            out = out[_VALUE].rename(self._obj.name)
+        # The bins step by the rule, which pandas' answer carries on its index.
+        hold_freq(out, _offset_of(self._rule))
         return out
 
     def _reduce(self, how: str, *args: Any, **kwargs: Any) -> DataFrame | Series:
