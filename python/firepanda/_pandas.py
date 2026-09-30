@@ -21027,13 +21027,14 @@ class _ReadingMixin:
         the built in `sum` included, and a decay has no `apply` to hand it to,
         as in pandas. A list gives a frame with one column a
         reduction, and a dict gives a frame keyed by its keys, each over the
-        column of that name when the window is over a frame.
+        column of that name when the window is over a frame. A list over a
+        frame, or a dict with a list in it, gives two levels of column labels,
+        the column and then the reduction.
 
         Raises:
             AttributeError: For a name that is not a reduction, in pandas' words.
             KeyError: For a dict key that is not a column.
-            NotImplementedError: For a list of reductions over a frame, whose
-                answer has two levels of column labels.
+            SpecificationError: For a mapping inside a dict, as in pandas.
         """
         from ._frame import DataFrame
 
@@ -21050,11 +21051,10 @@ class _ReadingMixin:
                 lost = [key for key in func if key not in _shown_names(data)]
                 if lost:
                     raise KeyError(f"Label(s) {lost} do not exist")
-                if any(isinstance(how, (list, tuple, dict)) for how in func.values()):
-                    raise NotImplementedError(
-                        "a list of reductions for one column is not supported yet, because the"
-                        " answer has two levels of column labels"
-                    )
+                if any(isinstance(how, dict) for how in func.values()):
+                    raise SpecificationError("nested renamer is not supported")
+                if any(isinstance(how, (list, tuple)) for how in func.values()):
+                    return self._levelled(func, args, kwargs)
                 parts = {
                     key: self._over(data[key]).aggregate(how, *args, **kwargs)
                     for key, how in func.items()
@@ -21064,10 +21064,7 @@ class _ReadingMixin:
             return _float_frame(parts, data)
         if isinstance(func, (list, tuple)):
             if isinstance(data, DataFrame):
-                raise NotImplementedError(
-                    "a list of reductions over a frame is not supported yet, because the answer"
-                    " has two levels of column labels"
-                )
+                return self._levelled(dict.fromkeys(_shown_names(data), tuple(func)), args, kwargs)
             parts = {
                 how if isinstance(how, str) else getattr(how, "__name__", str(how)): self.aggregate(
                     how, *args, **kwargs
@@ -21080,6 +21077,29 @@ class _ReadingMixin:
         raise TypeError(f"'{type(func).__name__}' object is not callable")
 
     agg = aggregate
+
+    def _levelled(self, wanted: dict[Any, Any], args: Any, kwargs: Any) -> DataFrame:
+        """Reductions a column of a frame, under the column and then the reduction.
+
+        Each column is reduced as a column of its own, the way pandas does it,
+        which is also why pandas refuses a window read along a column named by
+        `on`: the column alone has no such column.
+
+        Raises:
+            ValueError: For a window with `on`, in pandas' words.
+        """
+        on = getattr(self, "_on", None)
+        if on is not None:
+            raise InvalidArgumentError(
+                f"invalid on specified as {on}, must be a column (of DataFrame), an Index or None"
+            )
+        parts: dict[Any, Series] = {}
+        for key, how in wanted.items():
+            listed = list(how) if isinstance(how, (list, tuple)) else [how]
+            answer = self._over(self._data[key]).aggregate(listed, *args, **kwargs)
+            for name in _shown_names(answer):
+                parts[(key, name)] = answer[name]
+        return _float_frame(parts, self._data)
 
     def _paired(
         self, other: Any, pairwise: bool | None, numeric_only: bool, *settings: Any
