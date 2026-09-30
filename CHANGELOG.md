@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: group counts from the end, nunique with gaps, and shift fills
+
+A group by's `cumcount` and `ngroup` take `ascending=False`, `nunique(dropna=False)` counts a gap as one more distinct value, and `shift` takes `fill_value`, filling the rows each group's shift opens and every row with a missing key, and `freq`, which shifts each group's labels one group after another with the keys kept, as in pandas. `Series.shift` with a `fill_value` that fills every row, or that the column's own number type holds, now keeps that type.
+
 ### Added: numeric_only on series reductions and group by folds
 
 A series reduction and `Series.kurt` take `numeric_only=True` and read the column anyway, refusing only a column of Python objects with pandas' "Series.X does not allow numeric_only=True with non-numeric dtypes." A group by's `cumsum`, `cumprod`, `cummax`, `cummin`, `idxmax`, `idxmin` and `quantile` with a list of quantiles or a picking rule keep only the number and flag columns under `numeric_only=True`, and a group by over one column folds it whatever the flag says, as in pandas.
