@@ -178,6 +178,9 @@ def _word(dtype: Any) -> str:
     public dtype is read back through this before it is compared with them.
     """
     text = str(dtype)
+    if text == "string" and type(dtype).__name__ == "StringDtype":
+        # pandas' masked text type is a column of cells here, not the core's text.
+        return "String"
     return "string" if text == "str" else text
 
 
@@ -8131,11 +8134,16 @@ def _backend(dtype_backend: Any) -> None:
 
 
 def _converted(
-    column: Series, whole: bool = True, flags: bool = True, floating: bool = True
+    column: Series,
+    whole: bool = True,
+    flags: bool = True,
+    floating: bool = True,
+    text: bool = False,
 ) -> Series:
     """One column as `convert_dtypes` leaves it, in pandas' masked types.
 
-    Whole numbers become `Int64` of their width and flags become `boolean`.
+    Text becomes `string` when `text` is on, whole numbers become `Int64` of
+    their width and flags become `boolean`.
     Floats become `Int64` when every value is whole and `Float64` otherwise, and
     a NaN reads as a gap either way, because pandas' masked float reads NaN as
     missing. `whole`, `flags` and `floating` are pandas' three switches.
@@ -8148,6 +8156,8 @@ def _converted(
             return column
         column = _masked.plain(column)
     printed = _word(column.dtype)
+    if printed == "string" and not _objects.is_object(column._inner):
+        return _masked.as_masked(column, "string") if text else column
     if printed.startswith(("int", "uint")):
         return _masked.as_masked(column, _masked.masked_for(printed)) if whole else column
     if printed == "bool":
@@ -13797,7 +13807,13 @@ class DataFrameMixin(_Carries):
         _backend(dtype_backend)
         frame = cast("DataFrame", self)
         columns = {
-            name: _converted(frame[name], convert_integer, convert_boolean, convert_floating)
+            name: _converted(
+                frame[name],
+                convert_integer,
+                convert_boolean,
+                convert_floating,
+                convert_string and dtype_backend != "pyarrow",
+            )
             for name in _shown_names(frame)
         }
         if dtype_backend == "pyarrow":
@@ -15653,7 +15669,13 @@ class SeriesMixin(_Carries):
         """
         _backend(dtype_backend)
         column = cast("Series", self)
-        column = _converted(column, convert_integer, convert_boolean, convert_floating)
+        column = _converted(
+            column,
+            convert_integer,
+            convert_boolean,
+            convert_floating,
+            convert_string and dtype_backend != "pyarrow",
+        )
         if dtype_backend == "pyarrow":
             return _arrow_converted(
                 column, convert_string, convert_integer, convert_boolean, convert_floating
@@ -19397,7 +19419,7 @@ def _as_categories(codes: Any, categories: list[str], ordered: bool) -> Any:
         return built.cat.set_categories(categories, ordered=ordered)
     kept = codes.notna()
     at = codes.where(kept, 0).astype("int64")
-    held = Series(categories or [""], dtype="string").take(at.tolist())
+    held = Series(categories or [""], dtype="str").take(at.tolist())
     held = held.set_axis(codes.index).rename(codes.name).where(kept)
     return _recategorized(held, categories, ordered)
 
@@ -21302,7 +21324,7 @@ def _cat_column(values: list[Any], data: Any, series: Any) -> Any:
         )
     values = [value.item() if type(value).__module__ == "numpy" else value for value in values]
     if all(value is None or isinstance(value, str) for value in values):
-        return series(values, index=data.index, dtype="string")
+        return series(values, index=data.index, dtype="str")
     return series(values, index=data.index)
 
 
@@ -21383,12 +21405,29 @@ class StringMixin:
     fold of the one prefix answer over the tuple.
     """
 
-    __slots__ = ("_held", "_series")
+    __slots__ = ("_held", "_masked", "_series")
     """The series the accessor was reached from, held for the reason
-    `DatetimeMixin` gives, and the object column it was read from if it was one."""
+    `DatetimeMixin` gives, the object column it was read from if it was one, and
+    the `string` column it was read from if it was that."""
 
     _series: Series
     _held: Series | None
+    _masked: Series | None
+
+    def __getattribute__(self, name: str) -> Any:
+        """A public method, which on a `string` column answers in pandas' masked types."""
+        found = object.__getattribute__(self, name)
+        if name.startswith("_") or not callable(found):
+            return found
+        source = object.__getattribute__(self, "_masked")
+        if source is None:
+            return found
+
+        @functools.wraps(found)
+        def run(*args: Any, **kwargs: Any) -> Any:
+            return _masked.text_answer(found(*args, **kwargs), source, name)
+
+        return run
 
     def __init__(self, data: Series) -> None:
         """Holds the series, and refuses one that is not text.
@@ -21406,7 +21445,11 @@ class StringMixin:
         so that one message can read like pandas would be the wrong trade.
         """
         self._held = None
-        if _objects.is_object(data._inner):
+        self._masked = None
+        if _masked.masked_of(data) == "string":
+            self._masked = data
+            data = _masked.plain(data)
+        elif _objects.is_object(data._inner):
             self._held = data
             data = _object_texts(data)
         if not data._inner.string_is_text():
@@ -22227,7 +22270,7 @@ class StringMixin:
         ]
         return DataFrame(
             {
-                at: Series([row[at] for row in padded], index=index, dtype="string")
+                at: Series([row[at] for row in padded], index=index, dtype="str")
                 for at in range(width)
             }
         )
@@ -22274,7 +22317,7 @@ class StringMixin:
             if isinstance(error, FirepandaError):
                 raise
             raise InvalidArgumentError(str(error)) from None
-        return Series(rows, index=self._series.index, name=self._series.name, dtype="string")
+        return Series(rows, index=self._series.index, name=self._series.name, dtype="str")
 
     def encode(self, encoding: str, errors: str = "strict") -> Series:
         """Every row as bytes in an encoding, in an object column with NaN for a gap."""
@@ -22620,7 +22663,7 @@ class StringMixin:
                 )
         joined = iter(sep.join(row) for row in zip(*pieces, strict=True))
         answer = Series(
-            [next(joined) if keep else None for keep in kept], index=labels, dtype="string"
+            [next(joined) if keep else None for keep in kept], index=labels, dtype="str"
         )
         if not isinstance(labels, list):
             return answer.rename(self._series.name)
@@ -28057,7 +28100,7 @@ def _indicated(out: Any, named: str) -> Any:
     from ._frame import Series, _series_to_frame
 
     mine, theirs = Series._wrap(out.column(MERGE_LEFT)), Series._wrap(out.column(MERGE_RIGHT))
-    both = Series(["both"], dtype="string")._inner
+    both = Series(["both"], dtype="str")._inner
     out = out.pick(MERGE_LEFT, (mine.isna() | theirs.isna())._inner, both)
     out = out.fill_null(MERGE_LEFT, out.column(MERGE_RIGHT))
     sides = Series._wrap(out.column(MERGE_LEFT)).astype("category")
@@ -28427,7 +28470,7 @@ def _melt(
             .head(0)
             .assign(
                 **{
-                    var_name: Series([], dtype="string"),
+                    var_name: Series([], dtype="str"),
                     value_name: Series([], dtype="float64"),
                 }
             )
@@ -32018,7 +32061,8 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
     if kw["dtype"]:
         dtype = _word(column.dtype)
         dtype = "interval" if dtype.startswith("interval[") else dtype
-        parts.append(f"dtype: {'str' if dtype == 'string' else dtype}")
+        dtype = {"string": "str", "String": "string"}.get(dtype, dtype)
+        parts.append(f"dtype: {dtype}")
     footer = ", ".join(parts)
     if _word(column.dtype) == "category":
         footer += ("\n" if footer else "") + _text_categories(column)
@@ -33248,11 +33292,13 @@ def _masked_through(method: Any, how: str) -> Any:
                     return NA
                 lower = lower.dropna()
             return _masked.reduced(method(lower, *args, **kwargs))
+        # An answer put back in place goes into this column, not the lower case one.
+        inplace = bool(kwargs.pop("inplace", False))
         answer = method(lower, *args, **kwargs)
         if chosen == "raw":
             return answer
         keep = chosen == "own" or (chosen == "whole" and name[0] in "IU")
-        return _masked.rewrap(answer, name if keep else None)
+        return _kept(self, _masked.rewrap(answer, name if keep else None), inplace)
 
     return run
 
@@ -33270,6 +33316,8 @@ for _method, _how in (
     ("fillna", "own"),
     ("describe", "family"),
     ("to_numpy", "raw"),
+    ("isin", "raw"),
+    ("replace", "family"),
 ):
     setattr(SeriesMixin, _method, _masked_through(getattr(SeriesMixin, _method), _how))
 

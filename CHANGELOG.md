@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: The masked text type `string`
+
+`Series(..., dtype="string")`, `astype("string")` and `StringDtype()` now give pandas' masked text type rather than the plain `str`. A gap is `NA`, comparisons answer flags with gaps, `+`, `fillna`, `replace`, `where`, sorting and `concat` keep the type, and the `str` accessor answers `string`, `boolean` and `Int64` with `NA` on the rows that were gaps, as pandas does. `convert_dtypes` now honours `convert_string` and turns text into `string`, and `pd.array` of text prints as pandas prints it.
+
 ### Changed: pivot_table margins refuse column keys that are not text
 
 `pivot_table(margins=True)` with a columns key of numbers now raises NotImplementedError by name, because pandas labels the column of totals with text beside the numbers in an index of objects. It used to fail looking for the numbers as text.

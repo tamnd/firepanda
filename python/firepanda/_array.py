@@ -252,7 +252,7 @@ class FirepandaArray:
         width = get_option("display.width") or 80
         most = get_option("display.max_seq_items") or len(values)
         body = _summary(values, self._formatter(values), True, "", width, most, indent=False)
-        dtype = "str" if str(self.dtype) == "string" else self.dtype
+        dtype = "str" if str(self.dtype) == "string" and not _masked_text(self) else self.dtype
         return (
             f"<{type(self).__name__}>\n{body.rstrip(', ' + chr(10))}\n"
             f"Length: {len(values)}, dtype: {dtype}"
@@ -300,7 +300,14 @@ class ArrowStringArray(FirepandaArray):
     def _shown(self, value: Any) -> str:
         from ._pandas import _pprinted
 
-        return "nan" if _gap(value) else _pprinted(value)
+        if _gap(value):
+            return "<NA>" if _masked_text(self) else "nan"
+        return _pprinted(value)
+
+
+def _masked_text(array: FirepandaArray) -> bool:
+    """Whether the array holds pandas' masked `string` type rather than plain text."""
+    return type(array.dtype).__name__ == "StringDtype" and str(array.dtype) == "string"
 
 
 class ArrowExtensionArray(FirepandaArray):
