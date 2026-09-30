@@ -11010,15 +11010,18 @@ class DataFrameMixin(_Carries):
             if axis_name is not None:
                 made = made.rename_axis([axis_name, *made.index.names[1:]])
             return made
+        levels = list(level) if isinstance(level, list | tuple) else [level]
         parts = [(name, self[name].unstack(level, fill_value, sort)) for name in self.columns]
         columns = {
-            (name, head): part[head] for name, part in parts for head in part.columns
+            (name, *(head if isinstance(head, tuple) else (head,))): part[head]
+            for name, part in parts
+            for head in part.columns
         }
         if not parts:
             return DataFrame()
         made = DataFrame(columns, index=parts[0][1].index)
-        if not isinstance(level, list | tuple):
-            _hold_columns(made, [axis_name, self.index.names[self.index._level_number(level)]])
+        numbers = [self.index._level_number(one) for one in levels]
+        _hold_columns(made, [axis_name, *(self.index.names[n] for n in numbers)])
         return made
 
     def __getitem__(self, key: Any) -> DataFrame | Series:
@@ -17022,8 +17025,8 @@ class SeriesMixin(_Carries):
 
         Raises:
             ValueError: For flat labels and for a pair held twice, in pandas' words.
-            NotImplementedError: For several levels at once, and for a level
-                whose values are not text, since firepanda names columns with text.
+            NotImplementedError: For every level at once, and for a level whose
+                values are not text, since firepanda names columns with text.
         """
         from ._multi import MultiIndex
 
@@ -17033,28 +17036,43 @@ class SeriesMixin(_Carries):
             raise InvalidArgumentError(
                 f"index must be a MultiIndex to unstack, <class 'pandas.{kind}'> was passed"
             )
-        if isinstance(level, list | tuple):
+        levels = list(level) if isinstance(level, list | tuple) else [level]
+        numbers = [index._level_number(one) for one in levels]
+        kept = [n for n in range(index.nlevels) if n not in numbers]
+        if not kept:
             raise NotImplementedError(
-                "unstack of several levels at once labels the columns with several levels,"
-                " which a firepanda frame does not have"
+                "unstack of every level leaves no labels for the rows, and pandas"
+                " answers that with a series of its own shape"
             )
-        number = index._level_number(level)
-        kept = [n for n in range(index.nlevels) if n != number]
+        several = len(numbers) > 1
         cells: dict[Any, Any] = {}
         rows: dict[Any, None] = {}
         heads: dict[Any, None] = {}
         for label, value in zip(index.tolist(), self.tolist(), strict=True):
             row = label[kept[0]] if len(kept) == 1 else tuple(label[n] for n in kept)
-            head = label[number]
+            head = tuple(label[n] for n in numbers) if several else label[numbers[0]]
             if (row, head) in cells:
                 raise InvalidArgumentError("Index contains duplicate entries, cannot reshape")
             cells[row, head] = value
             rows[row] = None
             heads[head] = None
         order = sorted(rows) if sort else list(rows)
-        names = _pivot_names(sorted(heads) if sort else list(heads), "unstack")
         level_names = [index.names[n] for n in kept]
         row_name = level_names[0] if len(kept) == 1 else level_names
+        if several:
+            # pandas numbers the pairs of several levels in the order they first
+            # appear and spreads them in that order, whatever `sort` says.
+            made = _pivoted(
+                order,
+                list(heads),
+                cells,
+                _word(self.dtype),
+                row_name=row_name,
+                fill_value=fill_value,
+            )
+            _hold_columns(made, [index.names[n] for n in numbers])
+            return made
+        names = _pivot_names(sorted(heads) if sort else list(heads), "unstack")
         return _pivoted(
             order,
             names,
@@ -17062,7 +17080,7 @@ class SeriesMixin(_Carries):
             _word(self.dtype),
             row_name=row_name,
             fill_value=fill_value,
-            column_name=index.names[number],
+            column_name=index.names[numbers[0]],
         )
 
     @classmethod

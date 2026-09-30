@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: unstack of several levels at once
+
+`Series.unstack` and `DataFrame.unstack` take a list of levels, as pandas does. The pairs of the levels handed in become columns of several levels, in the order they first appear, named after the levels, and the levels left over stay as the row labels. A frame puts its own column names on top.
+
 ### Added: DataFrame.quantile across the rows
 
 `DataFrame.quantile(axis=1)` takes a quantile across each row, one or a list of them and under any of the rules the columns take, as the quantile down the frame turned on its side, as pandas does.
