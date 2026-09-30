@@ -15634,7 +15634,6 @@ class DataFrameMixin(_Carries):
         if isinstance(self.index, MultiIndex):
             return _settled(self, self._reset_levels(level, bool(drop), names), inplace)
         _no_level(level)
-        _refuse("names", names, "naming the columns the old labels land in needs a MultiIndex")
         _held_at("col_level", col_level, 0, "there is one level of columns and it is that one")
         _held_at("col_fill", col_fill, "", "there is nothing above the columns to fill")
         if allow_duplicates is not NO_DEFAULT and allow_duplicates:
@@ -15642,8 +15641,17 @@ class DataFrameMixin(_Carries):
                 "allow_duplicates=True is not supported yet, because two columns"
                 " under one name is a shape the schema does not carry"
             )
+        source = self
+        if isinstance(names, list):
+            # pandas names the one column from the first name of a list, and an
+            # empty list leaves the labels' own name.
+            source = self.rename_axis(names[0]) if names else self
+        elif _list_like(names):
+            raise InvalidArgumentError("Index names must be str or 1-dimensional list")
+        elif names is not None:
+            source = self.rename_axis(names)
         try:
-            made = DataFrame._wrap(self._inner.reset_index(bool(drop)))
+            made = DataFrame._wrap(source._inner.reset_index(bool(drop)))
         except Exception as error:
             raise translate(error) from None
         if not drop and str(self.index.dtype) == "category":
