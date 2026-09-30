@@ -6,6 +6,10 @@ is document 05's tier two: a table is a frame under a name in the catalog, a
 view is a query under a name, an insert is a concatenation, and a drop takes
 the name away. Nothing here outlives the session, because the catalog does not.
 
+`SET`, `RESET` and `PRAGMA` are here too, for the same reason: each changes the
+session rather than answering a query. What a setting does is in
+`settings.mojo`, and this only reads the name and the value off the parse.
+
 They are read straight off the parse rather than through the transform, since
 none of them has an expression of its own worth an AST node. The one part that
 does, the query a `CREATE TABLE ... AS`, a `CREATE VIEW` or an `INSERT` carries,
@@ -32,6 +36,7 @@ from firepanda.kernel.concat import concat_any
 from .ast import NO_NODE, Ast
 from .catalog import KIND_FRAME, KIND_VIEW, NOT_FOUND, Catalog, View, fold
 from .matcher import Parse, parse_rule
+from .parameters import Arguments
 from .run import Dialect
 from .token import token_text
 from .types import engine_type, parse_type
@@ -64,6 +69,18 @@ def execute(
     var top = reading.find(reading.tree.root, "Statement")
     if top == NO_NODE:
         top = reading.tree.root
+    var prepare = reading.find(top, "PrepareStatement")
+    if prepare != NO_NODE:
+        return _prepare(reading, prepare, catalog)
+    var executing = reading.find(top, "ExecuteStatement")
+    if executing != NO_NODE:
+        return _execute(dialect, reading, executing, catalog)
+    var deallocate = reading.find(top, "DeallocateStatement")
+    if deallocate != NO_NODE:
+        catalog.deallocate(
+            _identifier(reading.text(reading.find(deallocate, "Identifier")))
+        )
+        return _nothing()
     var create = reading.find(top, "CreateStatement")
     if create != NO_NODE:
         var variation = reading.find(create, "CreateTableStmt")
@@ -81,6 +98,27 @@ def execute(
         var table = reading.find(drop, "DropTable")
         if table != NO_NODE:
             return _drop(reading, drop, table, catalog)
+    var set = reading.find(top, "SetStatement")
+    if set != NO_NODE:
+        var assignment = reading.find(set, "StandardAssignment")
+        if assignment != NO_NODE and reading.has(assignment, "SetSetting"):
+            catalog.set(
+                _identifier(
+                    reading.text(reading.find(assignment, "SettingName"))
+                ),
+                reading.text(reading.find(assignment, "VariableList")),
+            )
+            return _nothing()
+        return dialect.run(sql, catalog)
+    var reset = reading.find(top, "ResetStatement")
+    if reset != NO_NODE and reading.has(reset, "SetSetting"):
+        catalog.reset(
+            _identifier(reading.text(reading.find(reset, "SettingName")))
+        )
+        return _nothing()
+    var pragma = reading.find(top, "PragmaStatement")
+    if pragma != NO_NODE:
+        return _pragma(dialect, reading, pragma, sql, catalog)
     return dialect.run(sql, catalog)
 
 
@@ -168,6 +206,7 @@ struct _Read(Movable):
         """Transforms the query at `node`, and lowers and runs it."""
         var ast = Ast()
         var statement = dialect.rules.walk(self.tree, self.sql, node, ast)
+        dialect.settle(ast, catalog)
         return dialect.run_ast(ast, statement, catalog)
 
     def check(self, dialect: Dialect, node: UInt32, catalog: Catalog) raises:
@@ -175,6 +214,7 @@ struct _Read(Movable):
         name it cannot resolve is an error now rather than at every use."""
         var ast = Ast()
         var statement = dialect.rules.walk(self.tree, self.sql, node, ast)
+        dialect.settle(ast, catalog)
         dialect.check_ast(ast, statement, catalog)
 
 
@@ -223,6 +263,95 @@ def _nothing() -> DataFrame:
 
 def _refuse(what: StringSlice, why: StringSlice) raises:
     raise Error(String("firepanda does not support ", what, ", ", why))
+
+
+def _prepare(
+    reading: _Read, prepare: UInt32, mut catalog: Catalog
+) raises -> DataFrame:
+    """`PREPARE q AS statement`, which keeps the statement's text under a name.
+
+    The text is kept rather than a plan, because what a parameter is depends on
+    what is passed for it, so the statement is lowered afresh by each
+    `EXECUTE`. A list of types for the parameters is refused, since nothing
+    here would cast an argument to one.
+    """
+    if reading.has(prepare, "TypeList"):
+        _refuse(
+            "a list of parameter types on PREPARE",
+            "because nothing casts an argument to the type it names yet",
+        )
+    catalog.prepare(
+        _identifier(reading.text(reading.find(prepare, "Identifier"))),
+        reading.text(reading.find(prepare, "Statement")),
+    )
+    return _nothing()
+
+
+def _execute(
+    dialect: Dialect, reading: _Read, run: UInt32, mut catalog: Catalog
+) raises -> DataFrame:
+    """`EXECUTE q(value, ...)`, which runs a prepared statement with a value for
+    each of its parameters.
+
+    A value passed by position is for the parameter with its number, so the
+    first is for `?` written first and for `$1`, and one passed as
+    `name := value` is for `$name`. The values are held on the catalog while
+    the statement runs, which is where every parse of it looks for them, and
+    taken off again however the statement ends.
+    """
+    var sql = catalog.prepared(
+        _identifier(reading.text(reading.find(run, "Identifier")))
+    )
+    var names = List[String]()
+    var texts = List[String]()
+    for argument in reading.all(run, "FunctionArgument"):
+        var named = reading.find(argument, "NamedParameter")
+        if named != NO_NODE:
+            names.append(
+                _identifier(
+                    reading.text(reading.find(named, "TypeFuncName"))
+                ).lower()
+            )
+            texts.append(reading.text(reading.find(named, "Expression")))
+        else:
+            names.append(String(len(names) + 1))
+            texts.append(reading.text(argument))
+    var outer = catalog.bind(Arguments(names^, texts^))
+    try:
+        var answer = execute(dialect, sql, catalog)
+        _ = catalog.bind(outer^)
+        return answer^
+    except e:
+        _ = catalog.bind(outer^)
+        raise e
+
+
+def _pragma(
+    dialect: Dialect,
+    reading: _Read,
+    pragma: UInt32,
+    sql: StringSlice,
+    mut catalog: Catalog,
+) raises -> DataFrame:
+    """`PRAGMA name = value`, which is `SET` by another spelling, and `PRAGMA
+    name`, which is a setting switched on or off by its name.
+
+    A pragma that answers rows, such as `table_info`, and one that is called
+    with arguments are refused as a `PRAGMA` statement is.
+    """
+    var assign = reading.find(pragma, "PragmaAssign")
+    if assign != NO_NODE:
+        catalog.set(
+            _identifier(reading.text(reading.find(assign, "SettingName"))),
+            reading.text(reading.find(assign, "VariableList")),
+        )
+        return _nothing()
+    var call = reading.find(pragma, "PragmaFunction")
+    if call != NO_NODE and not reading.has(call, "PragmaParameters"):
+        var name = _identifier(reading.text(reading.find(call, "PragmaName")))
+        if catalog.pragma(name):
+            return _nothing()
+    return dialect.run(sql, catalog)
 
 
 def _create_table(

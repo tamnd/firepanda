@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SET, RESET and PRAGMA, with default_order and default_null_order
+
+`SET`, `RESET` and `PRAGMA` now run. A setting that changes how a query runs and not what it answers, such as `threads`, `memory_limit` or the profiler, is accepted and remembered, so a script that sets one runs as it does in DuckDB. `default_order` and `default_null_order` change what an `ORDER BY` that did not say a direction or a null placement means, in a window's and an ordered aggregate's order too, with each of DuckDB's spellings and its message for a value it does not take. A setting that would change an answer and is not held, such as `TimeZone`, is refused by name rather than accepted and dropped.
+
+### Added: SET disabled_optimizers and PRAGMA disable_optimizer
+
+`SET disabled_optimizers = 'filter_pushdown, join_order'` leaves the named plan passes out, and `PRAGMA disable_optimizer` leaves out every pass until `PRAGMA enable_optimizer`. The passes are named as DuckDB names its optimizers, a name nobody has is refused with DuckDB's message, and every pass left out on its own and all of them together give the same answer, which the tests check over a query with something for each pass to do.
+
+### Added: PREPARE, EXECUTE and DEALLOCATE
+
+`PREPARE q AS SELECT ...` keeps a statement under a name and `EXECUTE q(...)` runs it with a value for each parameter, written `?`, `$1` or `$name` and counted the way DuckDB counts them. An argument is an expression, so `EXECUTE q(1 + 1)` passes two, and each parameter takes the type of the expression passed for it. A prepared query reads the tables as they are when it runs, `PREPARE` again replaces, and `DEALLOCATE` forgets. A missing value, a value left over and a parameter outside an `EXECUTE` are refused with DuckDB's messages.
+
+### Added: SET enable_external_access = false, which cannot be undone
+
+`SET enable_external_access = false` is taken and locked as DuckDB locks it: afterwards no `SET` or `RESET` can turn it back on, and setting it true is refused even before it was turned off, with DuckDB's message in each case. The value is read as DuckDB casts text to a boolean, and one it cannot read, such as `'on'`, is refused with DuckDB's cast message. firepanda's SQL reads no file yet, so the setting has nothing further to refuse today, and every reader added later is to check it.
+
 ### Added: row reductions over flags beside numbers
 
 `sum`, `prod`, `max`, `min` and `mean` with `axis=1` over a frame that mixes flags with numbers answer an object column worked out in Python's own arithmetic, as pandas does, where they were refused before. A gap is skipped or kept by `skipna`, and a row `min_count` voids is None.

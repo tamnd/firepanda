@@ -38,6 +38,9 @@ expensive thing in the front end.
 
 from firepanda.frame import DataFrame
 
+from .parameters import Arguments
+from .settings import Settings
+
 
 comptime NOT_FOUND: Int = -1
 """What `find` returns for a name nobody registered."""
@@ -113,6 +116,17 @@ struct Catalog(Movable, Sized):
     against generation 5 whatever the difference was.
     """
 
+    var settings: Settings
+    """What `SET` has changed. Kept here because a setting lasts as long as the
+    session does, and the catalog is the session's state."""
+
+    var arguments: Arguments
+    """The values the running `EXECUTE` passed, which every parse of the
+    statement it runs puts where the parameters are. None outside one."""
+
+    var _prepared_names: List[String]
+    var _prepared_sql: List[String]
+
     def __init__(out self):
         """Constructs an empty catalog."""
         self._keys = List[String]()
@@ -122,6 +136,10 @@ struct Catalog(Movable, Sized):
         self._frames = List[DataFrame]()
         self._views = List[View]()
         self._generation = 0
+        self.settings = Settings()
+        self.arguments = Arguments()
+        self._prepared_names = List[String]()
+        self._prepared_sql = List[String]()
 
     def __len__(self) -> Int:
         """How many names are registered.
@@ -246,6 +264,112 @@ struct Catalog(Movable, Sized):
         self._slots.append(len(self._frames))
         self._frames.append(frame^)
         self._generation += 1
+
+    def set(mut self, name: StringSlice, value: StringSlice) raises:
+        """Changes one setting, as `SET name = value` does.
+
+        A plan lowered under one setting may not be the plan the next one
+        gives, so this moves the generation as a change of names does.
+
+        Args:
+            name: The setting, as written.
+            value: The value, as written.
+
+        Raises:
+            As `Settings.set` does.
+        """
+        self.settings.set(name, value)
+        self._generation += 1
+
+    def pragma(mut self, name: StringSlice) -> Bool:
+        """Runs a `PRAGMA` that takes no arguments.
+
+        Args:
+            name: The pragma, as written.
+
+        Returns:
+            As `Settings.pragma` does.
+        """
+        self._generation += 1
+        return self.settings.pragma(name)
+
+    def reset(mut self, name: StringSlice) raises:
+        """Puts one setting back to DuckDB's default, as `RESET name` does.
+
+        Args:
+            name: The setting, as written.
+
+        Raises:
+            As `Settings.reset` does.
+        """
+        self.settings.reset(name)
+        self._generation += 1
+
+    def prepare(mut self, name: StringSlice, sql: StringSlice):
+        """Keeps a statement under a name, as `PREPARE` does, replacing any
+        statement the name held.
+
+        Args:
+            name: The name `EXECUTE` will say.
+            sql: The statement's text.
+        """
+        var key = fold(name)
+        for i in range(len(self._prepared_names)):
+            if self._prepared_names[i] == key:
+                self._prepared_sql[i] = String(sql)
+                return
+        self._prepared_names.append(key^)
+        self._prepared_sql.append(String(sql))
+
+    def prepared(self, name: StringSlice) raises -> String:
+        """The statement a name was prepared as.
+
+        Args:
+            name: The name, as `EXECUTE` wrote it.
+
+        Returns:
+            The statement's text.
+
+        Raises:
+            If nothing was prepared under the name, with DuckDB's message.
+        """
+        var key = fold(name)
+        for i in range(len(self._prepared_names)):
+            if self._prepared_names[i] == key:
+                return self._prepared_sql[i].copy()
+        raise Error(
+            String(
+                'Binder Error: Prepared statement "', name, '" does not exist'
+            )
+        )
+
+    def deallocate(mut self, name: StringSlice):
+        """Forgets a prepared statement, as `DEALLOCATE` does. A name that
+        holds none is nothing to forget, as it is in DuckDB.
+
+        Args:
+            name: The name, as written.
+        """
+        var key = fold(name)
+        for i in range(len(self._prepared_names)):
+            if self._prepared_names[i] == key:
+                _ = self._prepared_names.pop(i)
+                _ = self._prepared_sql.pop(i)
+                return
+
+    def bind(mut self, var arguments: Arguments) -> Arguments:
+        """Holds the values an `EXECUTE` passed while its statement runs.
+
+        Args:
+            arguments: The values, or `Arguments()` for none.
+
+        Returns:
+            The values held before, for the caller to put back, which is what
+            lets an `EXECUTE` run inside the statement another one runs.
+        """
+        var before = self.arguments.copy()
+        self.arguments = arguments^
+        return before^
 
     def define(mut self, name: StringSlice, var view: View) raises:
         """Puts a view under a name, replacing whatever was there.

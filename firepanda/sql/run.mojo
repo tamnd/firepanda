@@ -48,8 +48,9 @@ from firepanda.plan.lower import lower as lower_plan
 from firepanda.plan.node import SCAN_WORKING, NodeKind, Plan
 from firepanda.plan.optimize import optimize
 
-from .ast import Ast
+from .ast import STMT_SELECT, STMT_VALUES, Ast
 from .catalog import Catalog
+from .parameters import taken
 from .plan import lower
 from .registry import Registry
 from .table import Grammar
@@ -195,7 +196,45 @@ struct Dialect(Movable):
         """
         var ast = Ast()
         var statement = self.rules.parse_statement(sql, self.grammar, ast)
+        self.settle(ast, catalog)
         return self.run_ast(ast, statement, catalog)
+
+    def settle(self, mut ast: Ast, catalog: Catalog) raises:
+        """Writes what the session says about a statement into its parse.
+
+        The settings decide what an `ORDER BY` that did not say means, and the
+        running `EXECUTE` decides what each parameter is. For the second the
+        arguments are parsed into the same arenas as one row of values, and
+        each parameter node becomes a copy of its argument's first node, so the
+        lowering reads the argument where the parameter was and never learns
+        there was a parameter.
+
+        Args:
+            ast: The statement's arenas, changed in place and added to.
+            catalog: The session.
+
+        Raises:
+            As `taken` does, or if an argument does not parse.
+        """
+        catalog.settings.settle(ast)
+        var takes = taken(ast, catalog.arguments)
+        if len(takes) == 0:
+            return
+        var text = String("VALUES (")
+        for i in range(len(catalog.arguments.texts)):
+            if i > 0:
+                text += ", "
+            text += catalog.arguments.texts[i]
+        text += ")"
+        var values = self.rules.parse_statement(text, self.grammar, ast)
+        if ast.stmts[Int(values)].kind == STMT_SELECT:
+            values = ast.stmts[Int(values)].a
+        if ast.stmts[Int(values)].kind != STMT_VALUES:
+            raise Error("the arguments of an EXECUTE did not read as one row")
+        var row = ast.at(ast.stmts[Int(values)].children, 0)
+        for node in range(len(takes)):
+            if takes[node] >= 0:
+                ast.exprs[node] = ast.exprs[Int(ast.at(row, takes[node]))]
 
     def check_ast(self, ast: Ast, statement: UInt32, catalog: Catalog) raises:
         """Lowers and binds a transformed query without running it.
@@ -236,7 +275,12 @@ struct Dialect(Movable):
         # that a name that resolves against nothing is an error about the query
         # somebody wrote and not about a node a pass built.
         _ = bind(built.plan, built.root, built.sources)
-        var root = optimize(built.plan, built.root, built.sources)
+        var root = optimize(
+            built.plan,
+            built.root,
+            built.sources,
+            catalog.settings.disabled_passes(),
+        )
 
         var frames = _frames(built.plan, root, catalog)
         var pipe = lower_plan(built.plan, root, frames^)

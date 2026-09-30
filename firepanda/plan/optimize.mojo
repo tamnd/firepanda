@@ -89,6 +89,22 @@ would need a definition of equal that every future pass would have to keep
 honest, and there is no version of that which is cheaper than being obviously
 right.
 
+## Turning a pass off
+
+Each pass has a name, and a caller can hand in a list of names to leave out.
+The names are DuckDB's where DuckDB has a pass that does the same job, so that
+`SET disabled_optimizers = 'filter_pushdown'` means here what it means there:
+`expression_rewriter`, `empty_result_pullup`, `unused_columns`, `join_order`,
+`filter_pushdown`, `common_subexpressions`, `limit_pushdown` and
+`common_subplan`. Projection merging has no DuckDB counterpart, because DuckDB
+never builds two projections in a row to merge, so it goes by
+`projection_merge`, which DuckDB does not know.
+
+A pass turned off is skipped and nothing else changes. The order of the rest is
+the order above, and every one of them is a rewrite to a plan that answers the
+same thing, so the answer does not move. That is the property the optimizer off
+equivalence test leans on.
+
 ## What it returns
 
 The root, because predicate pushdown rebuilds the node list and the index the
@@ -121,13 +137,39 @@ few microseconds rather than the query.
 """
 
 
-def optimize(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
+def passes() -> List[StaticString]:
+    """The name of every pass, in the order they run.
+
+    Returns:
+        The names a caller can turn one off by.
+    """
+    return [
+        "expression_rewriter",
+        "empty_result_pullup",
+        "unused_columns",
+        "join_order",
+        "filter_pushdown",
+        "common_subexpressions",
+        "projection_merge",
+        "limit_pushdown",
+        "common_subplan",
+    ]
+
+
+def optimize(
+    mut plan: Plan,
+    root: Int,
+    sources: List[Schema],
+    disabled: List[String] = List[String](),
+) raises -> Int:
     """Runs every pass in the fixed order until the plan stops changing.
 
     Args:
         plan: The plan, rewritten in place.
         root: The node whose output is the answer.
         sources: The schema of each relation, indexed by the id a scan carries.
+        disabled: The names of the passes to leave out, from `passes`. A name
+            that is not one of them turns nothing off.
 
     Returns:
         The new root, which is not the old one when predicate pushdown has
@@ -140,24 +182,36 @@ def optimize(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
     var at = root
     var before = explain(plan, at)
     for _ in range(SWEEPS):
-        at = _sweep(plan, at, sources)
+        at = _sweep(plan, at, sources, disabled)
         var after = explain(plan, at)
         if after == before:
             break
         before = after^
     # Once and at the end, because it is the only pass that leaves the plan a
     # graph and every pass in the sweep is written for a tree.
-    _ = subplan(plan, at, sources)
+    if _on(disabled, "common_subplan"):
+        _ = subplan(plan, at, sources)
     return at
 
 
-def _sweep(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
-    """Runs each pass once, in order.
+def _on(disabled: List[String], name: StringSlice) -> Bool:
+    """Whether the pass called `name` is to run."""
+    for entry in disabled:
+        if entry == name:
+            return False
+    return True
+
+
+def _sweep(
+    mut plan: Plan, root: Int, sources: List[Schema], disabled: List[String]
+) raises -> Int:
+    """Runs each pass once, in order, leaving out the ones turned off.
 
     Args:
         plan: The plan, rewritten in place.
         root: The node whose output is the answer.
         sources: The schema of each relation, indexed by the id a scan carries.
+        disabled: The names of the passes to leave out.
 
     Returns:
         The new root.
@@ -165,12 +219,21 @@ def _sweep(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
     Raises:
         Whatever any of the passes raises.
     """
-    simplify(plan, root)
-    var at = empty(plan, root, sources)
-    _ = prune(plan, at, sources)
-    at = order(plan, at, sources)
-    at = push(plan, at, sources)
-    _ = cse(plan, at, sources)
-    _ = merge(plan, at, sources)
-    _ = limits(plan, at, sources)
+    var at = root
+    if _on(disabled, "expression_rewriter"):
+        simplify(plan, at)
+    if _on(disabled, "empty_result_pullup"):
+        at = empty(plan, at, sources)
+    if _on(disabled, "unused_columns"):
+        _ = prune(plan, at, sources)
+    if _on(disabled, "join_order"):
+        at = order(plan, at, sources)
+    if _on(disabled, "filter_pushdown"):
+        at = push(plan, at, sources)
+    if _on(disabled, "common_subexpressions"):
+        _ = cse(plan, at, sources)
+    if _on(disabled, "projection_merge"):
+        _ = merge(plan, at, sources)
+    if _on(disabled, "limit_pushdown"):
+        _ = limits(plan, at, sources)
     return at
