@@ -6681,6 +6681,49 @@ def _replacing(column: Any, old: Any, new: Any, printed: str, labels: list[Any])
     return kept, _fallback(printed, new, column if printed == "category" else None)
 
 
+def _one_frame(answer: Any) -> Any:
+    """A series as a frame of its one column, and a frame as it is."""
+    return answer if hasattr(answer, "columns") else answer.to_frame()
+
+
+def _periods_whole(periods: Any) -> None:
+    """Refuses a period that is not a whole number, in pandas' words.
+
+    Raises:
+        DTypeError: For a period of any other type.
+    """
+    if not isinstance(periods, int) or isinstance(periods, bool):
+        raise DTypeError(f"Periods must be integer, but {periods} is {type(periods)}.")
+
+
+def _shifted_by_each(periods: Any, suffix: Any, shift: Any) -> Any:
+    """A shift by each of a list of periods, side by side, as pandas answers one.
+
+    Each shift is a frame whose columns are named after the column and the
+    period, with `suffix` between them when there is one, and the frames are
+    joined column by column in the order the periods came in.
+
+    Args:
+        periods: The periods, each a whole number.
+        suffix: Written before the period in each column's name, or nothing.
+        shift: Shifts by one period and answers a frame.
+
+    Raises:
+        InvalidArgumentError: For no periods at all, in pandas' words.
+        DTypeError: For a period that is not a whole number, in pandas' words.
+    """
+    listed = list(periods)
+    if not listed:
+        raise InvalidArgumentError("If `periods` is an iterable, it cannot be empty.")
+    parts = []
+    for period in listed:
+        _periods_whole(period)
+        tail = f"{suffix}_{period}" if suffix else f"_{period}"
+        part = shift(period)
+        parts.append(part.set_axis([f"{name}{tail}" for name in part.columns], axis=1))
+    return concat(parts, axis=1)
+
+
 def _columns_shifted(frame: Any, periods: int, fill_value: Any) -> Any:
     """A frame with its columns moved along by `periods`, as pandas shifts along `axis=1`.
 
@@ -16168,7 +16211,21 @@ class DataFrameMixin(_Carries):
         )
 
     def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> DataFrame:
-        """Moves every column's rows along, leaving the gap missing."""
+        """Moves every column's rows along, leaving the gap missing.
+
+        A list of periods answers a shift by each, side by side, as pandas does.
+        """
+        if _list_like(periods):
+            if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+                raise InvalidArgumentError(
+                    "If `periods` contains multiple shifts, `axis` cannot be 1."
+                )
+            return _shifted_by_each(
+                periods, suffix, lambda one: self._shift(one, freq, axis, fill_value, None)
+            )
+        if suffix:
+            raise InvalidArgumentError("Cannot specify `suffix` if `periods` is an int.")
+        _periods_whole(periods)
         moved = _moved_labels(self, periods, freq, axis)
         if moved is not None:
             return self.set_axis(moved, axis=0)
@@ -16178,12 +16235,6 @@ class DataFrameMixin(_Carries):
             "shifting by a frequency moves the labels rather than the values and"
             " needs the offset vocabulary, which is the resampling milestone",
         )
-        _refuse("suffix", suffix, "it only names the columns a list of periods produces")
-        if not isinstance(periods, int) or isinstance(periods, bool):
-            raise NotImplementedError(
-                "periods has to be a single number for now, because a list of them"
-                " answers a frame with one set of columns per period"
-            )
         if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
             return _columns_shifted(self, periods, fill_value)
         shifted = self._transformed("shift", periods, axis)
@@ -19568,7 +19619,15 @@ class SeriesMixin(_Carries):
         )
 
     def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> Series:
-        """Moves the column's rows along, leaving the gap missing."""
+        """Moves the column's rows along, leaving the gap missing.
+
+        A list of periods answers a frame of a shift by each, as pandas does,
+        and pandas leaves `suffix` out of a series' names.
+        """
+        if _list_like(periods):
+            _axis_number(axis, "Series", 0, (0,))
+            return self.to_frame()._shift(periods, freq, axis, fill_value, None)
+        _periods_whole(periods)
         moved = _moved_labels(self, periods, freq, axis)
         if moved is not None:
             return self.set_axis(moved, axis=0)
@@ -19578,12 +19637,6 @@ class SeriesMixin(_Carries):
             "shifting by a frequency moves the labels rather than the values and"
             " needs the offset vocabulary, which is the resampling milestone",
         )
-        _refuse("suffix", suffix, "it only names the columns a list of periods produces")
-        if not isinstance(periods, int) or isinstance(periods, bool):
-            raise NotImplementedError(
-                "periods has to be a single number for now, because a list of them"
-                " answers a frame with one column per period"
-            )
         rows = len(self)
         moved = min(abs(periods), rows)
         base = self
@@ -25747,10 +25800,11 @@ class GroupByMixin[Answer]:
         """Moves each group's rows along within the group, leaving the gap missing.
 
         Args:
-            periods: How far to move, and a single number.
+            periods: How far to move, or a list of them, which answers a frame
+                of a shift by each side by side, as pandas does.
             freq: Refused.
             fill_value: Held at no value.
-            suffix: Refused.
+            suffix: Written before the period in the names a list of them makes.
 
         Returns:
             The frame or the series pandas answers.
@@ -25761,7 +25815,12 @@ class GroupByMixin[Answer]:
             "shifting by a frequency moves the labels rather than the values and"
             " needs the offset vocabulary, which is the resampling milestone",
         )
-        _refuse("suffix", suffix, "it only names the columns a list of periods produces")
+        if _list_like(periods):
+            return _shifted_by_each(
+                periods, suffix, lambda one: _one_frame(self._shifted(one, freq, fill_value, None))
+            )
+        if suffix:
+            raise InvalidArgumentError("Cannot specify `suffix` if `periods` is an int.")
         _held_at(
             "fill_value",
             fill_value,
@@ -25770,11 +25829,7 @@ class GroupByMixin[Answer]:
             " has to reach the kernel as a typed one rather than as a Python"
             " object",
         )
-        if not isinstance(periods, int) or isinstance(periods, bool):
-            raise NotImplementedError(
-                "periods has to be a single number for now, because a list of them"
-                " answers a frame with one column per period"
-            )
+        _periods_whole(periods)
         return self._shape_rows("shift", periods)
 
     def _differenced(self, periods: Any) -> Answer:
