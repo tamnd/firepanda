@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Selecting a key column with as_index=False
+
+A key column selected from a grouping with `as_index=False` is reduced as a value, as pandas does. A key goes in a column of the answer only when no column already has its name, so a reduced key shows its value alone, and a key from outside the frame named after a column is left out.
+
 ### Added: FrozenList for names, levels and codes
 
 `names` on an index, and `levels` and `codes` on a MultiIndex, answer pandas' `FrozenList`: a list that refuses to be written into with pandas' `TypeError`, prints under its own name with an index or an array inside it printed as its values, and hashes, adds, slices and compares as pandas' does.

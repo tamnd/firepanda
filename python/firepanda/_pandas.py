@@ -21127,11 +21127,17 @@ def _shown_as(owner: Any, answer: Any, rows: bool) -> Any:
         if rows:
             answer = answer.drop(columns=hidden) if hidden else answer
         elif hidden:
+            # pandas puts a key in a column only when no column of the answer has its name.
+            named = {
+                name: _column_name(shown[name], owner._by.index(name), len(owner._by))
+                for name in hidden
+            }
+            taken = set(_shown_names(answer)) - set(hidden)
+            clashing = [name for name in hidden if named[name] in taken]
+            if clashing:
+                answer = answer.drop(columns=clashing)
             answer = answer.rename(
-                columns={
-                    name: _column_name(shown[name], owner._by.index(name), len(owner._by))
-                    for name in hidden
-                }
+                columns={name: named[name] for name in hidden if name not in clashing}
             )
     elif isinstance(answer, SeriesMixin):
         if isinstance(answer.name, str) and answer.name in shown:
@@ -27109,15 +27115,11 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         frame is, so the column itself is free to be a value.
 
         Raises:
-            NotImplementedError: With `as_index=False`, for a category key, and
-                beside a key from outside the frame.
+            NotImplementedError: For a category key, and beside a key from
+                outside the frame.
         """
         from ._frame import DataFrameGroupBy
 
-        if not self._as_index:
-            raise NotImplementedError(
-                "selecting a key column with as_index=False answers the column without its key"
-            )
         if getattr(self, "_shown", None) is not None:
             raise NotImplementedError(
                 "selecting a key column beside a key from outside the frame"
