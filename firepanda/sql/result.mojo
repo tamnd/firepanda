@@ -34,13 +34,14 @@ says `DECIMAL`, which is the bind function disagreeing with the signature and
 is DuckDB's to explain, not this file's. `ceil`, `ceiling` and `floor` keep the
 width and drop the scale to nothing.
 
-The third is the containers, and of those it is the lists that are answered.
-The element is read off the return the same way the whole return is, either
-said outright as in `str_split(VARCHAR, VARCHAR) -> VARCHAR[]` or as a letter
-standing for an argument as in `list(T) -> T[]`. `MAP` is the one left, and it
-is left because a map needs two element types and `SqlType` carries one. That
-returns an invalid type, which is this saying it does not know rather than
-saying anything wrong.
+The third is the containers. A list's element is read off the return the same
+way the whole return is, either said outright as in `str_split(VARCHAR,
+VARCHAR) -> VARCHAR[]` or as a letter standing for an argument as in `list(T)
+-> T[]`. A map is declared as the bare word `MAP`, with nothing in it to read,
+and the one name in the catalog returning one is `histogram`, whose bind
+function keys the map by what it counted and counts in `UBIGINT`, measured:
+`histogram(DECIMAL(5,2))` is `MAP(DECIMAL(5,2), UBIGINT)`, and with a list of
+bins beside it the key is still the first argument's type and not the bins'.
 
 The name is a parameter because DuckDB's own catalog is not enough to answer
 this. A bind function per name is how DuckDB does it and `sum` and `avg` really
@@ -70,6 +71,7 @@ from .types import (
     TYPE_MAP,
     TYPE_STRUCT,
     TYPE_TIMESTAMP,
+    TYPE_UBIGINT,
     TYPE_UNION,
     TYPE_VARCHAR,
     SqlType,
@@ -94,8 +96,8 @@ def result_type(
 
     Returns:
         The type, or an invalid type where it cannot be said. That is a macro,
-        whose body is not in the catalog, and a `MAP`, which needs two element
-        types where `SqlType` carries one.
+        whose body is not in the catalog, and a container that is not a list
+        or a map `histogram` makes.
 
     Raises:
         Error: Never, but the decimal it builds checks its own width.
@@ -123,6 +125,13 @@ def result_type(
         return INVALID
 
     var declared = registry.types[slot]
+    if declared.id == TYPE_MAP and name == "histogram" and len(arguments) > 0:
+        # A key that is itself a container does not fit, and the bare `MAP`
+        # would be a wrong answer rather than no answer.
+        var counted = SqlType.map_of(arguments[0], SqlType(TYPE_UBIGINT))
+        if counted.element_type() == INVALID:
+            return INVALID
+        return counted
     if (
         declared.id == TYPE_LIST
         or declared.id == TYPE_ARRAY

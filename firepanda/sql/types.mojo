@@ -198,7 +198,8 @@ comptime TYPE_STRUCT: UInt8 = 30
 
 
 comptime TYPE_MAP: UInt8 = 31
-"""`MAP`. The key and value types are not carried yet."""
+"""`MAP`, whose key is carried where a list carries its element and whose value
+is carried beside it."""
 
 
 comptime TYPE_UNION: UInt8 = 32
@@ -252,8 +253,8 @@ comptime DECIMAL_DEFAULT_SCALE: UInt8 = 3
 
 @fieldwise_init
 struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
-    """One SQL type: an identifier, a width and scale for a decimal, and an
-    element for a list."""
+    """One SQL type: an identifier, a width and scale for a decimal, an element
+    for a list, and a key and a value for a map."""
 
     var id: UInt8
     """One of the `TYPE_` constants."""
@@ -265,14 +266,24 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     """A decimal's digits after the point. Zero for everything else."""
 
     var element: UInt8
-    """A list's element identifier, and `TYPE_INVALID` for everything else,
-    which includes a list whose element is not known."""
+    """A list's element identifier or a map's key identifier, and
+    `TYPE_INVALID` for everything else, which includes a container whose
+    element is not known."""
 
     var element_width: UInt8
     """The element's total digits, where the element is a decimal."""
 
     var element_scale: UInt8
     """The element's digits after the point, where the element is a decimal."""
+
+    var value: UInt8
+    """A map's value identifier, and `TYPE_INVALID` for everything else."""
+
+    var value_width: UInt8
+    """The value's total digits, where the value is a decimal."""
+
+    var value_scale: UInt8
+    """The value's digits after the point, where the value is a decimal."""
 
     def __init__(out self, id: UInt8):
         """A type with nothing else to carry.
@@ -286,6 +297,9 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         self.element = TYPE_INVALID
         self.element_width = 0
         self.element_scale = 0
+        self.value = TYPE_INVALID
+        self.value_width = 0
+        self.value_scale = 0
 
     def __init__(out self, id: UInt8, width: UInt8, scale: UInt8):
         """A decimal, or a type with a width and scale of nothing.
@@ -301,6 +315,9 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         self.element = TYPE_INVALID
         self.element_width = 0
         self.element_scale = 0
+        self.value = TYPE_INVALID
+        self.value_width = 0
+        self.value_scale = 0
 
     @staticmethod
     def list_of(element: SqlType) -> Self:
@@ -326,14 +343,73 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         out.element_scale = element.scale
         return out
 
-    def element_type(self) -> Self:
-        """What a list holds.
+    @staticmethod
+    def map_of(key: SqlType, value: SqlType) -> Self:
+        """A map from one type to another.
+
+        The key goes where a list keeps its element and the value beside it,
+        each flattened the same way, so a map keyed or valued by a container is
+        not expressible and comes back as the bare `MAP`, which is what there
+        is to say about it.
+
+        Args:
+            key: What the map is keyed by.
+            value: What it holds against each key.
 
         Returns:
-            The element type, or an invalid type where this is not a list or is
-            a list whose element is not known.
+            The map type.
+        """
+        var out = Self(TYPE_MAP)
+        if not key._flat() or not value._flat():
+            return out
+        out.element = key.id
+        out.element_width = key.width
+        out.element_scale = key.scale
+        out.value = value.id
+        out.value_width = value.width
+        out.value_scale = value.scale
+        return out
+
+    def _flat(self) -> Bool:
+        """Whether this fits in a container's element, which is a scalar that
+        is known."""
+        return (
+            self.id != TYPE_INVALID
+            and self.id != TYPE_LIST
+            and self.id != TYPE_ARRAY
+            and self.id != TYPE_MAP
+            and self.id != TYPE_STRUCT
+            and self.id != TYPE_UNION
+        )
+
+    def element_type(self) -> Self:
+        """What a list holds, or what a map is keyed by.
+
+        Returns:
+            The element type, or an invalid type where this is neither or its
+            element is not known.
         """
         return Self(self.element, self.element_width, self.element_scale)
+
+    def key_type(self) -> Self:
+        """What a map is keyed by, which is kept where a list keeps its element.
+
+        Returns:
+            The key type, or an invalid type where this is not a map or is a
+            map whose types are not known.
+        """
+        if self.id != TYPE_MAP:
+            return Self(TYPE_INVALID)
+        return self.element_type()
+
+    def value_type(self) -> Self:
+        """What a map holds against each key.
+
+        Returns:
+            The value type, or an invalid type where this is not a map or is a
+            map whose types are not known.
+        """
+        return Self(self.value, self.value_width, self.value_scale)
 
     def __eq__(self, other: Self) -> Bool:
         """Whether two types are the same type.
@@ -341,7 +417,8 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         A decimal is the same as another decimal only at the same width and
         scale, since `DECIMAL(4,2)` and `DECIMAL(5,2)` hold different values and
         the corpus can see the difference through `typeof()`. A list is the same
-        as another list only over the same element, for the same reason.
+        as another list only over the same element, and a map as another map
+        only over the same key and value, for the same reason.
 
         Args:
             other: The other type.
@@ -356,6 +433,9 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             and self.element == other.element
             and self.element_width == other.element_width
             and self.element_scale == other.element_scale
+            and self.value == other.value
+            and self.value_width == other.value_width
+            and self.value_scale == other.value_scale
         )
 
     def __ne__(self, other: Self) -> Bool:
@@ -390,6 +470,14 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return String("DECIMAL(", self.width, ",", self.scale, ")")
         if self.id == TYPE_LIST and self.element != TYPE_INVALID:
             return String(self.element_type().name(), "[]")
+        if self.id == TYPE_MAP and self.element != TYPE_INVALID:
+            return String(
+                "MAP(",
+                self.element_type().name(),
+                ", ",
+                self.value_type().name(),
+                ")",
+            )
         return String(type_name(self.id))
 
     def is_integer(self) -> Bool:

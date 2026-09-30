@@ -292,20 +292,62 @@ def test_a_list_return_is_a_list_of_the_element_it_was_given() raises:
     )
 
 
-def test_a_map_return_is_left_unsaid() raises:
-    """`histogram` returns a `MAP` and a map needs two element types.
+def test_a_histogram_is_a_map_from_what_it_counted() raises:
+    """`histogram` is declared as returning the bare `MAP`.
 
-    `SqlType` carries one, so the key has somewhere to go and the value has
-    not. The call resolves, so what is refused here is the type and not the
-    binding, and that is the whole of what issue #780 is left with.
+    Its key is the type of what it counted and its value is the count, a
+    `UBIGINT`. With a list of bins beside it the key is still the first
+    argument's type, so `histogram(INTEGER, DECIMAL(2,1)[])` is keyed by
+    `INTEGER`.
     """
     var registry = Registry()
     var casts = Casts()
-    var at = registry.find("histogram")
-    var arguments = List[SqlType]()
-    arguments.append(SqlType(TYPE_INTEGER))
-    assert_true(resolve(registry, casts, at, arguments).matched())
+    assert_equal(
+        _typed(registry, casts, "histogram", [SqlType(TYPE_INTEGER)]),
+        String("MAP(INTEGER, UBIGINT)"),
+    )
+    assert_equal(
+        _typed(registry, casts, "histogram", [decimal(5, 2)]),
+        String("MAP(DECIMAL(5,2), UBIGINT)"),
+    )
+    assert_equal(
+        _typed(registry, casts, "histogram", [SqlType(TYPE_VARCHAR)]),
+        String("MAP(VARCHAR, UBIGINT)"),
+    )
+    assert_equal(
+        _typed(
+            registry,
+            casts,
+            "histogram",
+            [SqlType(TYPE_INTEGER), SqlType.list_of(decimal(2, 1))],
+        ),
+        String("MAP(INTEGER, UBIGINT)"),
+    )
+
+
+def test_a_map_keyed_by_a_list_is_left_unsaid() raises:
+    """A key that is a list does not fit in a flat key, and DuckDB's
+    `MAP(INTEGER[], UBIGINT)` is not the bare `MAP`, so nothing is said."""
+    var registry = Registry()
+    var casts = Casts()
+    var arguments: List[SqlType] = [SqlType.list_of(SqlType(TYPE_INTEGER))]
     assert_equal(_typed(registry, casts, "histogram", arguments), String())
+
+
+def test_two_maps_are_the_same_map_only_over_the_same_key_and_value() raises:
+    var small = SqlType.map_of(SqlType(TYPE_INTEGER), SqlType(TYPE_VARCHAR))
+    assert_true(
+        small == SqlType.map_of(SqlType(TYPE_INTEGER), SqlType(TYPE_VARCHAR))
+    )
+    assert_true(
+        small != SqlType.map_of(SqlType(TYPE_INTEGER), SqlType(TYPE_BIGINT))
+    )
+    assert_true(
+        small != SqlType.map_of(SqlType(TYPE_BIGINT), SqlType(TYPE_VARCHAR))
+    )
+    assert_true(small != SqlType.list_of(SqlType(TYPE_INTEGER)))
+    assert_equal(small.key_type().name(), "INTEGER")
+    assert_equal(small.value_type().name(), "VARCHAR")
 
 
 def main() raises:
