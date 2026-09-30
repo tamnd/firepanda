@@ -189,7 +189,9 @@ def _read_as_timed(column: Any, dtype: str) -> Any:
 
     pandas parses text and reads numbers for these dtypes where a cast would
     hand back the counts they are stored as, so the column goes through
-    `to_datetime` or `to_timedelta` and then takes the unit. None for any other
+    `to_datetime` or `to_timedelta` and then takes the unit. Each instant is
+    parsed on its own, as pandas does here, rather than in the format the first
+    one sets. None for any other
     dtype, or a column that already holds that kind.
     """
     kind, _, rest = dtype.partition("[")
@@ -201,7 +203,7 @@ def _read_as_timed(column: Any, dtype: str) -> Any:
     if kind == "timedelta64":
         read = to_timedelta(column)
     else:
-        read = to_datetime(column)
+        read = to_datetime(column, format="mixed")
         if zone.strip():
             read = read.dt.tz_localize(zone.strip())
     return read.dt.as_unit(unit.strip())

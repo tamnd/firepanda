@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Instants asked for by dtype are parsed one by one
+
+A series or index built with `dtype="datetime64[unit]"` now parses each value on its own, as pandas does there, so values written in different formats, such as a date and a date with a time, are all read rather than refused for not matching the first.
+
 ### Added: dtype on the Index constructor, and instants and spans by dtype
 
 `Index(data, dtype=...)` now reads the labels the way a series of that type reads them, and `copy=` is taken since the labels are always copied. An object or masked type is still refused by name. A series asked for `datetime64[unit]` or `timedelta64[unit]`, with a zone or without, now parses its values as `to_datetime` and `to_timedelta` do rather than refusing. A list handed to a series or frame with a whole number type is refused as pandas refuses it when it holds a gap, a NaN, an infinity, a fraction or a number outside the type's range, rather than being truncated or wrapped.
