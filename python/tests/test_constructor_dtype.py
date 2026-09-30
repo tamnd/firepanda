@@ -73,6 +73,15 @@ CASES: dict[str, Callable[[ModuleType], Any]] = {
     "astype-text-dates-ms": lambda lib: lib.Series(["2026-01-01 10:00:00.5"]).astype(
         "datetime64[ms]"
     ),
+    "astype-text-mixed": lambda lib: lib.Series(["2026-01-01", None, "2026-03-04 10:00"]).astype(
+        "datetime64[ms]"
+    ),
+    "astype-text-words": lambda lib: lib.Series(["Jan 2 2026", "2026-01-03"]).astype(
+        "datetime64[s]"
+    ),
+    "astype-text-named": lambda lib: lib.Series(["2026-01-01"], index=[5], name="d").astype(
+        "datetime64[ns]"
+    ),
     "astype-text-spans": lambda lib: lib.Series(["1D", "2h", None]).astype("timedelta64[s]"),
     "astype-text-bad": lambda lib: lib.Series(["nope"]).astype("datetime64[ns]"),
     "astype-frame-dates": lambda lib: (
