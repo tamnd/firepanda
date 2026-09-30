@@ -8682,7 +8682,11 @@ def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value
             _moved_to(other, joined, None, fill_value),
         )
     rows = _aligned_labels(this.index, other.index, join)
-    return _moved_to(this, rows, None, fill_value), _moved_to(other, rows, None, fill_value)
+    pair = _moved_to(this, rows, None, fill_value), _moved_to(other, rows, None, fill_value)
+    if mine_frame or isinstance(other, DataFrame) or fill_value is None:
+        return pair
+    # Two columns are filled everywhere, so a gap each side already had goes too.
+    return pair[0].fillna(fill_value), pair[1].fillna(fill_value)
 
 
 def _repeated_positions(count: int, repeats: Any, axis: Any) -> list[int]:
@@ -30684,6 +30688,30 @@ def to_datetime(
     )
 
 
+_COARSE_UNITS = {"D": 86400, "h": 3600, "m": 60}
+"""The units coarser than a second that `to_datetime` reads, in seconds each."""
+
+_UNIT_NANOS = {"D": 86400 * 10**9, "h": 3600 * 10**9, "m": 60 * 10**9, "s": 10**9}
+_UNIT_NANOS.update({"ms": 10**6, "us": 10**3, "ns": 1})
+"""Each unit `to_datetime` reads, in nanoseconds."""
+
+
+def _nanos_of(column: Any, unit: str) -> Any:
+    """Counts of `unit` with fractions in them, as whole nanoseconds the way pandas takes them.
+
+    pandas splits each count into its whole part and its fraction, rounds the
+    fraction to the digits the unit has below a second, and drops what is left
+    of it once it is in nanoseconds.
+    """
+    scale = _UNIT_NANOS[unit]
+    whole = _truncated(column)
+    fraction = column - whole
+    digits = {"ms": 6, "us": 3, "ns": 0}.get(unit, 9)
+    if digits:
+        fraction = fraction.round(digits)
+    return whole.astype("int64") * scale + _truncated(fraction * scale).astype("int64")
+
+
 def _instants(
     arg: Any,
     errors: str,
@@ -30718,6 +30746,22 @@ def _instants(
         values = _moments_among_text(values, errors, dayfirst, yearfirst, utc, format, unit)
         blank = all(_row_dates.missing(value) for value in values)
         column = Series(values, dtype="str" if blank else None)
+    if unit in _UNIT_NANOS and _word(column.dtype) in _FLOATING:
+        # pandas reads whole floats as it reads integers, and any fraction
+        # makes it count every row in nanoseconds.
+        gaps = column.isna()
+        if bool(((column % 1 == 0) | gaps).all()):
+            counts = column.fillna(0).astype("int64")
+        else:
+            counts = _nanos_of(column.fillna(0), unit)
+            unit = "ns"
+        read = _instants(counts, errors, dayfirst, yearfirst, utc, format, exact, unit, origin)
+        return read.mask(gaps) if bool(gaps.any()) else read
+    if unit in _COARSE_UNITS and _word(column.dtype) not in ("string", "str"):
+        # Arrow counts from seconds down, so a count of days, hours or minutes
+        # is a count of seconds first, and pandas holds those at seconds too.
+        column = column * _COARSE_UNITS[unit]
+        unit = "s"
     order = (bool(dayfirst), bool(yearfirst))
     if format == "mixed":
         return _dates_by_row(column, True, errors == "coerce", utc, *order)
@@ -30730,7 +30774,7 @@ def _instants(
         if read is not None:
             return read
     try:
-        return Series._wrap(
+        read = Series._wrap(
             column._inner.to_datetime(
                 "" if format is None else format,
                 "ns" if unit is None else unit,
@@ -30745,6 +30789,13 @@ def _instants(
         if read is None:
             raise translate(error) from None
         return read
+    if format is not None and errors == "coerce" and len(read) and read.isna().all():
+        # Nothing parsed, and pandas holds a column of nothing at seconds.
+        return read.dt.as_unit("s")
+    if utc and unit is not None and read.dt.tz is None:
+        # Counts from the epoch are instants in UTC already, so they only need saying so.
+        return read.dt.tz_localize("UTC")
+    return read
 
 
 def _moments_among_text(
