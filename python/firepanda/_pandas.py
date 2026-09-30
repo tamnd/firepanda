@@ -26121,27 +26121,39 @@ class GroupByMixin[Answer]:
         Args:
             kind: `cumsum`, `cumprod`, `cummax` or `cummin`.
             numeric_only: Whether to fold only the number and flag columns.
-            args: The numpy compatibility arguments, refused if there are any.
-            kwargs: The same, by keyword.
+            args: The numpy compatibility arguments, refused with pandas' error if there are any.
+            kwargs: The same, by keyword, where pandas also takes `skipna`. A
+                gap that may not be skipped leaves the rest of its group
+                missing. `cummin` and `cummax` pass over any other keyword,
+                as pandas does.
 
         Returns:
             The frame or the series pandas answers.
         """
-        if args or kwargs:
-            raise UnsupportedError(
-                f"the extra arguments of {kind} are not taken, because pandas only"
-                " passes them on to numpy and none of them mean anything here"
+        extra = dict(kwargs or {})
+        skipna = extra.pop("skipna", True)
+        if kind in ("cummin", "cummax"):
+            # pandas reads only `skipna` from these two and passes over any other keyword.
+            extra = {}
+        if args or extra:
+            raise InvalidArgumentError(
+                f"numpy operations are not valid with groupby. Use .groupby(...).{kind}() instead"
             )
         if _flag("numeric_only", numeric_only) and getattr(self, "_column", None) is None:
             # A group by over one column folds it whatever the flag says, as in pandas.
-            return self._numeric_only(kind)._cumulative(kind, False)
+            return self._numeric_only(kind)._cumulative(kind, False, (), {"skipna": skipna})
         texts = self._text_values()
         if texts:
             word = str(self._frame[texts[0]].dtype)
             if kind in ("cummin", "cummax"):
                 raise TypeError(f"{kind} is not supported for {word} dtype")
             raise TypeError(f"dtype '{word}' does not support operation '{kind}'")
-        return self._shape_rows(kind, 1)
+        answer = self._shape_rows(kind, 1)
+        if _flag("skipna", skipna):
+            return answer
+        # A row keeps its value only while every row of its group so far held one.
+        flags = self._over_flags()._shape_rows("cummin", 1)
+        return self._blanked(answer, flags, lambda there: there.astype(bool))
 
     def _counted(self, kind: str, ascending: bool) -> Series:
         """Numbers the rows within their group, or the groups themselves.
