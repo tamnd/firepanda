@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: pivot_table margins refuse column keys that are not text
+
+`pivot_table(margins=True)` with a columns key of numbers now raises NotImplementedError by name, because pandas labels the column of totals with text beside the numbers in an index of objects. It used to fail looking for the numbers as text.
+
 ### Added: pivot_table margins
 
 `pivot_table(margins=True)` adds the row of totals, and under a columns key the column of totals, labelled `margins_name`, for one row key of text and a function named by text. As in pandas the totals come from the rows with no gap in any key or value, though the body keeps those rows. A list of value columns is now sorted when `sort=True`, and with `dropna=True` a row whose aggregates are all missing is dropped, both as pandas does.
