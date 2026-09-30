@@ -130,16 +130,10 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 def test_what_is_not_written_is_refused(firepanda: ModuleType) -> None:
-    """A list of frames, and text labels that go missing."""
-    left, right = keyed(firepanda, LEFT), keyed(firepanda, RIGHT)
-    for build in (
-        lambda: left.join([right, right]),
-        lambda: keyed(firepanda, {"t": ["p", "q", "r", "s"], **LEFT}, "t").join(
-            right, on="k", how="outer"
-        ),
-    ):
-        with pytest.raises(NotImplementedError):
-            build()
+    """Text labels that go missing."""
+    right = keyed(firepanda, RIGHT)
+    with pytest.raises(NotImplementedError):
+        keyed(firepanda, {"t": ["p", "q", "r", "s"], **LEFT}, "t").join(right, on="k", how="outer")
 
 
 def test_the_method_has_the_pandas_signature(firepanda: ModuleType) -> None:

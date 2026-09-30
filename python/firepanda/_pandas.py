@@ -15942,23 +15942,18 @@ class DataFrameMixin(_Carries):
 
         This is `merge` with the other side keyed on its labels, and this side
         keyed on its own labels or on the columns named by `on`. A named series
-        is a column. A list of one frame is that frame, and a longer list is
-        refused, since pandas joins those by a different road.
+        is a column. A list of frames takes pandas' road for a list, which lays
+        them side by side when every one labels its rows once.
 
         Raises:
             InvalidArgumentError: For a series with no name, or overlapping
                 columns and no suffix.
-            UnsupportedError: For a list of more than one frame, or a cross
-                join.
+            UnsupportedError: For a cross join.
         """
         from ._frame import Series
 
         if isinstance(other, (list, tuple)):
-            if len(other) != 1:
-                raise UnsupportedError(
-                    "join of a list of frames is not written yet, so join them one at a time"
-                )
-            (other,) = other
+            return self._join_many(list(other), on, how, lsuffix, rsuffix, sort, validate)
         if isinstance(other, Series) and other.name is None:
             raise InvalidArgumentError("Other Series must have a name")
         if how == "cross":
@@ -15981,6 +15976,50 @@ class DataFrameMixin(_Carries):
             suffixes=(lsuffix, rsuffix),
             validate=validate,
         )
+
+    def _join_many(
+        self,
+        others: list[Any],
+        on: Any,
+        how: str,
+        lsuffix: str,
+        rsuffix: str,
+        sort: bool,
+        validate: Any,
+    ) -> DataFrame:
+        """Joins a list of frames on their row labels, which is pandas' road for a list.
+
+        When every frame labels its rows once, pandas lays them side by side
+        with `concat`, outer for a left or right join and then put in the order
+        of this frame or the last one. Otherwise it merges them one after
+        another on their labels.
+        """
+        if on is not None:
+            raise InvalidArgumentError(
+                "Joining multiple DataFrames only supported for joining on index"
+            )
+        if lsuffix or rsuffix:
+            raise InvalidArgumentError("Suffixes not supported when joining multiple DataFrames")
+        frames = [self, *others]
+        if all(frame.index.is_unique for frame in frames):
+            if how in ("left", "right"):
+                laid = concat(frames, axis=1, join="outer", verify_integrity=True, sort=sort)
+                index = self.index if how == "left" else frames[-1].index
+                return laid.reindex(index.sort_values() if sort else index)
+            sort = True if how == "outer" else sort
+            return concat(frames, axis=1, join=how, verify_integrity=True, sort=sort)
+        joined: Any = self
+        for frame in others:
+            joined = merge(
+                joined,
+                frame,
+                sort=sort,
+                how=how,
+                left_index=True,
+                right_index=True,
+                validate=validate,
+            )
+        return joined
 
     def _sort_values(
         self,
