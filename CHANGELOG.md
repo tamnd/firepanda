@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: isin on instant and span columns
+
+`Series.isin` and `DataFrame.isin` on a datetime or timedelta column find a row by its value the way pandas does, instead of refusing. A `Timestamp`, `datetime`, `Timedelta`, `DatetimeIndex` or datetime Series in the set is read in the column's unit, an aware instant finds a row in any zone when the column has a zone too, and text, numbers and an instant of the other awareness find nothing. `NaT` and `None` find the gaps.
+
 ### Added: categories of instants and spans
 
 `astype("category")` of a datetime or timedelta column keeps the categories as instants or spans, as pandas does, rather than refusing. A gap reads as NaT, the values and a `CategoricalIndex` print as their own index prints them, the column casts back, counts, groups, compares and takes its ordered minimum as the value, and `.dt` reads the fields off the values. A series built with a datetime dtype from instants already of that kind now takes the unit.

@@ -4533,18 +4533,6 @@ _ISIN_FRAME = (
 )
 """What pandas says when `DataFrame.isin` is handed something it cannot iterate."""
 
-_ISIN_TEMPORAL = (
-    "isin cannot look a timestamp up in a {} column yet, because the set crosses into the"
-    " extension as a column and a column of timestamps cannot be built out of Python objects"
-)
-"""Why a temporal column refuses a set of timestamps instead of answering false everywhere.
-
-Everything else this method cannot hold is dropped from the set on the grounds that a value the
-column cannot hold is a value no row can equal, and that is pandas' own answer. A timestamp against
-a datetime column is the one case where dropping it would be wrong, since pandas finds those rows,
-so it is refused out loud rather than answered with a column of falses that looks like a result."""
-
-
 def _isin_set(values: Any, sentence: str) -> list[Any]:
     """The set a membership test is against, as a plain list.
 
@@ -4567,6 +4555,8 @@ def _isin_set(values: Any, sentence: str) -> list[Any]:
             one, since what went wrong is the kind of the argument rather than its value.
     """
     if isinstance(values, (SeriesMixin, IndexMixin)):
+        if str(values.dtype).startswith(("datetime64", "timedelta64")):
+            return list(values.tolist())
         return list(values._inner.to_list())
     if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
         raise DTypeError(sentence.format(type(values).__name__))
@@ -4667,13 +4657,12 @@ def _isin_mask(column: Any, values: list[Any]) -> Any:
         The inner boolean column, with the column's own name and labels on it and with no nulls
         left in it, which is what makes it a pandas answer rather than a SQL one.
 
-    Raises:
-        UnsupportedError: If a temporal column is asked about a timestamp.
     """
     from ._frame import Series
 
     inner = column._inner
     printed = inner.dtype()
+    timed = printed.startswith(("datetime64", "timedelta64"))
     if printed == "category":
         looked = inner.codes()
         keep: list[Any] = list(_isin_codes(column, values))
@@ -4681,12 +4670,14 @@ def _isin_mask(column: Any, values: list[Any]) -> Any:
     else:
         # `NaT` is the gap of a moment or a span, and finds it through `_isin_nulls` below.
         present = [value for value in values if value is not NaT]
-        _isin_no_timestamps(printed, present)
         looked = inner
-        keep = _isin_wanted(printed, present)
+        keep = _isin_timed(printed, present) if timed else _isin_wanted(printed, present)
         against = printed
     try:
-        if keep:
+        if timed and keep:
+            mask = looked.is_in(keep[0]._inner)
+            mask = mask.fill_null(Series([False])._inner)
+        elif keep:
             mask = looked.is_in(Series(keep)._inner.cast(against, True))
             mask = mask.fill_null(Series([False])._inner)
         else:
@@ -4704,12 +4695,29 @@ def _isin_mask(column: Any, values: list[Any]) -> Any:
         raise translate(error) from None
 
 
-def _isin_no_timestamps(printed: str, values: list[Any]) -> None:
-    """Refuses the one set a temporal column would answer wrongly rather than loudly."""
-    if not printed.startswith(("datetime64", "timestamp")):
-        return
-    if any(isinstance(value, (datetime.date, datetime.datetime)) for value in values):
-        raise UnsupportedError(_ISIN_TEMPORAL.format(printed))
+def _isin_timed(printed: str, values: list[Any]) -> list[Any]:
+    """The set an instant or span column looks for, as one column of its own type, or nothing.
+
+    pandas reads the set as instants or spans of the column's unit and finds a
+    row by its value. Text and numbers find nothing, and an instant finds a row
+    only when both have a zone or neither does, the zones themselves not
+    mattering since an instant is the same instant in any.
+    """
+    from ._frame import Series
+    from ._scalars import Timedelta, Timestamp
+
+    zone = printed.partition(", ")[2].rstrip("]")
+    spans = printed.startswith("timedelta64")
+    read: list[Any] = []
+    for value in values:
+        if spans and isinstance(value, datetime.timedelta):
+            read.append(Timedelta(value))
+        elif not spans and isinstance(value, datetime.datetime):
+            one = Timestamp(value)
+            if (one.tzinfo is None) != bool(zone):
+                read.append(one.tz_convert(zone) if zone else one)
+    kept = [one for one in read if one is not NaT]
+    return [Series(kept).dt.as_unit(_unit_of(printed))] if kept else []
 
 
 def _isin_framed(frame: Any, columns: dict[str, Any]) -> DataFrame:
