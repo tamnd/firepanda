@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 from types import ModuleType
 from typing import Any
 
@@ -48,6 +49,15 @@ CASES = {
         m.Series([1.0, None, 3.0, None, None, 4.0]).ewm(alpha=0.5, adjust=False).mean()
     ),
     "repr": lambda m: _values(m).ewm(halflife="1D", times=_times(m)),
+    "index": lambda m: _values(m).ewm(halflife="1D", times=m.to_datetime(DAYS)).mean(),
+    "infinite": lambda m: (
+        m.Series([-math.inf, math.inf, 2.0, None, 4.0])
+        .ewm(halflife="1D", times=_times(m), adjust=False)
+        .mean()
+    ),
+    "seconds": lambda m: (
+        _values(m).ewm(halflife="2s", times=m.to_datetime([0, 1, 4, 9, 16], unit="s")).mean()
+    ),
 }
 
 

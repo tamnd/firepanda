@@ -59,7 +59,7 @@ def _steps(times: Any, halflife: Any) -> list[float]:
 
     printed = str(times.dtype)
     unit = printed[printed.index("[") + 1 :].split(",")[0].rstrip("]")
-    if bool(times.isna().any()):
+    if any(times.isna()):
         raise InvalidArgumentError("Cannot convert NaT values to integer")
     instants = [float(value) for value in times.astype("int64").tolist()]
     span = float(Timedelta(halflife).value) / _NANOSECONDS[unit]
@@ -105,10 +105,9 @@ def _decayed(
 
 
 def _floats(column: Any) -> list[float]:
-    """A column's values as floats, with NaN for a gap."""
-    return [
-        math.nan if value is None or value != value else float(value) for value in column.tolist()
-    ]
+    """A column's values as floats, with NaN for a gap and for an infinity, as pandas reads them."""
+    floats = (math.nan if value is None else float(value) for value in column.tolist())
+    return [value if math.isfinite(value) else math.nan for value in floats]
 
 
 def _column_mean(
