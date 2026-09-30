@@ -286,6 +286,7 @@ that gets caught.
 """
 
 _pandas._allow_positional(DataFrame, Series)
+_pandas._refuse_axis_none(DataFrame, Series)
 _attrs.install()
 # Last, because it wraps the classes and the functions imported above so that
 # what they answer keeps `attrs` and `flags` the way pandas' answers do.

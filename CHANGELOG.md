@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: axis=None refused where pandas refuses it
+
+`axis=None` was read as the default axis by every method, where pandas reads it that way only on the reductions and the methods that fill, mask or align. `rank`, `shift`, `sort_values`, `sort_index`, `drop`, `take`, `set_axis`, `interpolate`, `idxmin` and `idxmax` on a frame or a series, and `diff`, `pct_change`, `dropna`, `mode`, `apply` and `corrwith` on a frame, now raise pandas' "No axis named None for object type" ValueError.
+
 ### Added: skipna on a group by's cumsum, cumprod, cummin and cummax
 
 The four running folds of a group by take `skipna` through their keywords as pandas does, where any keyword used to be refused. `skipna=False` leaves every row of a group after its first gap missing. `cummin` and `cummax` pass over any other keyword, as pandas does, and `cumsum` and `cumprod` refuse one with pandas' "numpy operations are not valid with groupby" ValueError.
