@@ -1644,14 +1644,25 @@ def _refuse(name: str, value: object, why: str) -> None:
         raise NotImplementedError(f"{name}= is not supported yet, because {why}")
 
 
-def _no_level(level: Any) -> None:
-    """Refuses the `level` argument every named arithmetic form declares.
+def _spread_on_level(other: Any, labels: Any, level: Any, fill_value: Any = None) -> Any:
+    """A column on flat labels read out once for every row of a MultiIndex, by one level.
 
-    pandas takes a level to say which level of a MultiIndex to align on, and
-    firepanda has no MultiIndex yet, so there is nothing for it to name. It is
-    declared rather than left out for the reason `_refuse` gives: the signature
-    parity test compares the whole parameter list against a running pandas, and a
-    caller who passes one is told what is missing.
+    This is pandas' `level=` in arithmetic: each row takes the value the other
+    side holds for its label on that level, and NaN where it holds none, or
+    `fill_value` when one is given, since that side is then the one missing.
+    """
+    keys = labels.get_level_values(level)
+    if fill_value is None:
+        return other.reindex(keys).set_axis(labels)
+    return other.reindex(keys, fill_value=fill_value).set_axis(labels)
+
+
+def _no_level(level: Any) -> None:
+    """Refuses the `level` argument where the call does not read one yet.
+
+    pandas takes a level to say which level of a MultiIndex to align on. The
+    arithmetic reads it for a column on flat labels against a MultiIndex, and
+    the calls that do not read it say so rather than ignoring it.
 
     Args:
         level: What was passed.
@@ -1661,8 +1672,8 @@ def _no_level(level: Any) -> None:
     """
     if level is not None:
         raise NotImplementedError(
-            "level= is not supported yet, because aligning on one level of a"
-            " MultiIndex needs a MultiIndex, and there is not one yet"
+            "level= is not supported yet here, because this call does not read one"
+            " level of a MultiIndex"
         )
 
 
@@ -14298,8 +14309,13 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        _no_level(level)
         number = _axis_number(axis, "DataFrame", 1, (0, 1))
+        if level is not None:
+            along = self.index if number == 0 else self.columns
+            if isinstance(other, SeriesMixin) and _is_multi(along) and not _is_multi(other.index):
+                other = _spread_on_level(other, along, level, fill_value)
+            elif isinstance(other, (DataFrameMixin, SeriesMixin)):
+                _no_level(level)
         other = _listed_frame_operand(self, other, number)
         try:
             if isinstance(other, DataFrameMixin):
@@ -18645,8 +18661,16 @@ class SeriesMixin(_Carries):
         """
         from ._frame import Series
 
-        _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
+        if level is not None and isinstance(other, SeriesMixin):
+            if _is_multi(self.index) and not _is_multi(other.index):
+                other = _spread_on_level(other, self.index, level, fill_value)
+            elif _is_multi(other.index) and not _is_multi(self.index):
+                spread = _spread_on_level(self, other.index, level, fill_value)
+                return spread._named(other, op, axis, None, fill_value, flip)
+            else:
+                _no_level(level)
+        level = None
         if _sparse_side(self, other):
             return _sparse.operated(
                 self,
