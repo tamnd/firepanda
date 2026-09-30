@@ -8835,7 +8835,8 @@ def _number_categories(column: Series, widen: bool = True) -> Series:
 
     values = _held_values(column._inner)
     gaps = any(_objects.is_gap(value) for value in values)
-    if widen and gaps and _word(column.dtype).startswith(("int", "uint")):
+    printed = _word(column.dtype)
+    if widen and gaps and printed.startswith(("int", "uint")) and printed[:8] != "interval":
         values = [value if _objects.is_gap(value) else float(value) for value in values]
     kept = sorted({value for value in values if not _objects.is_gap(value)})
     kind = _objects.interval_name_of(column._inner)
@@ -33968,36 +33969,127 @@ def wide_to_long(
     return kept.merge(stacked.reset_index(), on=ids).set_index([*ids, j])
 
 
-def _cut_values(x: Any, caller: str) -> tuple[Any, Any]:
-    """The values `cut` and `qcut` bin, as float64 numpy, and the column they came from.
+class _Moments:
+    """Instants or spans that `cut` and `qcut` bin as whole counts of their unit.
+
+    pandas bins them by their counts and turns each edge back into an instant or a
+    span of the same unit and zone, so the bins are intervals of those.
+    """
+
+    def __init__(self, unit: str, zone: Any, span: bool, absent: Any) -> None:
+        self.unit, self.zone, self.span, self.absent = unit, zone, span, absent
+
+    def stamp(self, tick: Any) -> Any:
+        """A count of the unit as the instant or span it is."""
+        from ._scalars import Timestamp
+
+        if self.span:
+            return Timedelta(int(tick), unit=self.unit)
+        return Timestamp(int(tick), unit=self.unit, tz=self.zone)
+
+    def ticks(self, ends: Any) -> Any:
+        """Instants or spans as counts of the unit.
+
+        Raises:
+            ValueError: For ends that are not of the values' kind, with pandas' words.
+        """
+        from ._scalars import Timestamp
+
+        numpy = _numpy()
+        kind = Timedelta if self.span else Timestamp
+        found = [_interval._plain(end) for end in ends]
+        if not all(isinstance(end, kind) for end in found):
+            raise InvalidArgumentError(
+                f"bins must be of {'timedelta' if self.span else 'datetime'}64 dtype"
+            )
+        scale = 1000 ** (3 - ("s", "ms", "us", "ns").index(self.unit))
+        return numpy.array([end.value // scale for end in found], dtype="int64")
+
+    def index(self, edges: Any, name: Any = None) -> Any:
+        """The edges as an index of instants or spans."""
+        from ._frame import Index
+
+        return Index([self.stamp(edge) for edge in edges], name=name)
+
+
+def _cut_values(x: Any) -> tuple[Any, Any, Any]:
+    """The values `cut` and `qcut` bin, the column they came from, and how instants read.
+
+    Numbers come as float64 numpy with NaN for a gap. Instants and spans come as
+    whole counts of their unit, with the gaps kept by the third part.
 
     Raises:
         ValueError: For values that are not in one line, with pandas' words.
-        NotImplementedError: For instants and spans, whose bins are instants.
     """
     from ._frame import Index, Series
 
     numpy = _numpy()
-    column = x if isinstance(x, Series) else None
+    # Values that are not a column are binned as one without labels, see `_bare`.
+    column = x if isinstance(x, Series) else Series(range(len(x)), dtype="int64")
     if isinstance(x, Series | Index):
         printed = _word(x.dtype)
-        if printed.startswith(("datetime", "timedelta")):
-            raise NotImplementedError(
-                f"{caller}: bins of instants or spans are not supported yet, because the"
-                " edges would have to be instants too"
-            )
         found = x.tolist()
+        if printed.startswith(("datetime", "timedelta")):
+            absent = numpy.array([_missing(v) for v in found], dtype=bool)
+            zone = None
+            if printed.startswith("datetime"):
+                zone = x.dt.tz if isinstance(x, Series) else x.tz
+            moments = _Moments(_unit_of(printed), zone, printed[0] == "t", absent)
+            kept = [v for v, gap in zip(found, absent, strict=True) if not gap]
+            ticks = numpy.zeros(len(found), dtype="int64")
+            ticks[~absent] = moments.ticks(kept)
+            return ticks, column, moments
         values = numpy.array([math.nan if _missing(v) else v for v in found], dtype="float64")
-        return values, column
+        return values, column, None
     values = numpy.asarray(x)
     if values.ndim != 1:
         raise ValueError("Input array must be 1 dimensional")
     if values.dtype.kind in "mM":
-        raise NotImplementedError(
-            f"{caller}: bins of instants or spans are not supported yet, because the edges"
-            " would have to be instants too"
-        )
-    return values.astype("float64"), column
+        absent = numpy.isnat(values)
+        unit = numpy.datetime_data(values.dtype)[0]
+        moments = _Moments(unit, None, values.dtype.kind == "m", absent)
+        return numpy.where(absent, 0, values.view("int64")), column, moments
+    return values.astype("float64"), column, None
+
+
+def _bare(answer: Any, x: Any) -> Any:
+    """`cut` or `qcut` of values that are not a column, as pandas answers them.
+
+    The values were binned as a stand-in column, and pandas answers a `Categorical`
+    of the bins or labels, or numpy positions for `labels=False`.
+    """
+    from ._categorical import Categorical
+    from ._frame import Series
+
+    if isinstance(x, Series) or not isinstance(answer, Series):
+        return answer
+    if _word(answer.dtype) == "category":
+        return Categorical._held_by(answer)
+    return answer.to_numpy()
+
+
+def _moment_edges(ticks: Any, count: Any, right: bool, moments: Any) -> Any:
+    """`count` bins of equal width over instants or spans, widened by a thousandth.
+
+    Raises:
+        ValueError: For fewer than one bin or no values.
+    """
+    numpy = _numpy()
+    if count < 1:
+        raise ValueError("`bins` should be a positive integer.")
+    present = ticks[~moments.absent]
+    if present.size == 0:
+        raise ValueError("Cannot cut empty array")
+    low, high = int(present.min()), int(present.max())
+    if low == high:
+        return _edges_from_count(numpy.array([float(low)]), count, right).astype("int64")
+    edges = numpy.linspace(0, high - low, count + 1, dtype="int64") + low
+    widen = int((high - low) * 0.001)
+    if right:
+        edges[0] -= widen
+    else:
+        edges[-1] += widen
+    return edges
 
 
 def _edges_from_count(values: Any, count: Any, right: bool) -> Any:
@@ -34040,13 +34132,23 @@ def _round_frac(value: Any, precision: int) -> Any:
     return numpy.around(value, digits)
 
 
-def _bin_labels(edges: Any, precision: int, right: bool, include_lowest: bool) -> Any:
+def _bin_labels(
+    edges: Any, precision: int, right: bool, include_lowest: bool, moments: Any = None
+) -> Any:
     """pandas' own labels for the bins, an interval for each, with the edges rounded.
 
     A digit is added until no two rounded edges are the same, and `include_lowest`
-    moves the first left end down by one unit of the last digit kept.
+    moves the first left end down by one unit of the last digit kept. Edges of
+    instants or spans are not rounded, and `include_lowest` moves the first one
+    down by one unit of theirs.
     """
     numpy = _numpy()
+    closed = "right" if right else "left"
+    if moments is not None:
+        stamps = [moments.stamp(edge) for edge in edges.tolist()]
+        if right and include_lowest:
+            stamps[0] = moments.stamp(edges[0] - 1)
+        return _interval.IntervalIndex.from_breaks(stamps, closed=closed)
     for digits in range(precision, 20):
         if len({_round_frac(edge, digits) for edge in edges}) == edges.size:
             precision = digits
@@ -34078,7 +34180,7 @@ def _binned(
 
     numpy = _numpy()
     right, ordered = kw.get("right", True), kw.get("ordered", True)
-    duplicates = kw.get("duplicates", "raise")
+    duplicates, moments = kw.get("duplicates", "raise"), kw.get("moments")
     if not ordered and labels is None:
         raise ValueError("'labels' must be provided if 'ordered = False'")
     if duplicates not in ("raise", "drop"):
@@ -34086,15 +34188,17 @@ def _binned(
     kept = list(dict.fromkeys(edges.tolist()))
     if len(kept) < len(edges) and len(edges) != 2:
         if duplicates == "raise":
+            shown = Index(edges.tolist()) if moments is None else moments.index(edges)
             raise ValueError(
-                f"Bin edges must be unique: {Index(edges.tolist())!r}.\n"
+                f"Bin edges must be unique: {shown!r}.\n"
                 "You can drop duplicate edges by setting the 'duplicates' kwarg"
             )
         edges = numpy.array(kept, dtype=edges.dtype)
     places = numpy.searchsorted(edges, values, side="left" if right else "right")
     if kw.get("include_lowest"):
         places[values == edges[0]] = 1
-    gaps = numpy.isnan(values) | (places == len(edges)) | (places == 0)
+    absent = numpy.isnan(values) if moments is None else moments.absent
+    gaps = absent | (places == len(edges)) | (places == 0)
     if labels is False:
         codes = (places - 1).astype("float64" if gaps.any() else "int64")
         codes[gaps] = numpy.nan if gaps.any() else 0
@@ -34104,12 +34208,9 @@ def _binned(
             answer = Series(found, dtype=_word(codes.dtype), index=column.index, name=column.name)
         return answer, edges
     if labels is None:
-        if column is None:
-            raise NotImplementedError(
-                f"{caller}: pandas answers a Categorical for values that are not a column,"
-                " which firepanda does not have, so pass a Series"
-            )
-        bins = _bin_labels(edges, kw.get("precision", 3), right, kw.get("include_lowest"))
+        bins = _bin_labels(
+            edges, kw.get("precision", 3), right, kw.get("include_lowest"), moments
+        )
         kind = _word(bins.dtype)
         cells = _objects.interval_cells(_interval.interval_pairs(bins.tolist(), kind), kind)
         found = [None if gap else cells[place - 1] for place, gap in zip(places, gaps, strict=True)]
@@ -34132,18 +34233,13 @@ def _binned(
             f"{caller}: labels that are not text make categories of another type, and"
             " firepanda holds categories as text"
         )
-    if column is None:
-        raise NotImplementedError(
-            f"{caller}: pandas answers a Categorical for values that are not a column,"
-            " which firepanda does not have, so pass a Series"
-        )
     names = labels if len(set(labels)) == len(labels) else sorted(set(labels))
     found = [None if gap else labels[place - 1] for place, gap in zip(places, gaps, strict=True)]
     text = Series(found, dtype="str", index=column.index, name=column.name)
     return text.astype("category").cat.set_categories(names, ordered=ordered), edges
 
 
-def _cut_by_intervals(values: Any, column: Any, bins: Any) -> Any:
+def _cut_by_intervals(values: Any, column: Any, bins: Any, moments: Any = None) -> Any:
     """Each value's interval out of an index of intervals, which pandas' `cut` answers
     as a category of those intervals, ordered, whatever `labels` says.
 
@@ -34155,16 +34251,14 @@ def _cut_by_intervals(values: Any, column: Any, bins: Any) -> Any:
 
     if not bins.is_non_overlapping_monotonic:
         raise InvalidArgumentError("Overlapping IntervalIndex is not accepted.")
-    if column is None:
-        raise NotImplementedError(
-            "cut: pandas answers a Categorical for values that are not a column, which"
-            " firepanda does not have, so pass a Series"
-        )
     numpy = _numpy()
     kind, closed = _word(bins.dtype), bins.closed
     cells = _objects.interval_cells(_interval.interval_pairs(bins.tolist(), kind), kind)
-    lefts = numpy.asarray(bins.left.tolist(), dtype="float64")
-    rights = numpy.asarray(bins.right.tolist(), dtype="float64")
+    if moments is not None:
+        lefts, rights = moments.ticks(bins.left.tolist()), moments.ticks(bins.right.tolist())
+    else:
+        lefts = numpy.asarray(bins.left.tolist(), dtype="float64")
+        rights = numpy.asarray(bins.right.tolist(), dtype="float64")
     # The one interval a value can be in is the first whose right end is not below it.
     places = numpy.searchsorted(rights, values, side="right" if closed == "left" else "left")
     found: list[Any] = [None] * len(values)
@@ -34174,6 +34268,8 @@ def _cut_by_intervals(values: Any, column: Any, bins: Any) -> Any:
         above = values >= low if closed in ("left", "both") else values > low
         below = values <= high if closed in ("right", "both") else values < high
         inside = (places < len(cells)) & above & below
+        if moments is not None:
+            inside &= ~moments.absent
         found = [cells[a] if kept else None for a, kept in zip(at, inside, strict=True)]
     text = Series(found, dtype="str", index=column.index, name=column.name)
     held = Series._wrap(text._inner.cast("category", True))
@@ -34194,25 +34290,29 @@ def cut(
     """Which bin each value falls in, which is `pandas.cut`.
 
     A count of bins spreads them evenly over the values, widened by a
-    thousandth of the range, and a list of edges is used as it is. With
+    thousandth of the range, and a list of edges is used as it is. Instants
+    and spans are binned by their counts of their unit, and the bins are
+    intervals of instants or spans. With
     `right` a bin holds its right edge and not its left, and `include_lowest`
     lets the first bin hold its left edge too.
 
     Raises:
         ValueError: For edges that do not increase or repeat, and the other
             mistakes pandas refuses, with pandas' words.
-        NotImplementedError: For instants and spans, labels that are not text,
-            and values that are not a column.
+        NotImplementedError: For labels that are not text.
     """
     numpy = _numpy()
-    values, column = _cut_values(x, "cut")
+    values, column, moments = _cut_values(x)
     if isinstance(bins, _interval.IntervalIndex):
-        answer = _cut_by_intervals(values, column, bins)
+        answer = _bare(_cut_by_intervals(values, column, bins, moments), x)
         return (answer, bins) if retbins else answer
     if not _list_like(bins):
-        edges = _edges_from_count(values, bins, right)
+        if moments is None:
+            edges = _edges_from_count(values, bins, right)
+        else:
+            edges = _moment_edges(values, bins, right, moments)
     else:
-        edges = numpy.asarray(list(bins))
+        edges = numpy.asarray(list(bins)) if moments is None else moments.ticks(list(bins))
         if edges.size > 1 and not (numpy.diff(edges) >= 0).all():
             raise ValueError("bins must increase monotonically.")
     answer, edges = _binned(
@@ -34226,7 +34326,11 @@ def cut(
         duplicates=duplicates,
         ordered=ordered,
         precision=precision,
+        moments=moments,
     )
+    answer = _bare(answer, x)
+    if retbins and moments is not None:
+        return answer, moments.index(edges)
     return (answer, edges) if retbins else answer
 
 
@@ -34247,11 +34351,10 @@ def qcut(
     Raises:
         ValueError: For repeated edges, and the other mistakes pandas refuses,
             with pandas' words.
-        NotImplementedError: For instants and spans, labels that are not text,
-            and values that are not a column.
+        NotImplementedError: For labels that are not text.
     """
     numpy = _numpy()
-    values, column = _cut_values(x, "qcut")
+    values, column, moments = _cut_values(x)
     if isinstance(q, int) and not isinstance(q, bool):
         fractions = numpy.linspace(0, 1, q + 1)
         numpy.putmask(
@@ -34259,12 +34362,17 @@ def qcut(
         )
     else:
         fractions = numpy.asarray(q, dtype="float64")
-    present = values[~numpy.isnan(values)]
+    present = values[~(numpy.isnan(values) if moments is None else moments.absent)]
     edges = (
         numpy.quantile(present, fractions)
         if present.size
         else numpy.full(len(fractions), numpy.nan)
     )
+    if moments is not None:
+        if not present.size:
+            raise InvalidArgumentError("Cannot cut empty array")
+        # pandas takes quantiles of counts as floats and cuts them back to whole counts.
+        edges = edges.astype("int64")
     answer, edges = _binned(
         values,
         edges,
@@ -34274,7 +34382,11 @@ def qcut(
         include_lowest=True,
         duplicates=duplicates,
         precision=precision,
+        moments=moments,
     )
+    answer = _bare(answer, x)
+    if retbins and moments is not None:
+        return answer, moments.index(edges, getattr(x, "name", None))
     return (answer, edges) if retbins else answer
 
 
@@ -35861,8 +35973,9 @@ def _text_fitted(blocks: list[list[str]], index: bool) -> int:
 def _text_categories(column: Any) -> str:
     """The line pandas puts under a categorical column, naming its categories.
 
-    More than eight are cut to the first four and the last four, and the list
-    wraps at eighty characters, counted the way pandas counts them.
+    More than eight are cut to the first four and the last four, one longer than
+    `display.max_colwidth` is cut to it with dots, and the list wraps at eighty
+    characters, counted the way pandas counts them.
     """
     levels = column.cat.categories
     categories = levels.tolist()
@@ -35871,6 +35984,10 @@ def _text_categories(column: Any) -> str:
     if _written_category(column._inner):
         kind = _word(levels.dtype)
         texts = [text.strip() for text in _text_values(levels.to_series(), leading=False)]
+    # pandas measures each with the space it pads it with.
+    widest = _config.get_option("display.max_colwidth")
+    if widest is not None:
+        texts = [text if len(text) < widest else text[: widest - 4] + "..." for text in texts]
     if len(texts) > 8:
         texts = [*texts[:4], "...", *texts[-4:]]
     header = f"Categories ({len(categories)}, {kind}): "

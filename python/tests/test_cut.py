@@ -120,17 +120,7 @@ def test_mistakes_fail_as_pandas_fails(firepanda: ModuleType, build: Callable[[A
     assert str(mine.value) == str(theirs.value)
 
 
-@pytest.mark.parametrize(
-    "build",
-    [
-        lambda m: m.cut(m.Series([1, 2, 3]), 2, labels=[1, 2]),
-        lambda m: m.cut([1, 2, 3], 2),
-        lambda m: m.cut([1, 2, 3], 2, labels=["a", "b"]),
-    ],
-)
-def test_what_firepanda_cannot_hold_is_refused(
-    firepanda: ModuleType, build: Callable[[Any], Any]
-) -> None:
-    """Labels that are not text, and a Categorical of a list."""
+def test_what_firepanda_cannot_hold_is_refused(firepanda: ModuleType) -> None:
+    """Labels that are not text."""
     with pytest.raises(NotImplementedError, match="cut"):
-        build(firepanda)
+        firepanda.cut(firepanda.Series([1, 2, 3]), 2, labels=[1, 2])

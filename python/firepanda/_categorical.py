@@ -357,10 +357,12 @@ class Categorical(FirepandaArray):
             codes = [int(code) for code in self._column.cat.codes.tolist()]
             values = [names[code] if code >= 0 else None for code in codes]
 
+        spans = _kind_of(self.categories).startswith("interval")
+
         def one(value: Any) -> str:
             if value is None or value != value:
                 return "NaT" if timed else "NaN"
-            return value if timed else repr(value)
+            return value if timed else str(value) if spans else repr(value)
 
         if len(values) > 10:
             shown = ", ".join([*map(one, values[:5]), "...", *map(one, values[-5:])])
@@ -374,4 +376,9 @@ class Categorical(FirepandaArray):
         if not values:
             return f"[], Categories (0, {kind}): [{levels}]"
         tail = f"\nLength: {len(values)}" if len(values) > 10 else ""
+        if spans:
+            # Intervals are listed and wrapped as under a column of them.
+            from ._pandas import _text_categories
+
+            return f"[{shown}]{tail}\n{_text_categories(self._column)}"
         return f"[{shown}]{tail}\nCategories ({len(held)}, {kind}): [{levels}]"
