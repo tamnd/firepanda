@@ -171,6 +171,21 @@ def _object_kind(inner: Any) -> Any:
     return ArrowDtype(arrow)
 
 
+def _spelt(kind: Any) -> Any:
+    """A type as pandas names it, which is `str` for plain text and the type itself otherwise.
+
+    The core calls a column of text `string`, which is Arrow's word, and pandas 3
+    calls the same column `str`, the `StringDtype` with NaN for a gap. That dtype is
+    handed back rather than the bare word because it also equals `string`, so a
+    caller comparing against either spelling is still right.
+    """
+    if type(kind) is str and kind == "string":
+        from ._dtypes import StringDtype
+
+        return StringDtype(na_value=math.nan)
+    return kind
+
+
 def _sparse_side(column: Any, other: Any) -> bool:
     """Whether a series, or the series it meets, is sparse."""
     if isinstance(column, SeriesMixin) and _sparse.sparse_of(column) is not None:
@@ -9771,7 +9786,7 @@ class DataFrameMixin(_Carries):
 
         names = self._inner.names()
         kinds = [
-            _object_kind(self._inner.column(name)) or kind
+            _spelt(_object_kind(self._inner.column(name)) or kind)
             for name, kind in zip(names, self._inner.dtypes(), strict=True)
         ]
         made = _labelled(names, kinds)
@@ -14949,7 +14964,7 @@ class SeriesMixin(_Carries):
         column of one, because that is what pandas does and a caller who wanted
         the other shape has `to_frame().dtypes`.
         """
-        return self._inner.dtype()
+        return self.dtype
 
     def memory_usage(self, index: Any = True, deep: Any = False) -> int:
         """How many bytes the column weighs, one number rather than a column.
@@ -15587,7 +15602,7 @@ class SeriesMixin(_Carries):
         kind = self._inner.dtype()
         if kind == "string":
             kind = _object_kind(self._inner) or kind
-        return CategoricalDtype._of(self) if kind == "category" else kind
+        return CategoricalDtype._of(self) if kind == "category" else _spelt(kind)
 
     def groupby(
         self,
@@ -25788,7 +25803,7 @@ class IndexMixin:
         from ._categorical import CategoricalDtype
 
         kind = self._inner.dtype()
-        return CategoricalDtype._of(self.to_series()) if kind == "category" else kind
+        return CategoricalDtype._of(self.to_series()) if kind == "category" else _spelt(kind)
 
     @classmethod
     def _class_of(cls, inner: Any) -> Any:
