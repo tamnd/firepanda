@@ -20,9 +20,12 @@ needs_pandas = pytest.mark.skipif(
     importlib.util.find_spec("pandas") is None, reason="pandas is not installed"
 )
 
+# pandas' ordinary kernel reweighs a value after a gap when the centre of mass
+# is one and `adjust=False`, and its online kernel does not, so the two only
+# agree over gaps for another centre of mass, and alpha 0.75 is used here.
 DECAYS: list[dict[str, Any]] = [
     {"com": 0.5},
-    {"span": 3, "adjust": False},
+    {"alpha": 0.75, "adjust": False},
     {"alpha": 0.3, "ignore_na": True},
     {"halflife": 2, "min_periods": 3},
     {"alpha": 0.6, "adjust": False, "ignore_na": True},

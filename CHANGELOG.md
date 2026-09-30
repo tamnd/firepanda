@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: ewm times=
+
+`ewm(halflife=..., times=...)` decays each row's weight by the time since it rather than by the row count, as pandas does, for a Series, a frame and a grouped column. The mean follows pandas' recurrence, including gaps, `ignore_na`, `min_periods` and `adjust=False`, and the other reductions, a missing instant, times of another length or kind, and a decay given another way beside `adjust=False` are refused with pandas' messages. The evenly spaced `adjust=False` mean with a centre of mass of one now also gives a value after a gap what the old weight left over, as pandas' kernel does.
+
 ### Added: Sums and scans over text, and pandas' refusals for the rest
 
 Summing text joins it in row order, as pandas does, over a column, a frame (an object answer beside the numbers) and each group, with `skipna` and `min_count` answered as pandas answers them. `cumsum`, `cummin` and `cummax` run down a text column. `mean`, `median`, `std`, `var`, `sem`, `skew` and `prod` on text, and `cumprod`, raise pandas' `TypeError` in the words pandas uses for a column, a frame and a group, for both `str` and `string`.

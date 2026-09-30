@@ -22088,6 +22088,11 @@ class EwmMixin(_ReadingMixin):
         )
         if kind == "sum" and not self._adjust:
             raise NotImplementedError("sum is not implemented with adjust=False")
+        unadjusted = not self._adjust and not self._ignore_na and self._factor == 0.5
+        if kind == "mean" and unadjusted and _decays_a_gap(self._data):
+            from ._ewm_times import unadjusted_mean
+
+            return unadjusted_mean(self._data, self._factor, self._min_periods)
         plan = (
             kind,
             self._factor,
@@ -22162,6 +22167,14 @@ def _ewm_cov(
             whole = total * total
             answers.append(whole / (whole - squares) * moment if whole - squares > 0 else math.nan)
     return answers
+
+
+def _decays_a_gap(data: Any) -> bool:
+    """Whether a column, or a frame of numbers, has a gap for an unadjusted decay to step over."""
+    columns = [data] if isinstance(data, SeriesMixin) else [data[n] for n in _shown_names(data)]
+    if not all(_counts_as_numeric(str(column.dtype)) for column in columns):
+        return False
+    return any(column.hasnans for column in columns)
 
 
 def _smoothing(
@@ -22280,21 +22293,14 @@ def _ewm(
         min_periods: How many values a row needs before it is answered.
         adjust: Whether every row weighs one rather than the factor.
         ignore_na: Whether a missing row is skipped.
-        times: Declared and refused.
+        times: The instant of each row, which decays by the time between rows.
         method: Declared and held at `single`.
 
     Returns:
-        An `ExponentialMovingWindow`.
+        An `ExponentialMovingWindow`, or a `TimedWindow` for `times`.
     """
     from ._frame import ExponentialMovingWindow
 
-    _refuse(
-        "times",
-        times,
-        "it says to measure the decay against real instants rather than against"
-        " row positions, which means a half life given as a duration, and that"
-        " needs a calendar first",
-    )
     _held_at(
         "method",
         method,
@@ -22302,6 +22308,16 @@ def _ewm(
         "it says whether the columns decay together, and here they decay one at a"
         " time, which is the reading pandas calls single and defaults to",
     )
+    if times is None and isinstance(halflife, (str, datetime.timedelta)):
+        raise InvalidArgumentError(
+            "halflife can only be a timedelta convertible argument if times is not None."
+        )
+    if times is not None:
+        from ._ewm_times import TimedWindow
+
+        return TimedWindow(  # type: ignore[return-value]
+            data, com, span, halflife, alpha, min_periods, adjust, ignore_na, times
+        )
     return ExponentialMovingWindow(data, com, span, halflife, alpha, min_periods, adjust, ignore_na)
 
 
@@ -24111,10 +24127,14 @@ class _GroupedWindow:
         self._kind = kind
         self._args = args
         self._kwargs = kwargs
-        getattr(grouped._source().iloc[:0], kind)(*args, **kwargs)
+        if kind == "ewm" and kwargs.get("times") is not None:
+            # The instants are checked against every row, and each group reads its own.
+            getattr(grouped._source(), kind)(*args, **kwargs)
+        else:
+            getattr(grouped._source().iloc[:0], kind)(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
-        from ._frame import Expanding, ExponentialMovingWindow, Rolling
+        from ._frame import Expanding, ExponentialMovingWindow, Rolling, Series
 
         kind = {"rolling": Rolling, "expanding": Expanding, "ewm": ExponentialMovingWindow}
         if name.startswith("_") or not hasattr(kind[self._kind], name):
@@ -24122,8 +24142,22 @@ class _GroupedWindow:
             raise AttributeError(f"'{called}' object has no attribute '{name}'")
 
         def call(*args: Any, **kwargs: Any) -> Any:
+            settings = self._kwargs
+            times = settings.get("times") if self._kind == "ewm" else None
+            if times is not None:
+                source = self._grouped._source()
+                if not source.index.is_unique:
+                    raise NotImplementedError(
+                        "ewm with times= over groups is not supported yet on rows whose"
+                        " labels repeat, because each group finds its instants by label"
+                    )
+                instants = Series(list(times), index=source.index)
+
             def one(group: Any) -> Any:
-                window = getattr(group, self._kind)(*self._args, **self._kwargs)
+                chosen = settings
+                if times is not None:
+                    chosen = {**settings, "times": instants.loc[group.index]}
+                window = getattr(group, self._kind)(*self._args, **chosen)
                 return getattr(window, name)(*args, **kwargs)
 
             return self._grouped._each_keyed(one)

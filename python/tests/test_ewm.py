@@ -245,9 +245,9 @@ def test_a_decay_that_is_not_one_number_is_refused_the_same_way(
 
 
 def test_a_decay_that_is_not_a_number_at_all_is_refused(firepanda: ModuleType) -> None:
-    """A half life is the one of the four with a second reading, and it needs a
-    calendar."""
-    with pytest.raises(ValueError, match="halflife must be a real number"):
+    """A half life is the one of the four with a second reading, and a duration
+    is only read against `times`, as pandas says."""
+    with pytest.raises(ValueError, match="halflife can only be a timedelta convertible"):
         made(firepanda).ewm(halflife="2D")
     with pytest.raises(ValueError, match="span must be a real number"):
         made(firepanda).ewm(span="5")
@@ -257,7 +257,7 @@ def test_the_arguments_with_no_implementation_behind_them_are_refused_by_name(
     firepanda: ModuleType,
 ) -> None:
     """Declared so the signature matches, refused so nothing is quietly ignored."""
-    with pytest.raises(NotImplementedError, match="times"):
+    with pytest.raises(ValueError, match="times must be datetime64 dtype"):
         made(firepanda).ewm(span=5, times=[1, 2, 3])
     with pytest.raises(NotImplementedError, match="method"):
         made(firepanda).ewm(span=5, method="table")
