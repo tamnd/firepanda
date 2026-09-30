@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: functions over resample bins, ohlc over a frame and level= on a MultiIndex
+
+`Resampler.aggregate`, `apply` and `transform` now take a function, alone, in a list or for a column, and run it as pandas does. `aggregate` and `apply` run it on every bin, the empty ones too, and on each column of a frame, falling back to the whole of each bin when a column refuses it. `transform` puts the answers back on the rows. `ohlc` over a frame gives each column its four values under two levels of column labels. `resample(level=...)` bins by one level of a MultiIndex, and `on=` on a series raises pandas' KeyError.
+
 ### Added: transform by name with arguments and every name pandas takes
 
 `GroupBy.transform` now passes positional and keyword arguments on to the named method, as in `transform("quantile", 0.25)` or `transform("std", ddof=0)`, and takes every name pandas takes: the reductions `size`, `quantile`, `idxmax`, `idxmin`, `corrwith` and `kurt` spread back over each group's rows, and the transformations `ffill`, `bfill`, `cumcount`, `ngroup`, `pct_change` and `rank` answer row by row. Another name is refused in pandas' words, and something that is neither a name nor callable raises the TypeError pandas raises.

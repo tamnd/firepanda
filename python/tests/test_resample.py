@@ -264,16 +264,12 @@ REFUSED: list[Callable[[Any], Any]] = [
     lambda m: numbers(m).resample("h", convention="end").sum(),
     lambda m: numbers(m).resample("h", group_keys=True).sum(),
     lambda m: numbers(m).resample("ns").sum(),
-    lambda m: numbers(m).resample("h").ohlc(),
-    lambda m: numbers(m).resample("h").agg(lambda x: x.sum()),
-    lambda m: numbers(m).resample("h").apply(lambda x: x.sum()),
-    lambda m: numbers(m).resample("h").transform(lambda x: x),
 ]
 
 
 @pytest.mark.parametrize("build", REFUSED)
 def test_what_is_not_written_is_refused(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
-    """Shifted bins, finer units and functions run once a bin."""
+    """Shifted bins and finer units."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 
