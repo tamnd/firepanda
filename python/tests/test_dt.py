@@ -372,7 +372,6 @@ def test_a_duration_column_answers_its_own_two_parts(firepanda: ModuleType) -> N
 @pytest.mark.parametrize(
     ("call", "expected"),
     [
-        (lambda s: s.dt.as_unit("s", round_ok=False), "round_ok="),
         (lambda s: s.dt.floor(1), "freq has to be a string"),
     ],
 )

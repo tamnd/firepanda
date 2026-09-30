@@ -11,6 +11,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Changed: count(*) counts the rows without building a column
 
 A SQL `count(*)`, and a count of any constant that is not null, now reads the number of rows off a column the input already has. Before, the constant was built into a column the height of the table and then counted. On ClickBench at 1M rows, `SELECT COUNT(*) FROM hits` went from 7.5 ms to 0.3 ms and q2, which counts beside a sum and a mean, from 9.9 ms to 3.5 ms.
+### Added: round_ok=False on as_unit for instants
+
+`Series.dt.as_unit` and `DatetimeIndex.as_unit` take `round_ok=False`, which refuses a cast to a coarser unit that would drop a fraction, with pandas' error naming the first such instant by its whole count in the unit it is held in. Spans raise pandas' own `TypeError` for the argument, since their `as_unit` does not take it.
+
+### Changed: truncate warns of copy rather than refusing it
+
+`DataFrame.truncate` and `Series.truncate` take `copy=` with pandas' `Pandas4Warning` that the keyword is deprecated, since an answer is always a new frame, rather than raising `NotImplementedError`.
 
 ### Added: reset_index names on row labels of one level
 

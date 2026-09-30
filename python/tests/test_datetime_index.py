@@ -259,13 +259,6 @@ def test_the_resolution_arrives_the_way_pandas_reports_it(firepanda: ModuleType)
 
 
 @needs_pandas
-def test_a_cast_that_would_round_is_refused_by_name(firepanda: ModuleType) -> None:
-    """`round_ok=False` is declared and is not implemented, so it says so."""
-    with pytest.raises(NotImplementedError):
-        made(firepanda).as_unit("s", round_ok=False)
-
-
-@needs_pandas
 def test_labels_with_no_clock_report_no_clock(firepanda: ModuleType) -> None:
     """A naive index answers None for its zone, which is what pandas answers."""
     assert made(firepanda).tz is None

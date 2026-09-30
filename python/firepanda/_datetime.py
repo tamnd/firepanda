@@ -46,11 +46,11 @@ from ._pandas import (
     NO_DEFAULT,
     _beyond_nanoseconds,
     _gap_part,
-    _held_at,
     _held_values,
     _instants,
     _is_default,
     _label_of,
+    _lossless_or_raise,
     _naive_convert,
     _on_the_clock,
     _spelled,
@@ -534,14 +534,8 @@ class DatetimeIndex(HeldFreq, Index):
 
     def as_unit(self, unit: str, round_ok: bool = True) -> DatetimeIndex:
         """The same instants counted in another resolution."""
-        _held_at(
-            "round_ok",
-            round_ok,
-            True,
-            "refusing a cast that would lose precision rather than rounding it"
-            " needs the cast to look at the values first, and it looks at the"
-            " types only",
-        )
+        if not round_ok:
+            _lossless_or_raise(self.to_series(), unit)
         try:
             moved = self._moved("as_unit", unit)
             moved._freq = self.freq

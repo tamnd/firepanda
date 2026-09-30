@@ -111,6 +111,31 @@ def _naive_convert(error: DTypeError) -> DTypeError:
     return DTypeError(words) if words in str(error) else error
 
 
+def _lossless_or_raise(column: Series, unit: str) -> None:
+    """Raises pandas' error for the first instant a coarser unit would round.
+
+    `as_unit(round_ok=False)` refuses to drop a fraction. pandas names the
+    first instant that has one by its whole count in the unit it is held in.
+    Nothing is checked when the unit is as fine or finer.
+
+    Raises:
+        InvalidArgumentError: For the first instant the unit cannot hold exactly.
+    """
+    held = column.dt.unit
+    step = _UNIT_NANOS.get(unit, 1) // _UNIT_NANOS[held]
+    if step <= 1:
+        return
+    if column.dt.tz is not None:
+        column = column.dt.tz_convert("UTC").dt.tz_localize(None)
+    for count in column.dropna().astype("int64").tolist():
+        if count % step:
+            raise InvalidArgumentError(f"Cannot losslessly cast '{count} {held}' to {unit}")
+
+
+_NO_ROUND_OK = "DatetimeTimedeltaMixin.as_unit() got an unexpected keyword argument 'round_ok'"
+"""pandas' error for `round_ok` on spans, whose `as_unit` does not take it."""
+
+
 def _beyond_nanoseconds(column: Series) -> None:
     """Raises pandas' error for the first instant a nanosecond count cannot reach.
 
@@ -16033,14 +16058,18 @@ class DataFrameMixin(_Carries):
         to a correct call and a useless one to a reversed pair.
         """
         from ._frame import DataFrame
+        from .errors import Pandas4Warning
 
-        _held_at(
-            "copy",
-            copy,
-            NO_DEFAULT,
-            "an answer is always a new frame over buffers that are shared rather"
-            " than owned, so there is no copy to ask for",
-        )
+        if copy is not NO_DEFAULT:
+            # An answer is always a new frame, so pandas' warning is all copy does.
+            warnings.warn(
+                "The copy keyword is deprecated and will be removed in a future"
+                " version. Copy-on-Write is active in pandas since 3.0 which utilizes"
+                " a lazy copy mechanism that defers copies until necessary. Use .copy()"
+                " to make an eager copy if necessary.",
+                Pandas4Warning,
+                stacklevel=3,
+            )
         over_columns = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         names = self._inner.names()
         if over_columns:
@@ -20394,14 +20423,10 @@ class DatetimeMixin:
 
     def _as_unit(self, unit: str, round_ok: bool) -> Series:
         """Restates the column in another resolution."""
-        _held_at(
-            "round_ok",
-            round_ok,
-            True,
-            "refusing a cast that would lose precision rather than rounding it"
-            " needs the cast to look at the values first, and it looks at the"
-            " types only",
-        )
+        if not round_ok:
+            if "timedelta" in str(self._series.dtype):
+                raise TypeError(_NO_ROUND_OK)
+            _lossless_or_raise(self._series, unit)
         try:
             return self._part("as_unit", unit)
         except DTypeError:
