@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: A masked column goes to Arrow at its own width
+
+A column of `Int8`, `Int32`, `UInt16`, `Float32` or another masked type now exports to Arrow as the type of the same width, and a `string` column as `large_string`, as pandas exports them. Before, every masked number went out as the type pyarrow guessed from its values, so an `Int32` column arrived as `int64`.
+
 ### Changed: Group answers over masked columns keep pandas' masked types
 
 A group reduction over a column of a masked type now answers in the type pandas gives. Sums, minimums, maximums, firsts, lasts and running totals keep the column's type, with sums of flags as `Int64`. Means, medians, spreads, quantiles and ranks are `Float64`, or `Float32` over a 32 bit float column. Counts are `Int64`, and `any` and `all` are `boolean`. This covers `agg` with a name, a list or a dict, `transform`, `describe`, a group taken with `get_group` or by looping, and a series grouped by another. `nunique`, `cumcount`, `ngroup`, `idxmax` and `apply` stay plain, as they do in pandas.
