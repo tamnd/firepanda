@@ -1648,9 +1648,54 @@ def test_a_table_function_nobody_wrote_is_refused_by_name() raises:
         _ = run("SELECT * FROM read_csv(1)", session())
 
 
-def test_an_alias_on_a_table_function_is_refused_by_name() raises:
-    with assert_raises(contains="does not lower an alias on a table function"):
-        _ = run("SELECT * FROM range(5) AS r(i)", session())
+def test_an_alias_on_a_table_function_names_it_and_its_column() raises:
+    same(
+        read_back(
+            run("SELECT i FROM range(5) AS r(i) WHERE r.i > 2", session()), "i"
+        ),
+        [3, 4],
+        "the column list renames and the alias qualifies",
+    )
+    same(
+        read_back(run("SELECT r.range FROM range(3) r", session()), "range"),
+        [0, 1, 2],
+        "an alias alone keeps the function's name for the column",
+    )
+
+
+def test_a_column_list_too_long_for_a_table_function_is_cut() raises:
+    var out = run("SELECT * FROM range(3) t(i, j)", session())
+    assert_equal(len(out.schema), 1, "DuckDB drops the name with no column")
+    assert_equal(out.schema[0].name, "i")
+    same(read_back(out, "i"), [0, 1, 2], "i")
+
+
+def test_two_aliased_table_functions_join() raises:
+    same(
+        read_back(
+            run(
+                (
+                    "SELECT a.i + b.j AS s FROM range(2) a(i), range(3) b(j)"
+                    " ORDER BY s"
+                ),
+                session(),
+            ),
+            "s",
+        ),
+        [0, 1, 1, 2, 2, 3],
+        "a column under each alias",
+    )
+
+
+def test_one_name_under_two_aliased_table_functions_is_refused() raises:
+    # An alias on a table function is a derived table's alias, and a derived
+    # column is unpinned, so `a.i` cannot say which `i` it means. That is
+    # binding's ambiguity, which is a refusal where the alternative is picking
+    # one of the two.
+    with assert_raises(contains="is the name of more than one column here"):
+        _ = run(
+            "SELECT a.i + b.i FROM range(2) a(i), range(3) b(i)", session()
+        )
 
 
 def test_a_between_keeps_the_rows_inside_both_bounds() raises:

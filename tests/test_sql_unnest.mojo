@@ -126,6 +126,10 @@ def test_unnest_in_the_from_names_its_column_unnest() raises:
     assert_equal(shown("SELECT * FROM unnest([4, 5])", "unnest"), "4,5")
 
 
+def test_an_alias_on_an_unnest_in_the_from_names_its_column() raises:
+    assert_equal(shown("SELECT u.x FROM unnest([4, 5]) u(x)"), "4,5")
+
+
 def test_an_unnest_outside_the_select_list_is_turned_down() raises:
     with assert_raises(contains="select list"):
         _ = run("SELECT x FROM t WHERE unnest([1]) = 1", session())
