@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Assigning to an axis or a name
+
+`df.columns = [...]`, `df.index = [...]`, `s.index = [...]` and `s.name = "w"` now work as they do in pandas, refusing labels of another length with pandas' `Length mismatch` message and a name that cannot be hashed with its `TypeError`. An index read off a frame or a column remembers where it came from, so `df.index.name = "r"`, `s.index.name = "k"` and `df.index.names = [...]` name the axis they were read off, while a standalone index or a copy is renamed alone. Naming the column axis still waits on the core, which keeps a frame's columns as its schema.
+
 ### Changed: A list of tuples is a MultiIndex where pandas makes one
 
 `Index([("a", 1), ("b", 2)])` is now a `MultiIndex`, as pandas' `Index` reads a list of tuples as levels, and `tupleize_cols=False` keeps them as an index of tuples instead of refusing. A series built from a mapping with tuple keys is labelled by a `MultiIndex` too. A constructor's `index=` holding tuples is an index of tuples, which is what pandas' `ensure_index` gives, and a reindex by tuples is a `MultiIndex` only when the labels it replaces are one.
