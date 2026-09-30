@@ -28710,6 +28710,10 @@ class IndexMixin:
         try:
             return Index._wrap(self._inner.drop(list(wanted), errors))
         except Exception as error:
+            if "not found in axis" in str(error):
+                # The core prints the labels as text; pandas lists them as they were given.
+                missing = [label for label in wanted if label not in self]
+                raise KeyError(f"{missing} not found in axis") from None
             raise translate(error) from None
 
     def putmask(self, mask: Any, value: Any) -> Index:

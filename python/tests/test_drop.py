@@ -225,3 +225,21 @@ def test_both_libraries_answer_the_same_things(firepanda):
     ]
     for ask in questions:
         assert ask(frame(firepanda)) == ask(frame(pd))
+
+
+MISSING = {
+    "text": lambda lib: lib.DataFrame({"a": [1, 2]}, index=["x", "y"]).drop(["z", "x", "w"]),
+    "number": lambda lib: lib.DataFrame({"a": [1]}).drop(5),
+    "series": lambda lib: lib.Series([1, 2], index=["x", "y"]).drop("z"),
+    "index": lambda lib: lib.Index(["x", "y"]).drop("z"),
+    "repeated": lambda lib: lib.DataFrame({"a": [1, 2]}, index=["x", "x"]).drop("z"),
+}
+
+
+@pytest.mark.parametrize("make", MISSING.values(), ids=MISSING.keys())
+def test_a_missing_row_label_is_named_in_pandas_words(firepanda, make):
+    with pytest.raises(KeyError) as mine:
+        make(firepanda)
+    with pytest.raises(KeyError) as theirs:
+        make(pd)
+    assert str(mine.value) == str(theirs.value)
