@@ -1319,6 +1319,30 @@ def test_a_values_written_where_a_table_goes_is_a_derived_table() raises:
     same(read_back(out, "col1"), [2, 4], "the second")
 
 
+def test_a_values_column_takes_the_type_that_holds_every_row() raises:
+    # A null on one row is missing in whatever the other rows are, and a
+    # number too wide for the first row's int32 widens the whole column.
+    var out = run(
+        (
+            "SELECT count(x) AS n, max(x) AS m, count(y) AS k FROM (VALUES (1,"
+            " 'a'), (NULL, NULL), (3000000000, 'c')) t(x, y)"
+        ),
+        session(),
+    )
+    same(read_back(out, "n"), [2], "the null is not counted")
+    same(read_back(out, "m"), [3000000000], "the widened column")
+    same(read_back(out, "k"), [2], "a null in a text column")
+
+
+def test_a_values_column_of_nulls_alone_is_nulls() raises:
+    var out = run(
+        "SELECT count(*) AS n, count(x) AS k FROM (VALUES (NULL), (NULL)) t(x)",
+        session(),
+    )
+    same(read_back(out, "n"), [2], "two rows")
+    same(read_back(out, "k"), [0], "none of them there")
+
+
 def test_a_query_with_no_from_answers_a_constant() raises:
     # A statement with no FROM lowers to a literal table of one row, and the
     # projection above it needs a column for the constant to land in. The column

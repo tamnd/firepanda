@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a VALUES column takes the type that holds every row
+
+`VALUES (1), (NULL)` and `VALUES (1), (3000000000)` now run, as they do in DuckDB. A column of a literal table takes the type its rows promote to, and a null or a narrower value is written in that type, where before a column whose rows were of two types was refused. Rows whose types nothing holds, such as a number and a text, are still refused with the row that broke it named.
+
 ### Added: PIVOT with no IN list pivots on the values the column holds
 
 `PIVOT t ON c USING sum(x)` without `IN (...)` makes a column for every value `c` holds, nulls left out and smallest first, by running the distinct over the source before the pivot is lowered, which is what DuckDB does. The pivot key also keeps its own name when the query projects it.
@@ -59,6 +63,7 @@ With `expand=False` the pair now answers one object column of three element tupl
 ### Changed: A list of integers with a gap reads as float64
 
 `Series`, `Index` and `DataFrame` built from a list of integers with a None in it are float64 with a NaN, as in pandas, rather than int64 with a hole, and so are the same lists given to `DataFrame.from_dict`, `DataFrame.from_records`, `assign` and a column set with `[]`. A mapping read as a series widens the same way when a label finds no value. Only lists that come from outside firepanda widen, since its own layer builds integer columns with gaps on purpose. A float gap stays a null, and flags and text keep their types.
+
 ## [0.8.37] - 2026-09-30
 
 Built against Mojo 1.0.0 (ed45d567).

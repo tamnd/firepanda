@@ -253,7 +253,7 @@ from firepanda.array.chunked import ChunkedArray
 from firepanda.array.strings import StringBuilder
 from firepanda.array.value import Value
 from firepanda.dtype.lists import ALL
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, promote
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.node import (
     Apply,
@@ -3078,8 +3078,8 @@ def _literals(plan: Plan, at: Int) raises -> DataFrame:
         The frame the node stands for.
 
     Raises:
-        Error: If a value is not a literal, if a column's rows do not agree on
-            a type, or if the type is one no column holds.
+        Error: If a value is not a literal, if no type holds every row of a
+            column, or if the type is one no column holds.
     """
     var width = plan.nodes[at].parts
     var names = plan.nodes[at].names.copy()
@@ -3089,7 +3089,10 @@ def _literals(plan: Plan, at: Int) raises -> DataFrame:
     var columns = List[ChunkedArray](capacity=width)
     var fields = List[Field](capacity=width)
     for c in range(width):
-        var values = List[Value](capacity=rows)
+        # The column's type is the one that holds every row's value, worked
+        # out as binding worked it out, so a null on one row and an int64 on
+        # the next is an int64 column and a row of int32 among int64 ones is
+        # widened.
         var type = plan.exprs.nodes[held[c]].type
         for r in range(rows):
             var e = held[r * width + c]
@@ -3108,21 +3111,37 @@ def _literals(plan: Plan, at: Int) raises -> DataFrame:
                         ),
                     )
                 )
-            if plan.exprs.nodes[e].type != type:
+            var next = plan.exprs.nodes[e].type
+            try:
+                type = promote(type, next)
+            except:
                 raise Error(
                     String(
                         "lower: the column '",
                         names[c],
                         "' of this literal table is a ",
                         type,
-                        " on its first row and a ",
-                        plan.exprs.nodes[e].type,
-                        " on row ",
+                        " before row ",
                         r + 1,
-                        ", and a column holds one type",
+                        " and a ",
+                        next,
+                        " on it, and no type holds both",
                     )
                 )
-            values.append(plan.exprs.nodes[e].value.copy())
+        var values = List[Value](capacity=rows)
+        for r in range(rows):
+            ref written = plan.exprs.nodes[held[r * width + c]]
+            if written.type == type:
+                values.append(written.value.copy())
+            elif written.value.is_null():
+                values.append(Value(null=type))
+            else:
+                # A value of a narrower type is widened the way a column of it
+                # would be, which is a cast of a column of one row.
+                var one = List[Value](capacity=1)
+                one.append(written.value.copy())
+                var wide = cast_any(_column(one, written.type), type)
+                values.append(value_at(wide, 0))
         var chunk = ChunkedArray(type)
         chunk.append(_column(values, type))
         columns.append(chunk^)
