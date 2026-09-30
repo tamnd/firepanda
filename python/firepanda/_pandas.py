@@ -33578,6 +33578,9 @@ def _text_heads(frame: Any, labels: list[Any]) -> list[str]:
     """
     if all(isinstance(label, str) for label in labels):
         return [_text_plain(label) for label in labels]
+    if labels and all(isinstance(label, bool) for label in labels):
+        # pandas prints booleans flush left to one width, so True reads "True ".
+        return [str(label).ljust(4 if all(labels) else 5) for label in labels]
     try:
         index = frame.columns
     except NotImplementedError:

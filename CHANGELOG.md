@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: boolean column names print as pandas prints them
+
+A frame whose column names are booleans, as a crosstab or an unstack of a flag makes, prints them flush left to one width as pandas does, so beside `False` the name `True` reads `True ` and its column is a character wider.
+
 ### Added: dropna with thresh, across the columns, and numbering again
 
 `DataFrame.dropna` takes `thresh`, keeping a row with at least so many values among the columns looked at, and `axis=1`, dropping columns the same way with `subset` naming rows. `ignore_index` numbers what is left from zero, on a frame and on a column. A frame with no columns drops every row under `how="all"`, and a `subset` label the frame lacks raises pandas' `KeyError` with the missing labels.
