@@ -2026,7 +2026,7 @@ def test_a_column_read_as_strings_is_decoded() raises:
     assert_false(pipeline.coded_columns()[0], "the minimum reads strings")
     var out = pipeline^.run()
     assert_equal(one_int(out, "kinds"), 4, "the same count")
-    assert_equal(out.column("low").strings()[0], "a", "the smallest string")
+    assert_equal(out.column("low").text(0), "a", "the smallest string")
 
 
 def test_codes_pass_through_a_projection() raises:
