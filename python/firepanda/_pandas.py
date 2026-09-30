@@ -20623,7 +20623,19 @@ def _grouped(
         else:
             by, sort, dropna = by._column(frame), by.sort, by.dropna
     elif isinstance(by, list) and any(isinstance(key, Grouper) for key in by):
-        by = [key._column(frame) if isinstance(key, Grouper) else key for key in by]
+        keys: list[Any] = []
+        for key in by:
+            if not isinstance(key, Grouper) or key.key is None:
+                keys.append(key)
+                continue
+            if key.freq is not None:
+                # The column binned is the key, so it holds the bins and is not reduced.
+                binned, _ = key._keyed(frame)
+                frame = frame.assign(**{key.key: binned.tolist()})
+                keys.append(key.key)
+                continue
+            keys.append(key._column(frame))
+        by = keys
     single = not isinstance(by, list) or _values_key(frame, by)
     frame, names, shown = _outside_keys(frame, by, level)
     keys = GroupByMixin._keys(frame, names, None)
@@ -20937,6 +20949,11 @@ def _key_read(frame: DataFrame, key: Any) -> str | tuple[Any, Any]:
     labels = frame.index
     if key is _AT_LABELS or (isinstance(key, str) and key == labels.name):
         return labels, labels.name
+    if getattr(labels, "nlevels", 1) > 1 and isinstance(key, str) and key in labels.names:
+        # A name no column has is a level of the row labels when one has it.
+        return labels.get_level_values(key), key
+    if isinstance(key, Grouper):
+        return key._keyed(frame)
     if isinstance(key, SeriesMixin):
         name = key.name
         if (
@@ -24859,22 +24876,53 @@ class Grouper:
 
         Raises:
             KeyError: If the frame has no such column, in pandas' words.
-            NotImplementedError: For a frequency in a list of keys, a level, or
-                no key at all, which a grouper on its own takes but a list does not.
         """
-        if self.freq is not None:
-            raise NotImplementedError(
-                "a Grouper with a frequency beside other keys is not supported yet,"
-                " because its bins are a key that is not a column of the frame"
-            )
-        if self.key is None or self.level is not None:
-            raise NotImplementedError(
-                "a Grouper with no key, or with a level, groups by the row labels,"
-                " which is not supported yet"
-            )
         if self.key not in _shown_names(frame):
             raise KeyError(f"The grouper name {self.key} is not found")
         return self.key
+
+    def _keyed(self, frame: DataFrame) -> tuple[Any, Any]:
+        """The key this grouper makes beside other keys, as its values and its name.
+
+        A level, or no key at all, is the values of that level of the row
+        labels. A frequency is the label of the bin each row falls in, found
+        from the bins `resample` makes of the key or the row labels, so the
+        ends and the labels of the bins are the ones it would use.
+
+        Raises:
+            KeyError: If the frame has no such column, in pandas' words.
+        """
+        from . import offsets
+        from ._frame import Index, Series
+
+        labels = frame.index
+        if self.key is not None:
+            if self.key not in _shown_names(frame):
+                raise KeyError(f"The grouper name {self.key} is not found")
+            when, name = frame[self.key], self.key
+        else:
+            level = 0 if self.level is None else self.level
+            when = labels.get_level_values(level) if labels.nlevels > 1 else labels
+            name = when.name
+        if self.freq is None:
+            return when, name
+        instants = Index(when.tolist()) if isinstance(when, SeriesMixin) else when
+        counted = Series([0] * len(instants), index=instants)
+        bins = counted.resample(self.freq, **self._binned).size().index.tolist()
+        step = offsets._parsed(self.freq) if isinstance(self.freq, str) else self.freq
+        side = "right" if type(step).__name__ in _END_BINS else "left"
+        closed = self._binned.get("closed", side)
+        on_right = self._binned.get("label", side) == "right"
+        found = bisect.bisect_left if closed == "right" else bisect.bisect_right
+        keyed: list[Any] = []
+        for instant in instants.tolist():
+            if _missing(instant) or not bins:
+                keyed.append(None)
+                continue
+            # The bin whose label sits at the edge the labels are on.
+            place = found(bins, instant) - (0 if on_right else 1)
+            keyed.append(bins[min(max(place, 0), len(bins) - 1)])
+        return Index(keyed, name=name), name
 
     def _binned_by(self, frame: DataFrame) -> Any:
         """The resampler for a grouper with a frequency, which bins its key.

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Groupers and levels beside other keys
+
+`groupby` takes a `Grouper` with a level, or with a frequency on a column or on the row labels, in a list beside other keys, as pandas does. A frequency keys each row by the label of the bin `resample` would put it in, with its `closed` and `label`. The name of a level of a MultiIndex in a list of keys groups by that level.
+
 ### Added: group by the levels of a MultiIndex
 
 `groupby(level=...)` on labels of several levels groups by the values of each level named, by name, by number or as a list, as pandas does, on a frame and on a column. A `Grouper` with no key groups by the row labels or the level it names, and one with a frequency and no key bins the row labels as `resample` does, where both used to refuse.

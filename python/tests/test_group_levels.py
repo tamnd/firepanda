@@ -3,7 +3,8 @@
 pandas' `level=` on labels of several levels groups by the values of each
 level named, by name or by number, and labels the groups after them. A
 `Grouper` with no key groups by the row labels, or by the level it names, and
-one with a frequency bins them as `resample` does. Each test here runs the
+one with a frequency bins them as `resample` does, on its own or beside
+other keys, where each row is keyed by the label of the bin it falls in. Each test here runs the
 same code on both libraries and compares what they print.
 """
 
@@ -49,6 +50,54 @@ BUILDS = {
     "grouper freq mean": lambda lib: instants(lib).groupby(lib.Grouper(freq="2D")).mean(),
     "grouper freq closed": lambda lib: (
         instants(lib).groupby(lib.Grouper(freq="D", closed="right", label="right")).sum()
+    ),
+    "grouper level in a list": lambda lib: (
+        levels(lib).assign(k=["a", "b", "a", "b"]).groupby([lib.Grouper(level="p"), "k"]).sum()
+    ),
+    "level after a column": lambda lib: (
+        levels(lib).assign(k=["a", "b", "a", "b"]).groupby(["k", lib.Grouper(level=1)]).sum()
+    ),
+    "level name in a list": lambda lib: (
+        levels(lib).assign(k=["a", "b", "a", "b"]).groupby(["p", "k"]).sum()
+    ),
+    "grouper freq on labels in a list": lambda lib: (
+        instants(lib)
+        .assign(k=["a", "b", "a", "b", "a"])
+        .groupby([lib.Grouper(freq="D"), "k"])
+        .sum()
+    ),
+    "grouper freq closed in a list": lambda lib: (
+        instants(lib)
+        .assign(k=["a", "b", "a", "b", "a"])
+        .groupby([lib.Grouper(freq="D", closed="right", label="right"), "k"])
+        .sum()
+    ),
+    "grouper freq closed right label left": lambda lib: (
+        instants(lib)
+        .assign(k=["a", "b", "a", "b", "a"])
+        .groupby([lib.Grouper(freq="D", closed="right"), "k"])
+        .sum()
+    ),
+    "grouper freq on a column in a list": lambda lib: (
+        instants(lib)
+        .assign(k=["a", "b", "a", "b", "a"])
+        .reset_index()
+        .groupby([lib.Grouper(key="t", freq="D"), "k"])
+        .sum()
+    ),
+    "grouper month end in a list": lambda lib: (
+        instants(lib)
+        .assign(k=["a", "b", "a", "b", "a"])
+        .reset_index()
+        .groupby([lib.Grouper(key="t", freq="ME"), "k"])
+        .v.sum()
+    ),
+    "grouper hours after a column": lambda lib: (
+        instants(lib)
+        .assign(k=["a", "b", "a", "b", "a"])
+        .reset_index()
+        .groupby(["k", lib.Grouper(key="t", freq="7h")])
+        .v.count()
     ),
 }
 
