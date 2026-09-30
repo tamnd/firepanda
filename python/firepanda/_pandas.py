@@ -143,6 +143,70 @@ def _beyond_nanoseconds(column: Series) -> None:
             ) from None
 
 
+def _integers_checked(data: Any, wanted: Any) -> None:
+    """Refuses a list whose values do not fit the whole number type asked for, as pandas does.
+
+    A cast truncates a fraction and wraps a number too big for the type, and
+    pandas does neither for a list handed to the constructor. It raises
+    instead, and the value it trips over first picks the mistake.
+
+    Raises:
+        TypeError: For a gap written as None.
+        ValueError: For a NaN, or a float with a fraction.
+        OverflowError: For an infinity or a number outside the type's range.
+    """
+    if not isinstance(data, (list, tuple)) or not isinstance(wanted, str):
+        return
+    if not wanted.startswith(("int", "uint")):
+        return
+    bits = int(wanted.removeprefix("u").removeprefix("int") or 64)
+    signed = not wanted.startswith("u")
+    low, high = (-(2 ** (bits - 1)), 2 ** (bits - 1) - 1) if signed else (0, 2**bits - 1)
+    wide = f"The elements provided in the data cannot all be casted to the dtype {wanted}"
+    fraction = False
+    for value in data:
+        if value is None:
+            raise TypeError(
+                "int() argument must be a string, a bytes-like object or a real number,"
+                " not 'NoneType'"
+            )
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if isinstance(value, float):
+            if math.isnan(value):
+                raise InvalidArgumentError("cannot convert float NaN to integer")
+            if math.isinf(value):
+                raise OverflowError(wide)
+            fraction = fraction or not value.is_integer()
+        if not low <= value <= high:
+            raise OverflowError(wide)
+    if fraction:
+        raise InvalidArgumentError("Trying to coerce float values to integers")
+
+
+def _read_as_timed(column: Any, dtype: str) -> Any:
+    """A column read as instants or spans of one unit, for `dtype="datetime64[ns]"` and the like.
+
+    pandas parses text and reads numbers for these dtypes where a cast would
+    hand back the counts they are stored as, so the column goes through
+    `to_datetime` or `to_timedelta` and then takes the unit. None for any other
+    dtype, or a column that already holds that kind.
+    """
+    kind, _, rest = dtype.partition("[")
+    if kind not in ("datetime64", "timedelta64") or not rest.endswith("]"):
+        return None
+    if _word(column.dtype).startswith(kind):
+        return None
+    unit, _, zone = rest[:-1].partition(",")
+    if kind == "timedelta64":
+        read = to_timedelta(column)
+    else:
+        read = to_datetime(column)
+        if zone.strip():
+            read = read.dt.tz_localize(zone.strip())
+    return read.dt.as_unit(unit.strip())
+
+
 def _is_object_dtype(dtype: Any) -> bool:
     """Whether a dtype argument asks for pandas' object dtype, in any of its spellings."""
     if dtype is object or (isinstance(dtype, str) and dtype in ("object", "O")):
@@ -10091,6 +10155,10 @@ class DataFrameMixin(_Carries):
         elif dtype is not None:
             names = self._inner.names()
             wanted = [_named_dtype(dtype)] * len(names)
+            given = data.values() if isinstance(data, collections.abc.Mapping) else data
+            if isinstance(given, (list, tuple, type({}.values()))):
+                for part in given:
+                    _integers_checked(part, wanted[0] if wanted else None)
             try:
                 self._inner = self._inner.cast(names, wanted, True)
             except Exception as error:
@@ -15678,8 +15746,14 @@ class SeriesMixin(_Carries):
                 or _masked.masked_name(dtype) is not None
                 or _sparse.sparse_dtype(dtype) is not None
             )
-            wanted = None if arrow else _named_dtype(dtype)
+            timed = "" if arrow else _word(dtype)
             made = type(self)._wrap(self._inner)
+            if (read := _read_as_timed(made, timed)) is not None:
+                self._inner = read._inner
+                _named_as(self, name)
+                return
+            wanted = None if arrow else _named_dtype(dtype)
+            _integers_checked(data, wanted)
             try:
                 if arrow:
                     self._inner = made.astype(dtype)._inner
@@ -26529,10 +26603,10 @@ class IndexMixin:
     ) -> None:
         """Builds an index from a sequence of labels.
 
-        The pandas signature in full, with `data` and `name` honoured and the
-        rest refused by name. `tupleize_cols` is the one parameter here that is
-        not refused, because refusing it would mean refusing its default, and
-        what it turns on is the MultiIndex that does not exist yet.
+        The pandas signature in full. `dtype` reads the labels as a series of
+        that type reads them, and `copy` is taken because the labels are always
+        copied. `tupleize_cols` is taken at its default only, since what turning
+        it off asks for is an index of tuples.
 
         A series and another index are both taken as well as a plain sequence,
         and neither goes through the reader that a sequence goes through. Both
@@ -26546,14 +26620,15 @@ class IndexMixin:
         out of a named series is named after it, and a name written in the call
         wins over one the data was carrying.
         """
-        _refuse("dtype", dtype, "casting on the way in needs the cast machinery")
-        _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         if not tupleize_cols:
             raise NotImplementedError(
                 "tupleize_cols=False is not supported yet, because there is no"
                 " MultiIndex for it to turn off"
             )
         label = _label_of(data) if name is None else str(name)
+        if dtype is not None:
+            self._typed(data, dtype, label)
+            return
         try:
             if isinstance(data, IndexMixin):
                 self._inner = data._inner.renamed(label)
@@ -26587,6 +26662,34 @@ class IndexMixin:
                     self._inner = column.to_index(label)
         except Exception as error:
             raise translate(error) from None
+
+    def _typed(self, data: Any, dtype: Any, label: Any) -> None:
+        """Builds the labels as a column of the asked type, which is `Index(data, dtype=...)`.
+
+        The labels are read the way a series with the same `dtype` reads them,
+        so text parsed as instants, a category and a cast refused all answer as
+        a series does, and the index is then made out of that series.
+
+        Raises:
+            NotImplementedError: For an object or masked type, since labels hold
+                one plain type and nothing yet holds those as labels.
+        """
+        from ._frame import Index, Series
+        from ._masked import masked_name
+
+        if _is_object_dtype(dtype) or masked_name(dtype) is not None:
+            raise NotImplementedError(
+                f"dtype={dtype!r} is not supported yet on an index, because row labels"
+                " hold one plain type and not objects or a masked type"
+            )
+        if isinstance(data, (IndexMixin, SeriesMixin)):
+            typed = Series(data).astype(dtype)
+        else:
+            typed = Series(data, dtype=dtype)
+        made = Index(typed, name=label)
+        self._inner = made._inner
+        self.__class__ = type(made)
+        _keep_freq(made, self)
 
     def __getitem__(self, key: Any) -> Any:
         """One label, or an index of several.

@@ -355,9 +355,7 @@ def test_an_index_exports_itself_as_arrow(firepanda: ModuleType) -> None:
 def test_the_constructor_refuses_what_it_does_not_do(firepanda: ModuleType) -> None:
     """A declared parameter that is silently ignored is worse than a missing one."""
     with pytest.raises(NotImplementedError, match="dtype="):
-        firepanda.Index([1], dtype="int32")
-    with pytest.raises(NotImplementedError, match="copy="):
-        firepanda.Index([1], copy=True)
+        firepanda.Index([1], dtype="Int64")
     with pytest.raises(NotImplementedError, match="tupleize_cols"):
         firepanda.Index([("a", 1)], tupleize_cols=False)
 
