@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: reset_index names on row labels of one level
+
+`DataFrame.reset_index(names=...)` names the column the old row labels land in when the labels have one level, as pandas does: a name, or the first name of a list, with an empty list keeping the labels' own name. It was refused unless the labels had several levels.
+
 ### Added: melt on columns of several levels, and col_level
 
 `melt` takes `col_level` to melt one level of columns by number or name, as pandas does, rather than refusing anything but 0. On columns of several levels each level gets its own column in the long frame, named for the level, numbered `variable_0` and on when the names do not tell the levels apart, or named by a list given as `var_name`. Before this the labels of every level were spread down one column.
