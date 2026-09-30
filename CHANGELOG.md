@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a text column's dtype is pandas' str
+
+`Series.dtype`, `Series.dtypes`, `Index.dtype` and `DataFrame.dtypes` answer pandas' `StringDtype` with NaN for a gap for a column of text, which prints as `str` the way pandas 3 prints it and still equals `string`, so code comparing against either word keeps working. Everything below the surface reads a dtype back through one helper that gives the core's word, so no internal decision changed. A column made with `dtype="string"` is also spelt `str`, because firepanda does not yet keep the `NA` variant apart.
+
 ### Added: a map's key and value types, and histogram's MAP(K, UBIGINT)
 
 A `MAP` type now carries its key and value types, written `MAP(K, V)` as DuckDB writes them, and two maps are the same type only when both agree. `histogram` answers `MAP(K, UBIGINT)` for a key of any flat type, including the bins form, as DuckDB does, so the differential semantics check now compares its full type rather than the overload alone. A map whose key or value is itself nested is still a bare `MAP`, and says nothing about what it holds.
