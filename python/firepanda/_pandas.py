@@ -2529,6 +2529,10 @@ def _reducing_axis(axis: Any, owner: str) -> None:
         )
 
 
+_TRUTHS = ("bool", "boolean")
+"""The types `bool_only` keeps, the plain flag and the masked one."""
+
+
 _NO_FOLD_IN_PANDAS = frozenset({"count", "quantile", "nunique"})
 """The three frame reductions pandas has no whole frame form of.
 
@@ -3556,6 +3560,16 @@ def _cast_keywords(copy: Any, errors: Any) -> bool:
             f" Supplied value is '{errors}'"
         )
     return bool(errors == "raise")
+
+
+def _first_gaps(column: Any, most: int) -> list[bool]:
+    """Which rows of a column are among its first `most` gaps, for a fill with a limit."""
+    chosen = []
+    for gap in column.isna().tolist():
+        take = bool(gap) and most > 0
+        most -= take
+        chosen.append(take)
+    return chosen
 
 
 def _limit_wanted(limit: Any) -> int:
@@ -5540,11 +5554,25 @@ default there is a bool, which is not a pattern. It reads as a leak and it is
 the documented way pandas refuses `s.replace(None, 0)`.
 """
 
-_NO_REGEX = (
-    "regex is not supported yet, because a replacement read as a pattern is the text"
-    " kernel's business and this method is written over comparisons"
-)
-"""Why a pattern is refused here."""
+def _regex_replaced(column: Any, to_replace: Any, value: Any, regex: Any) -> Any:
+    """`replace` with a pattern, which rewrites the matched part of each text row.
+
+    pandas substitutes inside every string cell the pattern is found in and leaves
+    the rest alone, so a column that holds no text comes back as it was. The one
+    shape written is a single pattern and a text replacement, named either as
+    `to_replace` with `regex=True` or as `regex` itself.
+    """
+    pattern = to_replace if regex is True else regex
+    written = isinstance(pattern, (str, re.Pattern)) and isinstance(value, str)
+    if written and (regex is True or to_replace is None):
+        text = _word(column.dtype) == "string" and not _objects.is_object(column._inner)
+        if not text:
+            return column.copy()
+        return column.str.replace(pattern, value, regex=True)
+    raise NotImplementedError(
+        f"regex={regex!r} is not supported yet with these arguments, because only one"
+        " pattern replaced by one piece of text is written"
+    )
 
 
 def _lengths(wanted: int, given: int) -> str:
@@ -11280,11 +11308,19 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame, Series
 
         inplace = _flag("inplace", inplace)
-        _axis_number(axis, "DataFrame", 0, (0, 1))
-        if _limit_wanted(limit):
-            raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+        across = _axis_number(axis, "DataFrame", 0, (0, 1))
+        most = _limit_wanted(limit)
         held = _shown_names(self)
+        if most and (across == 1 or value is None or _is_frame(value)):
+            raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
         wanted = _fill_values(value, held)
+        if most:
+            # A limit counts down each column on its own, so each is filled as a
+            # column is, with the same limit.
+            answer = self.copy()
+            for name, one in wanted.items():
+                answer[name] = self[name].fillna(one, limit=most)
+            return _kept(self, answer, inplace)
         # The two facts each column is judged on, its type and whether it has a
         # gap, are read off the schema and the validity bits rather than through
         # square brackets, because square brackets copy the column and this is
@@ -11918,7 +11954,7 @@ class DataFrameMixin(_Carries):
                 as long as the run being replaced, or a mapping read by column
                 name.
             inplace: Puts the answer into this object and hands the object back.
-            regex: Refused, for now.
+            regex: True to read `to_replace` as a pattern, or the pattern itself.
 
         Returns:
             A new frame of the same shape and the same types.
@@ -11926,13 +11962,17 @@ class DataFrameMixin(_Carries):
         Raises:
             DTypeError: If a column cannot hold what it is being handed.
             InvalidArgumentError: If the arguments do not say what to do.
-            NotImplementedError: For `inplace` and for `regex`.
+            NotImplementedError: For a pattern in a shape that is not written.
         """
         from ._frame import DataFrame, Series
 
         inplace = _flag("inplace", inplace)
-        _held_at("regex", regex, False, _NO_REGEX)
         names = _held_names(self)
+        if regex is not False:
+            answer = self.copy()
+            for name in names:
+                answer[name] = _regex_replaced(self[name], to_replace, value, regex)
+            return _kept(self, answer, inplace)
         wanted = _frame_replacements(to_replace, value, names, "DataFrame")
         labels = self._inner.labels().to_list()
         types = dict(zip(names, self._inner.dtypes(), strict=True))
@@ -13471,25 +13511,25 @@ class DataFrameMixin(_Carries):
         describes, asked here rather than there because the second pass has to
         go through the same door as the first.
         """
+        from ._frame import Series
+
         folding = axis is None
         _reducing_axis(axis, "DataFrame")
-        _held_at(
-            "bool_only",
-            bool_only,
-            False,
-            "keeping only the columns that already hold booleans is a choice"
-            " about which columns are in the answer rather than about the"
-            " question being asked of each one",
-        )
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing value is skipped here as it is by every other reduction,"
-            " and pandas' other reading of it, where a gap counts as true,"
-            " is a second pass rather than a flag on this one",
-        )
-        made = self._per_column(kind, 0.0)
+        frame: Any = self
+        if bool_only:
+            # pandas keeps the columns that already hold booleans and asks nothing
+            # of the rest, so a frame with none of them answers an empty column.
+            names = self._inner.names()
+            frame = self[[name for name in names if _word(self[name].dtype) in _TRUTHS]]
+            if not frame._inner.names():
+                empty = frame._per_column(kind, 0.0).astype("bool")
+                return empty._truth(kind, 0, False, True) if folding else empty
+        if not skipna:
+            names = frame._inner.names()
+            answers = [frame[name]._truth(kind, 0, False, False) for name in names]
+            made = Series(answers, index=list(names), dtype=None if answers else "bool")
+        else:
+            made = frame._per_column(kind, 0.0)
         if not folding:
             return made
         return made._truth(kind, 0, False, True)
@@ -13981,8 +14021,15 @@ class DataFrameMixin(_Carries):
         from ._multi import MultiIndex
 
         _refuse("key", key, "running a function over the labels before sorting is not written")
-        _axis_number(axis, "DataFrame", 0, (0,))
+        across = _axis_number(axis, "DataFrame", 0, (0, 1))
         inplace = _flag("inplace", inplace)
+        if across == 1 and level is None and not isinstance(ascending, (list, tuple)):
+            # The column labels are text, so their order is the order of the
+            # names, and the sort is stable, so a repeated name keeps its place.
+            names = list(self.columns)
+            order = sorted(range(len(names)), key=names.__getitem__, reverse=not ascending)
+            return _settled(self, self.iloc[:, order], inplace)
+        _axis_number(axis, "DataFrame", 0, (0,))
         _held_at(
             "na_position",
             na_position,
@@ -14007,13 +14054,9 @@ class DataFrameMixin(_Carries):
                 back = [order.index(n) for n in range(index.nlevels)]
                 moved = self.reorder_levels(order).sort_index(ascending=ascending)
                 return _settled(self, moved.reorder_levels(back), inplace)
-        _held_at(
-            "ignore_index",
-            ignore_index,
-            False,
-            "numbering the rows again after sorting them by their labels throws"
-            " away the thing that was just sorted",
-        )
+        if ignore_index:
+            ordered = self.sort_index(ascending=ascending, level=level)
+            return _settled(self, ordered.reset_index(drop=True), inplace)
         if isinstance(ascending, (list, tuple)):
             raise NotImplementedError(
                 "a direction per level is not supported yet, because there is one"
@@ -14685,20 +14728,17 @@ class DataFrameMixin(_Carries):
             " needs the offset vocabulary, which is the resampling milestone",
         )
         _refuse("suffix", suffix, "it only names the columns a list of periods produces")
-        _held_at(
-            "fill_value",
-            fill_value,
-            NO_DEFAULT,
-            "filling the gap keeps a column of whole numbers whole, and the value"
-            " has to reach the kernel as a typed one rather than as a Python"
-            " object",
-        )
         if not isinstance(periods, int) or isinstance(periods, bool):
             raise NotImplementedError(
                 "periods has to be a single number for now, because a list of them"
                 " answers a frame with one set of columns per period"
             )
-        return self._transformed("shift", periods, axis)
+        shifted = self._transformed("shift", periods, axis)
+        if fill_value is NO_DEFAULT:
+            return shifted
+        for name in shifted._inner.names():
+            shifted[name] = self[name]._shift(periods, None, 0, fill_value, None)
+        return shifted
 
     def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> DataFrame:
         """The fractional change between each row and the one before it."""
@@ -14708,21 +14748,13 @@ class DataFrameMixin(_Carries):
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> DataFrame:
         """Runs one of the four scans down every column."""
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing row is stepped over and put back where it was, and letting"
-            " one through would poison every row after it",
-        )
-        _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "dropping the columns a scan cannot read is a choice about the shape"
-            " of the answer rather than about the scan",
-        )
-        return self._transformed(kind, 0, axis)
+        read = self._numeric_part() if numeric_only else self
+        scanned = read._transformed(kind, 0, axis)
+        if skipna:
+            return scanned
+        for name in scanned._inner.names():
+            scanned[name] = read[name]._scan(kind, 0, False, False)
+        return scanned
 
     def _dropna(
         self,
@@ -16259,8 +16291,11 @@ class SeriesMixin(_Carries):
 
         inplace = _flag("inplace", inplace)
         _axis_number(axis, "Series", 0, (0,))
-        if _limit_wanted(limit):
-            raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+        most = _limit_wanted(limit)
+        if most:
+            if value is None or not _is_scalar(value):
+                raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+            return _kept(self, self.mask(_first_gaps(self, most), value), inplace)
         if _objects.is_object(self._inner) and value is not None and _is_scalar(value):
             out = _objects_filled(self, value)
             if inplace:
@@ -16576,7 +16611,7 @@ class SeriesMixin(_Carries):
             value: What to put in place of it, which is a value or a run of them
                 as long as the run being replaced.
             inplace: Puts the answer into this object and hands the object back.
-            regex: Refused, for now.
+            regex: True to read `to_replace` as a pattern, or the pattern itself.
 
         Returns:
             A new column of the same height and the same type.
@@ -16584,12 +16619,13 @@ class SeriesMixin(_Carries):
         Raises:
             DTypeError: If the column cannot hold what it is being handed.
             InvalidArgumentError: If the arguments do not say what to do.
-            NotImplementedError: For `inplace` and for `regex`.
+            NotImplementedError: For a pattern in a shape that is not written.
         """
         from ._frame import Series
 
         inplace = _flag("inplace", inplace)
-        _held_at("regex", regex, False, _NO_REGEX)
+        if regex is not False:
+            return _kept(self, _regex_replaced(self, to_replace, value, regex), inplace)
         pairs = _replacements(to_replace, value, "Series")
         if _objects.period_name_of(self._inner):
             return _kept(self, _periods_replaced(self, pairs), inplace)
@@ -17672,20 +17708,20 @@ class SeriesMixin(_Carries):
         layer that refused it would be stricter than the thing it copies.
         """
         _reducing_axis(axis, "Series")
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing value is skipped here as it is by every other reduction,"
-            " and pandas' other reading of it, where a gap counts as true,"
-            " is a second pass rather than a flag on this one",
-        )
         if self.dtype == "category":
             _category_reduction(kind, False)
         try:
-            return self._inner.reduce(kind, 0.0)
+            answer = self._inner.reduce(kind, 0.0)
         except Exception as error:
             raise translate(error) from None
+        if skipna or not self._inner.null_count():
+            return answer
+        # A gap that is not skipped is true, as `bool(nan)` is, so it can only
+        # turn `any` true. A masked column reads it as unknown instead, and an
+        # answer the known values do not settle is `NA`.
+        if _masked.masked_of(self) is not None:
+            return answer if bool(answer) == (kind == "any") else NA
+        return True if kind == "any" else answer
 
     def _aligned_with(self, other: Series) -> tuple[Series, Series]:
         """This column and another over the labels both have, as pandas aligns them."""
@@ -17900,20 +17936,30 @@ class SeriesMixin(_Carries):
             " needs the offset vocabulary, which is the resampling milestone",
         )
         _refuse("suffix", suffix, "it only names the columns a list of periods produces")
-        _held_at(
-            "fill_value",
-            fill_value,
-            NO_DEFAULT,
-            "filling the gap keeps a column of whole numbers whole, and the value"
-            " has to reach the kernel as a typed one rather than as a Python"
-            " object",
-        )
         if not isinstance(periods, int) or isinstance(periods, bool):
             raise NotImplementedError(
                 "periods has to be a single number for now, because a list of them"
                 " answers a frame with one column per period"
             )
-        return self._transformed("shift", periods, axis)
+        shifted = self._transformed("shift", periods, axis)
+        rows = len(self)
+        moved = min(abs(periods), rows)
+        if fill_value is NO_DEFAULT or moved == 0:
+            return shifted
+        # The rows the shift opened are filled by joining a column of the value
+        # to the rows that stayed, so a whole number filling a column of whole
+        # numbers keeps it whole where a fill of the gaps would not know which
+        # gaps the shift made.
+        from ._frame import Series
+
+        kept = self.iloc[: rows - moved] if periods > 0 else self.iloc[moved:]
+        opened = Series([fill_value] * moved, name=self.name)
+        if not len(kept):
+            joined = opened
+        else:
+            pieces = [opened, kept] if periods > 0 else [kept, opened]
+            joined = concat(pieces, ignore_index=True)
+        return joined.set_axis(self.index)
 
     def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> Series:
         """The fractional change between each row and the one before it."""
@@ -17923,14 +17969,17 @@ class SeriesMixin(_Carries):
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> Series:
         """Runs one of the four scans over the whole column."""
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing row is stepped over and put back where it was, and letting"
-            " one through would poison every row after it",
-        )
-        return self._transformed(kind, 0, axis)
+        scanned = self._transformed(kind, 0, axis)
+        if skipna or not self._inner.null_count():
+            return scanned
+        # Not skipping lets the first gap through, and every row after it is a
+        # gap too, the way a running total that met a NaN stays NaN.
+        gaps = self.isna().tolist()
+        if True not in gaps:
+            return scanned
+        first = gaps.index(True)
+        poisoned = scanned.mask([at >= first for at in range(len(gaps))])
+        return _nan_filled(poisoned) if _word(poisoned.dtype) in _FLOATING else poisoned
 
     def _astype(self, dtype: Any, copy: Any, errors: Any) -> Series:
         """Converts the column and hands back a new one.

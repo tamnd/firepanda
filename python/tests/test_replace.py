@@ -189,9 +189,16 @@ def test_inplace_settles_and_hands_the_object_back(firepanda):
     assert cells(made) == {"a": [1, 9, 3], "b": [9, 3, 4]}
 
 
-def test_a_pattern_is_refused(firepanda):
-    with pytest.raises(NotImplementedError):
-        firepanda.Series(["a"]).replace("a", "b", regex=True)
+def test_a_pattern_rewrites_the_part_of_each_text_row_it_matches(firepanda):
+    column = firepanda.Series(["apple", "banana", None])
+    assert column.replace(r"^a", "A", regex=True).tolist()[:2] == ["Apple", "banana"]
+    assert column.replace(regex=r"(a)(n)", value=r"\2\1").tolist()[:2] == ["apple", "bnanaa"]
+    assert firepanda.Series([1, 2]).replace("a", "b", regex=True).tolist() == [1, 2]
+
+
+def test_a_pattern_in_a_shape_that_is_not_written_is_refused(firepanda):
+    with pytest.raises(NotImplementedError, match="regex"):
+        firepanda.Series(["a"]).replace("a", 1, regex=True)
 
 
 def test_both_libraries_answer_the_same_things(firepanda):
