@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import re
 from types import ModuleType
 from typing import Any
 
@@ -354,22 +355,25 @@ def test_the_default_engine_spelled_out_is_still_the_default(firepanda: ModuleTy
 
 @needs_pandas
 def test_a_text_column_has_nothing_to_reduce(firepanda: ModuleType) -> None:
-    """Both refuse, and the class each raises is measured rather than assumed.
-
-    pandas raises `pandas.errors.DataError`, which inherits from `Exception` and
-    from nothing else, so `except TypeError` does not catch it and neither does
-    `except ValueError`. This raises `DTypeError`, which is a `TypeError`,
-    because an argument of the wrong type is what happened and that is where the
-    rest of this library puts it. Catching `Exception` catches both, and this
-    test records the difference rather than papering over it.
-    """
+    """Both raise pandas' `DataError`, which is neither a `TypeError` nor a `ValueError`."""
     import pandas as pd
 
-    with pytest.raises(TypeError):
+    with pytest.raises(firepanda.errors.DataError, match="No numeric types to aggregate"):
         firepanda.Series(["a", "b", "c"], name="v").rolling(2).sum()
-    with pytest.raises(pd.errors.DataError):
+    with pytest.raises(pd.errors.DataError, match="No numeric types to aggregate"):
         pd.Series(["a", "b", "c"], name="v").rolling(2).sum()
-    assert not issubclass(pd.errors.DataError, TypeError)
+
+
+@needs_pandas
+def test_a_count_reads_the_values_of_any_column(firepanda: ModuleType) -> None:
+    """pandas counts the values present in a window whatever their kind."""
+    import pandas as pd
+
+    def made(lib: Any) -> Any:
+        return lib.DataFrame({"a": [1.0, None, 3.0], "t": ["x", None, "z"]})
+
+    assert repr(made(firepanda).rolling(2).count()) == repr(made(pd).rolling(2).count())
+    assert repr(made(firepanda)["t"].expanding().count()) == repr(made(pd)["t"].expanding().count())
 
 
 INFINITE = [
@@ -1008,38 +1012,30 @@ def test_a_column_window_reports_itself_as_one_dimensional(firepanda: ModuleType
 
 
 @needs_pandas
-def test_a_frame_with_a_text_column_in_it_names_the_column(firepanda: ModuleType) -> None:
-    """Both refuse, and this library says which column it was.
-
-    pandas says `Cannot aggregate non-numeric type: str`, which over a frame of
-    forty columns sends the reader back to look for the column themselves. The
-    class is the same difference `test_a_text_column_has_nothing_to_reduce`
-    measures on a column.
-    """
+@pytest.mark.parametrize(
+    ("column", "shown"),
+    [
+        (["x", "y", "z"], "str"),
+        ("2024-01-01", "datetime64[us]"),
+    ],
+)
+def test_a_frame_with_a_column_that_is_not_numbers_is_refused_as_pandas(
+    firepanda: ModuleType, column: Any, shown: str
+) -> None:
+    """Both say which kind of column could not be read, in pandas' words."""
     import pandas as pd
 
-    mine = firepanda.DataFrame({"a": [1.0, 2.0, 3.0], "t": ["x", "y", "z"]})
-    them = pd.DataFrame({"a": [1.0, 2.0, 3.0], "t": ["x", "y", "z"]})
-    with pytest.raises(TypeError, match="'t'"):
-        mine.rolling(2).sum()
-    with pytest.raises(pd.errors.DataError):
-        them.rolling(2).sum()
+    def made(lib: Any) -> Any:
+        values = lib.to_datetime([column] * 3) if isinstance(column, str) else column
+        return lib.DataFrame({"a": [1.0, 2.0, 3.0], "t": values})
 
-
-@needs_pandas
-def test_the_column_that_cannot_be_reduced_is_found_before_any_column_is_read(
-    firepanda: ModuleType,
-) -> None:
-    """The text column is last, and it still raises rather than half answering.
-
-    Cheap to get wrong and invisible when it is, because the answer is thrown
-    away either way. It matters because a caller who gets an error should not
-    have to wonder what was already spent, and it is the one thing about a frame
-    window that is not per column.
-    """
-    mine = firepanda.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0], "t": ["x", "y"]})
-    with pytest.raises(TypeError, match="'t'"):
-        mine.rolling(2).sum()
+    sentence = f"Cannot aggregate non-numeric type: {shown}"
+    with pytest.raises(firepanda.errors.DataError, match=re.escape(sentence)):
+        made(firepanda).rolling(2).sum()
+    with pytest.raises(pd.errors.DataError, match=re.escape(sentence)):
+        made(pd).rolling(2).sum()
+    with pytest.raises(firepanda.errors.DataError, match=re.escape(sentence)):
+        made(firepanda).expanding().mean()
 
 
 @needs_pandas

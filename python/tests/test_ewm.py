@@ -313,8 +313,8 @@ def test_a_frame_is_not_asked_to_drop_the_columns_it_cannot_read(
 
 
 def test_a_text_column_has_nothing_to_decay(firepanda: ModuleType) -> None:
-    """The same refusal the rolling window gives, for the same reason."""
-    with pytest.raises(TypeError, match="nothing to aggregate"):
+    """The same refusal the rolling window gives, pandas' `DataError`."""
+    with pytest.raises(firepanda.errors.DataError, match="No numeric types to aggregate"):
         firepanda.Series(["a", "b", "c"], name="v").ewm(span=5).mean()
 
 
