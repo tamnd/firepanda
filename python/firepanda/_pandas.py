@@ -15635,6 +15635,39 @@ class DataFrameMixin(_Carries):
             out.insert(at, title, multi.get_level_values(n).tolist())
         return out
 
+    def _reset_under_levels(
+        self,
+        level: Any,
+        drop: bool,
+        col_level: Any,
+        col_fill: Any,
+        allow_duplicates: Any,
+        names: Any,
+    ) -> DataFrame:
+        """`reset_index` of a frame whose columns are a `MultiIndex`, as pandas does it.
+
+        Each label that becomes a column is named by a tuple holding its name at
+        `col_level` and `col_fill` at every other level, or its name at every
+        level when `col_fill` is None. The reset itself runs on stand-in names
+        of one level, and the columns are put back together afterwards.
+        """
+        from ._multi import MultiIndex
+
+        columns = self.columns
+        at = 0 if drop else columns._level_number(col_level)
+        marks = [f"\x00{n}" for n in range(len(columns))]
+        made = self.set_axis(marks, axis=1).reset_index(
+            level=level, drop=drop, allow_duplicates=allow_duplicates, names=names
+        )
+        heads = []
+        for name in list(made.columns)[: len(made.columns) - len(marks)]:
+            parts = list(name) if isinstance(name, tuple) else [name]
+            fill = parts[0] if col_fill is None else col_fill
+            head = [fill] * at + parts
+            heads.append(tuple(head + [fill] * (columns.nlevels - len(head))))
+        rebuilt = MultiIndex.from_tuples(heads + list(columns), names=columns.names)
+        return made.set_axis(rebuilt, axis=1)
+
     def _reset_index(
         self,
         level: Any,
@@ -15656,11 +15689,14 @@ class DataFrameMixin(_Carries):
         from ._multi import MultiIndex
 
         inplace = _flag("inplace", inplace)
+        if isinstance(self.columns, MultiIndex):
+            made = self._reset_under_levels(
+                level, drop, col_level, col_fill, allow_duplicates, names
+            )
+            return _settled(self, made, inplace)
         if isinstance(self.index, MultiIndex):
             return _settled(self, self._reset_levels(level, bool(drop), names), inplace)
         _no_level(level)
-        _held_at("col_level", col_level, 0, "there is one level of columns and it is that one")
-        _held_at("col_fill", col_fill, "", "there is nothing above the columns to fill")
         if allow_duplicates is not NO_DEFAULT and allow_duplicates:
             raise NotImplementedError(
                 "allow_duplicates=True is not supported yet, because two columns"
