@@ -27321,16 +27321,12 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
     def _one_a_group(self, values: list[Any]) -> Series:
         """A series of one value a group, with no name, as pandas answers it.
 
-        Raises:
-            NotImplementedError: With `as_index=False`, where pandas puts the
-                values in a column named None and a firepanda column name is text.
+        With `as_index=False` it is a frame of the keys and the values, in a
+        column named None, as pandas puts them.
         """
-        if not self._as_index:
-            raise NotImplementedError(
-                "apply answering one value a group with as_index=False is not"
-                " supported, because pandas puts the values in a column named None"
-            )
         slot = "__firepanda_value__"
+        if not self._as_index:
+            return self._on_groups({slot: _built(values)}).rename(columns={slot: None})
         return self._on_groups({slot: _built(values)})[slot].rename(None)
 
     def _rows_a_group(self, answers: list[Any]) -> DataFrame:

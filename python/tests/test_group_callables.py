@@ -181,16 +181,20 @@ def test_a_mistake_raises_what_pandas_raises(firepanda: ModuleType, name: str) -
     assert str(mine.value) == str(theirs.value)
 
 
+@needs_pandas
 @pytest.mark.parametrize(
     "build",
     [
         lambda m: data(m).groupby("k", as_index=False).apply(lambda d: len(d)),
+        lambda m: data(m).groupby("k", as_index=False).apply(lambda d: d["w"].sum()),
+        lambda m: data(m).groupby("k", as_index=False, sort=False).apply(lambda d: "x" * len(d)),
     ],
 )
-def test_an_answer_in_a_column_named_none_is_refused(firepanda: ModuleType, build: Any) -> None:
-    """pandas puts one value a group in a column named None, and a firepanda name is text."""
-    with pytest.raises(NotImplementedError):
-        build(firepanda)
+def test_one_value_a_group_goes_in_a_column_named_none(firepanda: ModuleType, build: Any) -> None:
+    """pandas puts one value a group beside the keys, in a column it names None."""
+    import pandas as pd
+
+    assert repr(build(firepanda)) == repr(build(pd))
 
 
 def test_the_groups_are_handed_out_without_the_keys(firepanda: ModuleType) -> None:
