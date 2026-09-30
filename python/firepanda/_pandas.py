@@ -6809,6 +6809,17 @@ def _shifted_by_each(periods: Any, suffix: Any, shift: Any) -> Any:
     return concat(parts, axis=1)
 
 
+def _changed_by_freq(data: Any, periods: int, freq: Any) -> Any:
+    """pandas' `pct_change` with a `freq`: each value over the one `freq` earlier.
+
+    The labels are moved rather than the values, so the division lines the two
+    up by label, and the answer is read back onto the labels it started with.
+    """
+    changed = data / data.shift(periods, freq=freq) - 1
+    changed = changed.loc[[not seen for seen in changed.index.duplicated()]]
+    return changed.reindex_like(data)
+
+
 def _columns_shifted(frame: Any, periods: int, fill_value: Any) -> Any:
     """A frame with its columns moved along by `periods`, as pandas shifts along `axis=1`.
 
@@ -16447,8 +16458,12 @@ class DataFrameMixin(_Carries):
         less one, which is how pandas works it out along that axis.
         """
         _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
-        _refuse("freq", freq, "it needs the offset vocabulary, which is the resampling milestone")
-        if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+        across = _axis_number(axis, "DataFrame", 0, (0, 1))
+        if freq is not None:
+            if across == 1:
+                return _changed_by_freq(self.T, periods, freq).T
+            return _changed_by_freq(self, periods, freq)
+        if across == 1:
             fill_value = kwargs.pop("fill_value", NO_DEFAULT)
             return self / _columns_shifted(self, periods, fill_value) - 1
         return self._transformed("pct_change", periods)
@@ -19845,8 +19860,9 @@ class SeriesMixin(_Carries):
     ) -> Series:
         """The fractional change between each row and the one before it."""
         _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
-        _refuse("freq", freq, "it needs the offset vocabulary, which is the resampling milestone")
         _axis_number(axis, "Series", 0, (0,))
+        if freq is not None:
+            return _changed_by_freq(self, periods, freq)
         return self._transformed("pct_change", periods)
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> Series:
@@ -26461,17 +26477,28 @@ class GroupByMixin[Answer]:
             raise InvalidArgumentError(
                 f"fill_method must be None; got fill_method={fill_method!r}."
             )
-        _refuse(
-            "freq",
-            freq,
-            "shifting by a frequency moves the labels rather than the values and"
-            " needs the offset vocabulary, which is the resampling milestone",
-        )
         if isinstance(periods, bool) or not isinstance(periods, int):
             raise TypeError(f"Periods must be integer, but {periods} is {type(periods)}.")
+        if freq is not None:
+            return self._changed_by_freq(periods, freq)
         shifted = self._shape_rows("shift", periods)
         values = self._as_answer(self._frame[self._value_columns()])
         return values / shifted - 1
+
+    def _changed_by_freq(self, periods: int, freq: Any) -> Any:
+        """Each group's `pct_change` with a `freq`, back in the rows' first order.
+
+        pandas works each group out as a frame of its own, the key columns too
+        when nothing was picked, and puts the rows back where they came from.
+        """
+        narrowed = getattr(self, "_selection", None) or getattr(self, "_column", None)
+        source = self._source() if narrowed is not None else self._frame
+        members = self._members()
+        if not members:
+            return source.iloc[:0]
+        parts = [_changed_by_freq(source.iloc[places], periods, freq) for _, places in members]
+        order = [at for _, places in members for at in places]
+        return concat(parts).iloc[sorted(range(len(order)), key=order.__getitem__)]
 
     def _members(self) -> list[tuple[tuple[Any, ...], list[int]]]:
         """Every group's key values and row positions, in the order the groups come out.
