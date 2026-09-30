@@ -414,12 +414,6 @@ def test_a_tuple_index_refuses_a_name_as_pandas_does(firepanda: ModuleType, name
         firepanda.Index([("a", 1), ("b", 2)], name=name)
 
 
-def test_get_indexer_refuses_the_filling_arguments(firepanda: ModuleType) -> None:
-    """`method=` is how pandas fills a missing label from a neighbour, and it is not written."""
-    with pytest.raises(NotImplementedError, match="method="):
-        firepanda.Index([1, 2]).get_indexer([1], method="pad")
-
-
 def test_taking_positions_counts_back_from_the_end_by_default(firepanda: ModuleType) -> None:
     """`take` with the default arguments does no filling, so -1 is the last row.
 

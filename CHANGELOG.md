@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: method, limit and tolerance on Index.get_indexer and Index.reindex
+
+`Index.get_indexer` and `Index.reindex` take `method="pad"`, `"ffill"`, `"backfill"`, `"bfill"` or `"nearest"`, with `limit` and `tolerance`, the way pandas does. A label the index does not hold reads from the label before it, after it or nearest it, on numbers, words and dates, on a rising or a falling index. A repeated index, an index in no order, an unknown method and a limit or tolerance with no method are refused with pandas' own errors.
+
 ### Fixed: an IntervalIndex goes to Arrow as pandas sends it
 
 An `IntervalIndex`, and a `MultiIndex` level of intervals, now go to Arrow as the `pandas.interval` extension array pandas exports, where they used to go as text. A gap in a level of intervals prints as NaN.

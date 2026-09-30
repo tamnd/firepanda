@@ -88,15 +88,10 @@ def test_a_repeated_label_in_the_index_is_refused(firepanda):
         twice.reindex([10])
 
 
-def test_filling_from_the_label_beside_it_is_not_done_here(firepanda):
-    with pytest.raises(NotImplementedError, match="method"):
-        made(firepanda).reindex([10, 99], method="ffill")
-
-
-def test_a_limit_or_a_tolerance_is_refused_because_there_is_no_filling(firepanda):
-    with pytest.raises(NotImplementedError, match="limit"):
+def test_a_limit_or_a_tolerance_without_a_method_is_refused_as_pandas_does(firepanda):
+    with pytest.raises(ValueError, match="limit argument only valid"):
         made(firepanda).reindex([10], limit=1)
-    with pytest.raises(NotImplementedError, match="tolerance"):
+    with pytest.raises(ValueError, match="tolerance argument only valid"):
         made(firepanda).reindex([10], tolerance=1)
 
 

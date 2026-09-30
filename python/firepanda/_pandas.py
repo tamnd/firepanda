@@ -28941,15 +28941,20 @@ class IndexMixin:
     ) -> list[int]:
         """Where each of a set of labels sits, with -1 for the ones that are not there.
 
-        The three parameters after `target` are the ones that fill a missing
-        label in from a neighbour, and they are refused rather than ignored. This
-        is only defined on a unique index, which pandas also insists on, because
-        one position per label asked for is not an answer an index with
-        duplicates has.
+        The three parameters after `target` fill a missing label in from a
+        neighbour, as `reindex` fills it. This is only defined on a unique index,
+        which pandas also insists on, because one position per label asked for
+        is not an answer an index with duplicates has.
         """
-        _refuse("method", method, "filling a missing label from a neighbour is not written")
-        _refuse("limit", limit, "there is no filling for it to limit")
-        _refuse("tolerance", tolerance, "there is no filling for it to bound")
+        picked = _reindex_filling(method, limit, tolerance)
+        if picked is not None:
+            if not self.is_unique:
+                from .errors import InvalidIndexError
+
+                raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
+            labels = target.tolist() if hasattr(target, "tolist") else list(target)
+            own = self.tolist()
+            return _reindex_positions(own, labels, picked, limit, tolerance, _word(self.dtype))
         if _word(self.dtype).startswith(("datetime64", "timedelta64")):
             if not self.is_unique:
                 from .errors import InvalidIndexError
@@ -29355,10 +29360,11 @@ class IndexMixin:
         Args:
             target: The labels the result should carry, as an index or as a
                 sequence of them.
-            method: Refused, for the reason `get_indexer` gives.
+            method: Fills a label this index does not hold from its neighbour,
+                as `get_indexer` does.
             level: Ignored, since a flat index has exactly the one level.
-            limit: Refused, since it only means something with `method`.
-            tolerance: Refused, for the same reason.
+            limit: How many labels one neighbour fills, with `method`.
+            tolerance: How far a neighbour may be, with `method`.
 
         Returns:
             The new index and the positions, or the new index and `None`.
@@ -29368,9 +29374,7 @@ class IndexMixin:
         """
         from ._frame import Index
 
-        _refuse("method", method, "filling a missing label from a neighbour is not written")
-        _refuse("limit", limit, "there is no filling for it to limit")
-        _refuse("tolerance", tolerance, "there is no filling for it to bound")
+        picked = _reindex_filling(method, limit, tolerance)
         wanted = target._inner if isinstance(target, IndexMixin) else target
         listed = self._temporal and not isinstance(target, IndexMixin)
         if listed:
@@ -29382,6 +29386,8 @@ class IndexMixin:
         except Exception as error:
             raise translate(error) from None
         made, positions = answer
+        if picked is not None and positions is not None:
+            positions = self.get_indexer(target, picked, limit, tolerance)
         return Index._wrap(made), None if positions is None else list(positions)
 
     def to_numpy(
