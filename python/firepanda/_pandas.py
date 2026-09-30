@@ -2956,10 +2956,12 @@ def _label_order(
                 index._only_level(one)
             levels = [0]
     downward = _directions(ascending, len(levels))
-    if level is not None and sort_remaining:
+    if level is not None and sort_remaining and not isinstance(ascending, (list, tuple)):
+        # A direction for each level asked for sorts on those levels alone in
+        # pandas, which leaves the rest in the order they came in.
         rest = [n for n in range(depth) if n not in levels]
         levels += rest
-        downward += [downward[0] if not isinstance(ascending, (list, tuple)) else False] * len(rest)
+        downward += [downward[0]] * len(rest)
     order = list(range(len(index)))
     for number, descending in reversed(list(zip(levels, downward, strict=True))):
         labels = index.get_level_values(number) if depth > 1 else index
@@ -15404,6 +15406,18 @@ class DataFrameMixin(_Carries):
         inplace = _flag("inplace", inplace)
         if across == 1 and key is not None:
             _refuse("key", key, "running a function over the column labels is not written")
+        labels = self.index if across == 0 else self.columns
+        if isinstance(ascending, (list, tuple)) and not isinstance(labels, MultiIndex):
+            # On labels of one level pandas leaves them be when every flag
+            # agrees with the order they are already in, and otherwise sorts
+            # them upward unless the list is empty.
+            flags = list(ascending)
+            if all(flags) and labels.is_monotonic_increasing:
+                ascending = True
+            elif not any(flags) and labels.is_monotonic_decreasing:
+                ascending = False
+            else:
+                ascending = bool(flags)
         if (
             across == 0
             and key is None
@@ -15415,7 +15429,12 @@ class DataFrameMixin(_Carries):
             ordered = self.iloc[order]
             ordered = ordered.reset_index(drop=True) if ignore_index else ordered
             return _settled(self, ordered, inplace)
-        if across == 0 and (key is not None or na_position != "last" or not sort_remaining):
+        if across == 0 and (
+            key is not None
+            or na_position != "last"
+            or not sort_remaining
+            or isinstance(ascending, (list, tuple))
+        ):
             first = _na_first(na_position)
             order = _label_order(self.index, level, ascending, first, sort_remaining, key)
             ordered = self.iloc[order]
