@@ -33,7 +33,7 @@ from firepanda.io.arrow_ipc import read_ipc_stream
 from firepanda.io.arrow_ipc_write import write_ipc_stream_bytes
 from firepanda.io.write import WriteOptions, write_csv_bytes
 from firepanda.kernel.cast import cast_any
-from firepanda.kernel.concat import concat_two_any
+from firepanda.kernel.concat import concat_any, concat_two_any
 from firepanda.kernel.nulls import coalesce_any, fill_forward_any
 from firepanda.kernel.reduce import distinct_count_any, reduce_any
 from firepanda.kernel.member import is_in_any
@@ -339,6 +339,32 @@ def test_a_string_answer_per_category_goes_out_flat() raises:
     assert_true(up.values.is_flat())
     for i in range(4):
         assert_equal(up.text(i), "A")
+
+
+def test_stacking_slices_of_one_column_keeps_the_codes() raises:
+    # What a scan in morsels hands back: runs of one coded column, all over
+    # the same categories. They stack as codes, and a count of the distinct
+    # values then counts codes rather than hashing strings.
+    var col = status()
+    var parts = List[AnyArray]()
+    parts.append(col.slice(0, 3))
+    parts.append(col.slice(3, 5))
+    parts.append(col.slice(5, 8))
+    var out = concat_any(parts)
+    assert_true(out.is_coded())
+    same_text(out, col)
+    assert_equal(distinct_count_any(out), 3)
+
+
+def test_stacking_columns_coded_apart_decodes() raises:
+    # The same strings coded twice are two sets of categories, so the stack
+    # goes through the strings and is flat.
+    var parts = List[AnyArray]()
+    parts.append(status())
+    parts.append(status())
+    var out = concat_any(parts)
+    assert_true(out.is_flat())
+    same_text(out, concat_two_any(status().decoded(), status().decoded()))
 
 
 def test_the_kernels_that_decode_match_the_flat_ones() raises:

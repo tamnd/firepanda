@@ -8115,6 +8115,29 @@ struct Reduce(Movable):
         # partial answers are one row, and nothing but `absorb` reads this.
         return Chunk(made^, 1)
 
+    def reads_codes(self, column: Int) -> Bool:
+        """Reports whether an input column can reach this node as codes.
+
+        It can when nothing folds it and every slot that holds it counts its
+        distinct values as they are, which the whole column kernel does on the
+        codes. A column no slot reads never reaches the answer at all.
+
+        Args:
+            column: The input column's position.
+
+        Returns:
+            True if the column is only ever counted distinct, or not read.
+        """
+        for t in range(len(self._source)):
+            if self._source[t] == column:
+                return False
+        for k in range(len(self._kept)):
+            if self._kept[k] == column and (
+                self._kept_shift[k] >= 0 or self._late[k] != AggKind.NUNIQUE
+            ):
+                return False
+        return True
+
     def absorb(mut self, var partial: Chunk) raises:
         """Merges one chunk's partial answers into the running row.
 
@@ -9088,6 +9111,25 @@ def node_is_breaker(node: Node) -> Bool:
         or node.isa[Reduce]()
         or node.isa[Unique]()
     )
+
+
+def node_reads_codes(node: Node, column: Int) -> Bool:
+    """Reports whether a node can take one input column held as codes.
+
+    The scan decodes every coded morsel, because almost nothing reads codes.
+    A reduction that only counts a column's distinct values is one that does,
+    and decoding for it turned a count of codes into a hash of every string.
+
+    Args:
+        node: The node, as the first in the line.
+        column: The input column's position.
+
+    Returns:
+        True if the node never reads the column's values as strings.
+    """
+    if node.isa[Reduce]():
+        return node[Reduce].reads_codes(column)
+    return False
 
 
 def node_reads_selection(node: Node) -> Bool:

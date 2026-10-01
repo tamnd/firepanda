@@ -127,6 +127,38 @@ def concat_any(parts: List[AnyArray]) raises -> AnyArray:
     return concat_refs_any(refs)
 
 
+def _share_categories(
+    parts: List[Pointer[AnyArray, ImmUntrackedOrigin]],
+) -> Bool:
+    """Reports whether every part is coded into the very same categories.
+
+    The same buffers, not equal strings, so the answer costs a few pointer
+    compares however many categories there are. Two columns coded apart can
+    hold the same strings in another order, and those go through the decode.
+
+    Args:
+        parts: References to the columns.
+
+    Returns:
+        True if every part is dictionary encoded over part zero's categories.
+    """
+    if not parts[0][].is_coded():
+        return False
+    ref first = parts[0][].text.value()
+    for p in range(1, len(parts)):
+        if not parts[p][].is_coded():
+            return False
+        ref other = parts[p][].text.value()
+        if (
+            len(other) != len(first)
+            or Int(other.views.unsafe_ptr()) != Int(first.views.unsafe_ptr())
+            or Int(other.payload.unsafe_ptr())
+            != Int(first.payload.unsafe_ptr())
+        ):
+            return False
+    return True
+
+
 def concat_refs_any(
     parts: List[Pointer[AnyArray, ImmUntrackedOrigin]],
 ) raises -> AnyArray:
@@ -177,6 +209,16 @@ def concat_refs_any(
             )
         check_same_categories(parts[0][], parts[p][], "concat")
         total += len(parts[p][])
+
+    # Parts cut from one coded column hold the same categories, down to the
+    # buffers, and a stack of them is a stack of their codes. This is what a
+    # query that scanned a coded column in morsels hands back, and decoding
+    # it there turned a count of distinct codes into a hash of every string.
+    if _share_categories(parts):
+        var codes = List[AnyArray](capacity=len(parts))
+        for p in range(len(parts)):
+            codes.append(parts[p][].code_column())
+        return parts[0][].with_codes(concat_any(codes))
 
     # A part held as codes is stacked as the strings it stands for. Two parts
     # can hold different categories, and the flat stack below is the path a
