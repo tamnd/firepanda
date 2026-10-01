@@ -443,7 +443,7 @@ def _period(freq: Any) -> int:
         freq = spelling
     found = _FREQUENCY.match(freq)
     if found is None:
-        raise InvalidArgumentError(f"Invalid frequency: {freq}")
+        return _compound_period(freq)
     sign, count, alias = found.groups()
     if alias not in _FIXED:
         raise InvalidArgumentError(
@@ -455,6 +455,44 @@ def _period(freq: Any) -> int:
     if period == 0:
         raise InvalidArgumentError(f"Invalid frequency: {freq}")
     return -period if sign == "-" else period
+
+
+def _compound_period(freq: str) -> int:
+    """The length of a frequency of several fixed pieces, `1h30min`, as pandas sums them.
+
+    Raises:
+        ValueError: If it is not made of fixed pieces alone.
+    """
+    body = freq.strip()
+    sign = "-" if body.startswith("-") else ""
+    pieces = re.findall(r"(\d*)([A-Za-z]+)", body.lstrip("+-"))
+    if "".join(count + alias for count, alias in pieces) != body.lstrip("+-") or any(
+        alias not in _FIXED for _, alias in pieces
+    ):
+        raise InvalidArgumentError(f"Invalid frequency: {freq}")
+    period = sum(_FIXED[alias] * (int(count) if count else 1) for count, alias in pieces)
+    if period == 0:
+        raise InvalidArgumentError(f"Invalid frequency: {freq}")
+    return -period if sign else period
+
+
+def _single_frequency(freq: Any) -> Any:
+    """A frequency of several fixed pieces, `1h30min`, as one count of its finest piece.
+
+    The kernel reads one count and one alias, so `1h30min` is handed over as
+    `90min`, which is the same length. Anything else is handed back as it came,
+    for the kernel to read or refuse.
+    """
+    if not isinstance(freq, str) or _FREQUENCY.match(freq):
+        return freq
+    try:
+        period = _compound_period(freq)
+    except InvalidArgumentError:
+        return freq
+    finest = min(
+        (alias for _, alias in re.findall(r"(\d*)([A-Za-z]+)", freq)), key=_FIXED.__getitem__
+    )
+    return f"{period // _FIXED[finest]}{finest}"
 
 
 def _zone(tz: Any) -> _datetime.tzinfo | None:

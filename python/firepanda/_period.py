@@ -525,7 +525,7 @@ class Period:
         nanos = 0
         if isinstance(value, (str, numbers.Integral)) and not isinstance(value, bool):
             text = str(value).upper()
-            if text == "NAT":
+            if text in ("NAT", "NAN"):
                 return NaT
             weekly = _WEEKLY.fullmatch(text)
             if weekly is not None:

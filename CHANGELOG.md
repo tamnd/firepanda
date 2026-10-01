@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: compound rounding frequencies, short temporal dtype names and a few index fixes
+
+Rounding a Timestamp, Timedelta, DatetimeIndex or `.dt` column to a frequency of several fixed pieces such as `1h30min` now sums the pieces as pandas does. `Period("nan")` is NaT, `astype("M8[ns]")` and `astype("<m8[s]")` read numpy's short names, and `str.replace` takes a compiled pattern. `Index.value_counts` no longer fails on repeated labels with a gap, `Index.putmask` takes an Index of replacements, set operations between two number widths meet at the common type, and `Index([nan, "a"])` is a text index with a gap.
+
 ### Added: BEGIN, COMMIT and ROLLBACK
 
 `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK` and `ABORT` now run over the catalog as DuckDB runs them. A rollback undoes every table, row and view the transaction changed. A statement that fails to parse or bind leaves the transaction going, and one that fails as it runs aborts it, after which every statement is refused until a `ROLLBACK`, and a `COMMIT` rolls back without a word. A `BEGIN` inside a transaction, an end with none, and a write in a `READ ONLY` transaction are refused with DuckDB's messages.
