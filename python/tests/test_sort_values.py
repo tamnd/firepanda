@@ -159,7 +159,7 @@ def test_an_index_can_hand_back_the_order_that_sorted_it(firepanda):
     ordered, found = made.sort_values(return_indexer=True)
     other, expected = want.sort_values(return_indexer=True)
     assert list(ordered) == list(other)
-    assert found == list(expected) == [1, 3, 0, 2]
+    assert found.tolist() == list(expected) == [1, 3, 0, 2]
 
 
 def test_an_index_of_instants_stays_one_after_sorting(firepanda):
@@ -173,7 +173,7 @@ def test_an_index_of_instants_stays_one_after_sorting(firepanda):
     assert type(made.sort_values()) is type(made)
 
 
-def test_an_index_argsorts_to_a_plain_list(firepanda):
+def test_an_index_argsorts_to_numpy_positions(firepanda):
     made = firepanda.DataFrame({"k": [2, 0, 3, 1], "v": [1, 2, 3, 4]}).set_index("k").index
     want = pd.DataFrame({"k": [2, 0, 3, 1], "v": [1, 2, 3, 4]}).set_index("k").index
-    assert made.argsort() == list(want.argsort()) == [1, 3, 0, 2]
+    assert made.argsort().tolist() == list(want.argsort()) == [1, 3, 0, 2]

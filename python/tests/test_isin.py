@@ -317,6 +317,6 @@ def test_a_repeated_label_on_the_other_side_is_refused(firepanda: ModuleType, sh
 
 
 @needs_pandas
-def test_an_index_still_answers_a_list(firepanda: ModuleType) -> None:
-    """`Index.isin` was here first and is not changed by this, which is worth one line."""
-    assert firepanda.Index([1, 2, 3]).isin([2]) == [False, True, False]
+def test_an_index_answers_numpy_flags(firepanda: ModuleType) -> None:
+    """`Index.isin` answers a numpy array of bools, as pandas does."""
+    assert firepanda.Index([1, 2, 3]).isin([2]).tolist() == [False, True, False]

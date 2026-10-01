@@ -201,7 +201,7 @@ def test_get_loc_returns_an_int_a_slice_or_a_mask(firepanda: ModuleType) -> None
 
 def test_get_indexer_marks_the_missing_with_minus_one(firepanda: ModuleType) -> None:
     """The lookup a reindex is made of, with the pandas convention for a miss."""
-    assert firepanda.Index(["a", "b", "c"]).get_indexer(["c", "z", "a"]) == [2, -1, 0]
+    assert firepanda.Index(["a", "b", "c"]).get_indexer(["c", "z", "a"]).tolist() == [2, -1, 0]
 
 
 def test_the_set_operations_follow_the_pandas_sorting_rules(firepanda: ModuleType) -> None:
