@@ -14900,8 +14900,8 @@ class DataFrameMixin(_Carries):
         The cells are the ones `to_string` writes, trimmed and with `&`, `<` and
         `>` escaped, and the row labels are header cells when `bold_rows` is
         set. `notebook` wraps the table in the `div` and scoped style a
-        notebook shows. `sparsify` only matters for a MultiIndex, which
-        firepanda does not have.
+        notebook shows. With a `MultiIndex` each level gets its own cell, and
+        `sparsify` joins a label repeated down the rows into one tall cell.
 
         Returns:
             The markup when `buf` is None, and None otherwise.
@@ -14931,6 +14931,7 @@ class DataFrameMixin(_Carries):
                 "border": border,
                 "table_id": table_id,
                 "render_links": render_links,
+                "sparsify": sparsify,
             },
             notebook,
         )
@@ -35891,6 +35892,17 @@ def _text_levels(
     the same values on it and on every level to its left, unless `sparse` is
     off. A frame puts one space between the levels and a column two.
     """
+    columns = []
+    for texts in _text_level_columns(index, named, widest, sparse):
+        size = max((len(x) for x in texts), default=0)
+        columns.append([x.ljust(size) for x in texts])
+    return [(" " * between).join(parts) for parts in zip(*columns, strict=True)]
+
+
+def _text_level_columns(
+    index: Any, named: bool, widest: int | None, sparse: bool = True
+) -> list[list[str]]:
+    """The labels of each level of a `MultiIndex` as text, a repeat blank when `sparse` is on."""
     from ._frame import Index
 
     codes = index._codes
@@ -35921,9 +35933,8 @@ def _text_levels(
             for row in range(1, len(index)):
                 if all(codes[n][row] == codes[n][row - 1] for n in range(number + 1)):
                     texts[row + above] = ""
-        size = max((len(x) for x in texts), default=0)
-        columns.append([x.ljust(size) for x in texts])
-    return [(" " * between).join(parts) for parts in zip(*columns, strict=True)]
+        columns.append(texts)
+    return columns
 
 
 def _text_labels(

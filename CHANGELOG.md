@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: to_html writes each level of a MultiIndex in its own cell
+
+`DataFrame.to_html` and the notebook repr used to join the levels of a MultiIndex into one cell such as `1 x`. Each level now gets its own `th`, the level names get a row of their own, and a label repeated down the rows becomes one tall cell with `rowspan`, unless `sparsify=False`. The row of dots for cut rows goes in among the tall cells as pandas puts it, a run that crosses it growing by a row.
+
 ### Added: read_csv and read_json read into the dtype_backend types
 
 `read_csv(dtype_backend="numpy_nullable")` now reads integers, floats, booleans and text into `Int64`, `Float64`, `boolean` and `string`, and `dtype_backend="pyarrow"` reads them into `int64[pyarrow]`, `double[pyarrow]`, `bool[pyarrow]` and `string[pyarrow]`, as pandas does. An integer column with a gap stays whole under either backend instead of turning into floats, and dates keep their numpy type. `read_json` takes `dtype_backend` too, running `convert_dtypes` over what it read as pandas does. `astype` also accepts an Arrow name such as `int64[pyarrow]` as well as an `ArrowDtype`.

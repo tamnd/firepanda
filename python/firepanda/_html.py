@@ -63,6 +63,79 @@ def _spaces(labels: list[str], col_space: Any) -> dict[Any, Any]:
     return dict(zip(labels, col_space, strict=True))
 
 
+class _Tall:
+    """A row label that stands for the rows below it with the same label, as one tall cell."""
+
+    def __init__(self, text: str, rows: int) -> None:
+        self.text = text
+        self.rows = rows
+
+
+def _level_cells(index: Any, sparse: bool, cut: int | None) -> list[list[Any]]:
+    """The label cells of each row of a `MultiIndex`, the row of dots at `cut` among them.
+
+    With `sparse` on, a label on any level but the last that repeats the row above,
+    with every level to its left repeating too, joins that row's cell, which is
+    pandas' `rowspan`. The runs are found over the rows shown, so one can run on
+    across the cut, and then the row of dots goes in as pandas' `HTMLFormatter`
+    puts it: a run that crosses it grows by a row, and a level whose run ends right
+    before it gets a cell of dots.
+    """
+    from ._pandas import _text_level_columns
+
+    columns = _text_level_columns(index, False, None, sparse=False)
+    rows, depth = len(index), index.nlevels
+    values = [list(row) for row in zip(*columns, strict=True)]
+    if not sparse:
+        if cut is not None:
+            values.insert(cut, ["..."] * depth)
+        return values
+    codes = index._codes
+    inner = depth - 1
+    records = []
+    for number in range(depth):
+        spans, start = {}, 0
+        for row in range(1, rows + 1):
+            if (
+                row == rows
+                or number == inner
+                or any(codes[n][row] != codes[n][row - 1] for n in range(number + 1))
+            ):
+                spans[start] = row - start
+                start = row
+        records.append(spans)
+    if cut is not None:
+        inserted = False
+        for number, spans in enumerate(records):
+            moved = {}
+            for tag, span in spans.items():
+                if tag >= cut:
+                    moved[tag + 1] = span
+                elif tag + span > cut:
+                    moved[tag] = span + 1
+                    if not inserted:
+                        dots = list(values[cut - 1])
+                        dots[-1] = "..."
+                        values.insert(cut, dots)
+                        inserted = True
+                    else:
+                        values[cut][inner - number] = "..."
+                else:
+                    moved[tag] = span
+                if tag + span == cut:
+                    moved[cut] = 1
+                    if number == 0:
+                        values.insert(cut, ["..."] * depth)
+                    elif inserted:
+                        values[cut][inner - number] = "..."
+            records[number] = moved
+        records[inner][cut] = 1
+    return [
+        [_Tall(row[number], spans[at]) for number, spans in enumerate(records) if at in spans]
+        for at, row in enumerate(values)
+    ]
+
+
 class _Writer:
     """Collects the lines of the table, each cell escaped and trimmed as pandas does it."""
 
@@ -77,8 +150,11 @@ class _Writer:
         self.lines.append(" " * indent + text)
 
     def cell(self, value: Any, kind: str, indent: int, header: bool = False) -> None:
+        tall = 1
+        if isinstance(value, _Tall):
+            value, tall = value.text, value.rows
         text = value if isinstance(value, str) else str(value)
-        start = f"<{kind}>"
+        start = f"<{kind}>" if tall == 1 else f'<{kind} rowspan="{tall}" valign="top">'
         space = self.spaces.get(text) if header else None
         if space is not None:
             start = f'<{kind} style="min-width: {space};">'
@@ -112,7 +188,14 @@ class _Writer:
 def to_html(frame: Any, kw: dict[str, Any], notebook: bool) -> str:
     """The frame as pandas' HTML table, under the options in `kw`."""
     from ._config import get_option
-    from ._pandas import _text_cut, _text_float_format, _text_labels, _text_limits, _text_values
+    from ._pandas import (
+        _text_cut,
+        _text_float_format,
+        _text_labels,
+        _text_limits,
+        _text_named,
+        _text_values,
+    )
 
     justify = kw["justify"]
     if justify is not None and justify not in _JUSTIFY:
@@ -165,9 +248,10 @@ def to_html(frame: Any, kw: dict[str, Any], notebook: bool) -> str:
 
     names_shown = kw["index_names"]
     column_name = getattr(frame.columns, "name", None)
-    row_names = bool(index and names_shown and frame.index.name is not None)
+    row_names = bool(index and names_shown and _text_named(frame.index))
     column_names = bool(column_name is not None and names_shown and header)
-    levels = 1 if index or column_names else 0
+    depth = getattr(frame.index, "nlevels", 1) if index else 1
+    levels = depth if index or column_names else 0
 
     writer = _Writer(kw["escape"], kw["render_links"], spaces, kw["bold_rows"])
     table_id = "" if kw["table_id"] is None else f' id="{kw["table_id"]}"'
@@ -187,7 +271,9 @@ def to_html(frame: Any, kw: dict[str, Any], notebook: bool) -> str:
                 cells.insert(levels + dots_col, "...")
             writer.row(cells, 4, header=True, align=justify)
         if row_names:
-            cells = [frame.index.name] + [""] * (len(shown_labels) + (dots_col is not None))
+            names = getattr(frame.index, "names", [frame.index.name])
+            cells = ["" if name is None else name for name in names]
+            cells += [""] * (len(shown_labels) + (dots_col is not None))
             writer.row(cells, 4, header=True)
         writer.write("</thead>", 2)
 
@@ -203,25 +289,34 @@ def to_html(frame: Any, kw: dict[str, Any], notebook: bool) -> str:
         if widest is not None and widest > 3:
             texts = [x[: widest - 3] + "..." if len(x) > widest else x for x in texts]
         columns.append(texts)
-    if index:
+    heads: list[list[Any]] = [[] for _ in range(len(shown))]
+    if index and depth > 1:
+        sparse = kw.get("sparsify")
+        if sparse is None:
+            sparse = get_option("display.multi_sparse")
+        heads = _level_cells(shown.index, bool(sparse), dots_row)
+    elif index:
         mapped = formatters.get("__index__") if isinstance(formatters, dict) else None
         if mapped is not None:
             names = [mapped(label) for label in shown.index.tolist()]
         else:
             names = _text_labels(shown.index, False, None)
-    cells = []
+        heads = [[name] for name in names]
+    elif column_names:
+        heads = [[""] for _ in range(len(shown))]
+    width = levels + len(columns) + (dots_col is not None)
+    # The label cells of a MultiIndex come with the row of dots among them.
+    after = 1 if index and depth > 1 and dots_row is not None else 0
     for place in range(len(shown)):
         if dots_row is not None and place == dots_row:
-            writer.row(["..."] * len(cells), 4, labels=levels)
-        cells = []
-        if index:
-            cells.append(names[place])
-        elif column_names:
-            cells.append("")
+            dots = heads[place] if after else ["..."] * levels
+            writer.row(list(dots) + ["..."] * (width - levels), 4, labels=len(dots))
+        cells = list(heads[place + after if dots_row is not None and place >= dots_row else place])
+        shift = len(cells)
         cells.extend(texts[place] for texts in columns)
         if dots_col is not None:
-            cells.insert(dots_col + levels, "...")
-        writer.row(cells, 4, labels=levels)
+            cells.insert(dots_col + shift, "...")
+        writer.row(cells, 4, labels=shift)
     writer.write("</tbody>", 2)
     writer.write("</table>")
     dimensions = kw["show_dimensions"]
