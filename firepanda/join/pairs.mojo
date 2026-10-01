@@ -126,7 +126,7 @@ from firepanda.exec.morsel import parallel_morsels
 from firepanda.exec.parallel import parallel_for, worker_count
 from firepanda.kernel.sort import is_sorted_any
 
-from .keys import align_keys
+from .keys import BuildSide, align_keys, build_side
 
 
 comptime PARALLEL_LEFT_ROWS = 1 << 17
@@ -189,6 +189,19 @@ parts and keeps under one in a hundred of them. Both passes of the pairing used
 to load a table slot for each of those rows to learn that it was empty. Sixteen
 codes are one cache line of `uint32` and one compare, and at q8's hit rate
 nearly nine blocks in ten are all misses and are stepped over whole.
+"""
+
+comptime SPARSE_PROBE_MARGIN = 16
+"""How much taller the left has to be before a sparse key pairs in one pass.
+
+An inner join of a tall left side against a short right side whose keys sit in
+a direct table with a sieve, which is a dimension table filtered down to a few
+keys, is mostly misses. The ordinary route still writes an ordinal for every left
+row and then reads that list twice to count and emit the pairs, and at q8's six
+million lines that is three passes over 24 MB to keep forty thousand pairs.
+`_sparse_route` asks the table and emits in the same pass instead. Sixteen keeps
+it to a right side whose table costs a sliver of the walk, because a right side
+that turns out not to get a sieve has been built for nothing.
 """
 
 comptime MERGE_PROBE_ROWS = 1 << 16
@@ -844,6 +857,18 @@ def join_indices[
     if walked:
         return walked.take()
 
+    var sparse = _sparse_route(
+        left_columns,
+        left_keys,
+        left_rows,
+        right_columns,
+        right_keys,
+        right_rows,
+        kind,
+    )
+    if sparse:
+        return sparse.take()
+
     var aligned = align_keys(
         left_columns,
         left_keys,
@@ -898,6 +923,154 @@ def join_indices[
                 paired.left_at.append(-1)
                 paired.right_at.append(r)
     return paired^
+
+
+def _sparse_route[
+    l: ImmOrigin, r: ImmOrigin
+](
+    left_columns: ColumnRefs[l],
+    left_keys: List[Int],
+    left_rows: Int,
+    right_columns: ColumnRefs[r],
+    right_keys: List[Int],
+    right_rows: Int,
+    kind: JoinKind,
+) raises -> Optional[JoinIndices]:
+    """Pairs a tall left side against a sparse right side in one pass.
+
+    Only an inner join on one integer key with no nulls, a right side at least
+    `SPARSE_PROBE_MARGIN` times shorter, and a right side whose keys get a direct
+    table with a sieve. Anything else answers nothing and goes the ordinary way.
+
+    Each left morsel asks the sieve and the table about its rows and keeps its
+    pairs in lists of its own, and the lists are laid end to end in morsel order
+    at the end. So the pairs come out in left row order and, within a left row,
+    in right row order, which is what the ordinary route gives.
+
+    Args:
+        left_columns: The left frame's columns.
+        left_keys: Which of them are keys.
+        left_rows: The left frame's height.
+        right_columns: The right frame's columns.
+        right_keys: Which of them are keys.
+        right_rows: The right frame's height.
+        kind: Which rows to keep.
+
+    Returns:
+        The pairing, or nothing when this route does not apply.
+
+    Raises:
+        If the build or a worker raises.
+    """
+    if (
+        kind != JoinKind.INNER
+        or len(left_keys) != 1
+        or len(right_keys) != 1
+        or left_rows < PARALLEL_LEFT_ROWS
+        or right_rows == 0
+        or right_rows * SPARSE_PROBE_MARGIN > left_rows
+    ):
+        return None
+    ref left = left_columns[left_keys[0]][]
+    ref right = right_columns[right_keys[0]][]
+    if (
+        left.is_string()
+        or right.is_string()
+        or left.dtype() != right.dtype()
+        or left.null_count() > 0
+        or right.null_count() > 0
+    ):
+        return None
+    comptime for candidate in ALL:
+        comptime if candidate.is_integral():
+            if left.dtype() == candidate:
+                ref probe = left.as_typed_view[candidate]()
+                ref build = right.as_typed_view[candidate]()
+                var codes = Array[DType.uint32](overwritten=right_rows)
+                var built = build_side[candidate](build, 0, codes, left_rows)
+                if not built.direct or len(built.bits) == 0:
+                    return None
+                var table = bucket_side(
+                    codes, 0, right_rows, List[Bool](), 0, False, built.groups()
+                )
+                return _pair_sparse[candidate](built, table, probe)
+    return None
+
+
+def _pair_sparse[
+    dt: DType
+](built: BuildSide, table: ProbeTable, probe: Array[dt]) raises -> JoinIndices:
+    """The walk behind `_sparse_route`, once the key dtype is known.
+
+    Args:
+        built: The right side's direct table, which has a sieve.
+        table: The right side's rows per ordinal.
+        probe: The left side's key column, which has no nulls.
+
+    Parameters:
+        dt: The key dtype.
+
+    Returns:
+        The pairing, in left row order.
+
+    Raises:
+        If a worker raises, which it does not.
+    """
+    var rows = len(probe)
+    var low = Int(built.base.cast[dt]())
+    var span = built.span
+    var pieces = (rows + LEFT_MORSEL_ROWS - 1) // LEFT_MORSEL_ROWS
+    var lefts = List[List[Int]](length=pieces, fill=List[Int]())
+    var rights = List[List[Int]](length=pieces, fill=List[Int]())
+
+    def walk(start: Int, stop: Int) raises {mut lefts, mut rights, imm}:
+        var reads = probe.unsafe_ptr()
+        var slots = built.seats.bitcast[DType.uint32]()
+        var words = built.bits.bitcast[DType.uint64]()
+        var mine_left = List[Int]()
+        var mine_right = List[Int]()
+        for i in range(start, stop):
+            var at = Int(reads.unsafe_offset(i).unsafe_load()) - low
+            if at < 0 or at >= span:
+                continue
+            var word = words.unsafe_offset(at >> 6).unsafe_load()
+            if (word >> UInt64(at & 63)) & 1 == 0:
+                continue
+            var g = Int(slots.unsafe_offset(at).unsafe_load()) - 1
+            if table.unique:
+                mine_left.append(i)
+                mine_right.append(Int(table.only[g]))
+            else:
+                for p in range(table.starts[g], table.starts[g + 1]):
+                    mine_left.append(i)
+                    mine_right.append(table.bucket[p])
+        lefts[start // LEFT_MORSEL_ROWS] = mine_left^
+        rights[start // LEFT_MORSEL_ROWS] = mine_right^
+
+    parallel_morsels(walk, rows, LEFT_MORSEL_ROWS)
+
+    var starts = List[Int](length=pieces + 1, fill=0)
+    for m in range(pieces):
+        starts[m + 1] = starts[m] + len(lefts[m])
+    var out_left = List[Int](unsafe_uninit_length=starts[pieces])
+    var out_right = List[Int](unsafe_uninit_length=starts[pieces])
+
+    def lay(m: Int) raises {mut out_left, mut out_right, imm}:
+        var to_left = out_left.unsafe_ptr()
+        var to_right = out_right.unsafe_ptr()
+        var from_left = lefts[m].unsafe_ptr()
+        var from_right = rights[m].unsafe_ptr()
+        var put = starts[m]
+        for k in range(len(lefts[m])):
+            to_left.unsafe_offset(put + k).unsafe_write(
+                from_left.unsafe_offset(k).unsafe_load()
+            )
+            to_right.unsafe_offset(put + k).unsafe_write(
+                from_right.unsafe_offset(k).unsafe_load()
+            )
+
+    parallel_for(lay, pieces)
+    return JoinIndices(out_left^, out_right^)
 
 
 def _by_left_row(var paired: JoinIndices, left_rows: Int) raises -> JoinIndices:

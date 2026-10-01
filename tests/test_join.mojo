@@ -2142,5 +2142,52 @@ def test_a_sparse_direct_table_with_a_sieve_pairs_every_hit() raises:
             )
 
 
+def test_a_tall_side_against_a_sparse_short_side_pairs_in_one_pass() raises:
+    """Three hundred thousand rows on the left against a thousand on the right.
+
+    The right side's keys are spread thin enough for a direct table with a
+    sieve, so the pairing is done in one walk of the left. Every third right
+    key is held twice, which takes the walk through a bucket rather than a
+    single row, and the pairs have to come out in left row order and in right
+    row order within a left row, as the ordinary route gives them.
+    """
+    var short_rows = 1_000
+    var tall_rows = 300_000
+    var small = Array[DType.int64](short_rows)
+    for i in range(short_rows):
+        small[i] = Int64((i // 3 * 2 + i % 3 % 2) * 300)
+    var right = one_column(Series("k", small^))
+    var tall = Array[DType.int64](tall_rows)
+    for i in range(tall_rows):
+        tall[i] = Int64((i * 7_919) % 250_000)
+    var left = one_column(Series("k", tall^))
+    var paired = join_indices(
+        left.column_refs(),
+        keys(0),
+        tall_rows,
+        right.column_refs(),
+        keys(0),
+        short_rows,
+        JoinKind.INNER,
+    )
+    var held = right.column("k").as_typed[DType.int64]()
+    var probed = left.column("k").as_typed[DType.int64]()
+    var expected_left = List[Int]()
+    var expected_right = List[Int]()
+    for i in range(tall_rows):
+        var v = Int(probed[i])
+        if v % 300 != 0:
+            continue
+        for r in range(short_rows):
+            if Int(held[r]) == v:
+                expected_left.append(i)
+                expected_right.append(r)
+    assert_true(len(expected_left) > 0, "the probe should hit")
+    assert_equal(len(paired), len(expected_left), "pair count")
+    for p in range(len(paired)):
+        assert_equal(paired.left_at[p], expected_left[p], "left row")
+        assert_equal(paired.right_at[p], expected_right[p], "right row")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
