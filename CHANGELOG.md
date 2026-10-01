@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: group reductions take the cython engine
+
+A group reduction, `transform`, `agg` and `aggregate` now accept `engine="cython"`, `engine=None` and `engine_kwargs` as pandas does, since pandas reads `engine` only to see whether it names numba. The numba engine is still refused.
+
 ### Fixed: where's NaN from the other side and transpose's row labels
 
 `Series.where` and `mask` on a numpy float column now hold a gap taken from the other side as NaN rather than a null, so the column exports as pandas' does, and `DataFrame.combine` with a `where` function agrees with pandas. `DataFrame.transpose` now takes its row labels from the typed columns rather than the stored names, so `frame.T.T` and a fill along `axis=1` keep whole-number row labels and concat with their source.
