@@ -450,12 +450,14 @@ def set_option(*args: Any) -> None:
     """Set options from pairs of a pattern and a value, one pair after another.
 
     Args:
-        *args: A pattern, its value, and as many more pairs as wanted.
+        *args: A pattern, its value, and as many more pairs as wanted, or one dict of them.
 
     Raises:
         ValueError: The arguments are not pairs, or a value fails its option's check.
         OptionError: A pattern matches no option or several.
     """
+    if len(args) == 1 and isinstance(args[0], dict):
+        args = tuple(item for pair in args[0].items() for item in pair)
     if not args or len(args) % 2:
         raise ValueError("Must provide an even number of non-keyword arguments")
     for pat, value in zip(args[::2], args[1::2], strict=True):

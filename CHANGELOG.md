@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas.api.indexers, named aggregation, numpy arrays in factorize and unique
+
+`api.indexers` gives BaseIndexer, FixedForwardWindowIndexer, VariableOffsetWindowIndexer and check_array_indexer, and `rolling` takes an indexer and reduces each window it bounds. DataFrame.agg and Series.agg take named aggregations, factorize and unique take a numpy array and answer numpy arrays, set_option takes a dict, and a Timestamp reads month/day/year and year/month/day dates written with slashes.
+
 ### Added: array methods, Categorical sort and setting, IntervalArray makers, IntervalIndex.is_overlapping
 
 The arrays pandas answers gain argmax, argmin, argsort, duplicated, isin, item, map, nbytes, searchsorted, shift, view and interpolate, with a masked array's isin, map and nbytes answered as pandas answers them. Categorical gains sort_values, item assignment that refuses a new category, and map over its categories. IntervalArray takes a list of intervals and gains from_breaks, from_arrays, from_tuples, its ends, contains, overlaps and set_closed, and IntervalIndex gains is_overlapping, overlaps and set_closed. An array class such as NumpyExtensionArray now takes plain values.

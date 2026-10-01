@@ -617,13 +617,13 @@ def test_every_name_pandas_has_is_here_with_the_same_signature(firepanda: Module
 
 
 def test_the_api_namespace_holds_only_what_is_implemented(firepanda: ModuleType) -> None:
-    """`extensions`, `indexers`, `interchange` and `typing` are absent rather than empty.
+    """`extensions`, `interchange` and `typing` are absent rather than empty.
 
     Absent, because each hands out machinery for extending pandas and firepanda
     has none to hand out. An empty module would resolve and then fail on the
     first name, which is the shape of failure this project spends most of its
-    effort avoiding.
+    effort avoiding. `indexers` is here, since rolling windows read it.
     """
-    assert firepanda.api.__all__ == ["types"]
-    for name in ("extensions", "indexers", "interchange", "typing"):
+    assert firepanda.api.__all__ == ["indexers", "types"]
+    for name in ("extensions", "interchange", "typing"):
         assert not hasattr(firepanda.api, name)

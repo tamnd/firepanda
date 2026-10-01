@@ -13,14 +13,15 @@ firepanda and does not know it is talking to firepanda. If `import firepanda as
 pd` is the claim, then `pd.api.types.is_numeric_dtype(df["a"])` has to answer,
 and it has to answer the same thing pandas would.
 
-Only `types` is here. `pandas.api` also holds `extensions`, `indexers`,
-`interchange` and `typing`, and those are absent rather than empty, because each
-of them hands out machinery for extending pandas rather than for reading it and
-firepanda has no extension mechanism to hand out.
+`types` and `indexers` are here. `indexers` holds the window bounds a rolling
+window can be given. `pandas.api` also holds `extensions`, `interchange` and
+`typing`, and those are absent rather than empty, because each of them hands
+out machinery for extending pandas rather than for reading it and firepanda has
+no extension mechanism to hand out.
 """
 
 from __future__ import annotations
 
-from . import types
+from . import indexers, types
 
-__all__ = ["types"]
+__all__ = ["indexers", "types"]

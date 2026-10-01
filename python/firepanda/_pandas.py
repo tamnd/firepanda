@@ -2278,6 +2278,25 @@ def _dropped(wanted: Any, held: Any, errors: str) -> list[str]:
     return [text for _, text in names if text in there]
 
 
+def _named_aggregation(frame: Any, named: dict[str, Any]) -> Any:
+    """`agg(x=("A", "max"))`: a row per name, a column per column named, NaN elsewhere."""
+    from ._frame import DataFrame
+
+    if not named:
+        raise DTypeError("Must provide 'func' or tuples of '(column, aggfunc).")
+    held: dict[Any, dict[str, Any]] = {}
+    for name, pair in named.items():
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            raise DTypeError("Must provide 'func' or tuples of '(column, aggfunc).")
+        column, how = pair
+        held.setdefault(column, {})[name] = frame[column].agg(how)
+    names = list(named)
+    data = {
+        column: [found.get(name, float("nan")) for name in names] for column, found in held.items()
+    }
+    return DataFrame(data, index=names)
+
+
 def _drop_keys(index: Any, rows: Any) -> list[Any]:
     """The row keys a drop names, where a tuple on a MultiIndex is one key, as in pandas."""
     if isinstance(rows, tuple) and getattr(index, "nlevels", 1) > 1:
@@ -12571,7 +12590,7 @@ class DataFrameMixin(_Carries):
         """
         number = _align_axis(axis, "DataFrame", (0, 1))
         if func is None:
-            raise NotImplementedError("agg: named aggregation is groupby's, and needs a function")
+            return _named_aggregation(self, kwargs)
         if isinstance(func, str):
             asked = kwargs if number == 0 else {"axis": number} | kwargs
             return _method_named(self, func, "DataFrame")(*args, **asked)
@@ -18313,7 +18332,11 @@ class SeriesMixin(_Carries):
         """
         _align_axis(axis, "Series", (0,))
         if func is None:
-            raise NotImplementedError("agg: named aggregation is groupby's, and needs a function")
+            from ._frame import Series
+
+            if not kwargs:
+                raise InvalidArgumentError("No objects to concatenate")
+            return Series([self.agg(one) for one in kwargs.values()], index=list(kwargs))
         if isinstance(func, str):
             return _method_named(self, func, "Series")(*args, **kwargs)
         if isinstance(func, (list, dict)):
@@ -23686,7 +23709,12 @@ def _rolling(
         " numbers can do without holding the whole frame at once",
     )
     from ._frame import DataFrame
+    from .api.indexers import BaseIndexer
 
+    if isinstance(window, BaseIndexer):
+        from ._indexed_window import IndexedRolling
+
+        return IndexedRolling(data, window, min_periods, center, closed, step)
     whole = data
     if on is not None:
         if not isinstance(data, DataFrame) or on not in _shown_names(data):
@@ -32120,6 +32148,12 @@ def unique(values: Any) -> Any:
     Raises:
         TypeError: For a list or anything else that is not one of the three.
     """
+    if type(values).__name__ == "ndarray":
+        import numpy
+
+        from ._frame import Series
+
+        return numpy.array(Series(values.tolist()).unique().tolist(), dtype=values.dtype)
     return _array_like(values, "unique").unique()
 
 
@@ -32136,6 +32170,16 @@ def factorize(
     """
     from ._array import FirepandaArray
 
+    if type(values).__name__ == "ndarray":
+        # A numpy array answers numpy codes and numpy uniques of its own type.
+        import numpy
+
+        from ._frame import Series
+
+        codes, uniques = Series(values.tolist()).factorize(
+            sort=sort, use_na_sentinel=use_na_sentinel
+        )
+        return codes, numpy.array(uniques.tolist(), dtype=values.dtype)
     values = _array_like(values, "factorize")
     if isinstance(values, FirepandaArray):
         codes, uniques = _factorized(values.to_series(), sort, use_na_sentinel)

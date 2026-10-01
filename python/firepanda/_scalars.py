@@ -340,6 +340,19 @@ def _stepped(value: int, period: int, mode: int) -> int:
     return quotient * period
 
 
+def _slashed_date(text: str) -> str:
+    """A month/day/year or year/month/day date written the ISO way, as pandas reads them."""
+    found = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})(.*)", text)
+    if found is not None:
+        month, day, year, rest = found.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}{rest}"
+    found = re.fullmatch(r"(\d{4})/(\d{1,2})/(\d{1,2})(.*)", text)
+    if found is not None:
+        year, month, day, rest = found.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}{rest}"
+    return text
+
+
 def _whole_date(text: str) -> str:
     """A year, a year and month, or a quarter, spelled as the day it starts on.
 
@@ -779,7 +792,7 @@ class Timestamp(_datetime.datetime):
         cleaned = trimmed
         if fraction is not None and len(digits) > 6:
             cleaned = trimmed[: fraction.start() + 7] + trimmed[fraction.end() :]
-        cleaned = _whole_date(cleaned)
+        cleaned = _whole_date(_slashed_date(cleaned))
         try:
             made = _datetime.datetime.fromisoformat(cleaned.replace(" ", "T", 1))
         except ValueError as bad:
