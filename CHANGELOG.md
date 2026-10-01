@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Read into the dtype_backend types in read_parquet and read_feather
+
+`read_parquet`, `read_feather` and `read_orc` with `dtype_backend="numpy_nullable"` now give pandas' nullable types (`Int64`, `Float64`, `boolean`, `string`), and with `"pyarrow"` an `ArrowDtype` of each column's Arrow type, as pandas does. They used to keep Arrow's plain types. `read_parquet` also takes an empty `to_pandas_kwargs`. An index read under `"pyarrow"` still reads as plain types.
+
 ### Fixed: to_html writes each level of a MultiIndex in its own cell
 
 `DataFrame.to_html` and the notebook repr used to join the levels of a MultiIndex into one cell such as `1 x`. Each level now gets its own `th`, the level names get a row of their own, and a label repeated down the rows becomes one tall cell with `rowspan`, unless `sparsify=False`. The row of dots for cut rows goes in among the tall cells as pandas puts it, a run that crosses it growing by a row.

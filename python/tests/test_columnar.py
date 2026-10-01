@@ -212,9 +212,9 @@ def test_arrow_types_when_asked(firepanda: ModuleType) -> None:
     frame = firepanda.from_arrow(pa.table({"a": pa.array([1, None, 3], pa.int64())}))
     data = frame.to_parquet()
     assert str(firepanda.read_parquet(io.BytesIO(data)).dtypes["a"]) == "float64"
-    for backend in ("numpy_nullable", "pyarrow"):
+    for backend, name in (("numpy_nullable", "Int64"), ("pyarrow", "int64[pyarrow]")):
         back = firepanda.read_parquet(io.BytesIO(data), dtype_backend=backend)
-        assert str(back.dtypes["a"]) == "int64"
+        assert str(back.dtypes["a"]) == name
         assert back["a"].isna().tolist() == [False, True, False]
 
 
