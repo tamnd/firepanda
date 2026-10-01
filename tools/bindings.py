@@ -4633,7 +4633,13 @@ FUNCTIONS = (
         mojo="run_sql",
         name="_sql",
         doc="Runs one SQL statement over the frames named for it.",
-        params=(("query", "str"), ("names", "list[str]"), ("frames", "list[object]")),
+        params=(
+            ("query", "str"),
+            ("names", "list[str]"),
+            ("frames", "list[object]"),
+            ("parameters", "list[str]"),
+            ("row", "object"),
+        ),
         returns="DataFrame",
     ),
     # Not a user entry point. Every row of the error table in
@@ -5121,8 +5127,8 @@ def stubs() -> str:
     for at, fn in enumerate(FUNCTIONS):
         if at:
             out.append("")
-        args = ", ".join(f"{name}: {kind}" for name, kind in fn.params)
-        out.append(f"def {fn.name}({args}) -> {fn.returns}:")
+        args = [f"{name}: {kind}" for name, kind in fn.params]
+        out.extend(_python_def("", fn.name, args, fn.returns))
         out.append(f'    """{fn.doc}"""')
         out.append("    ...")
     out.append("")
@@ -5296,11 +5302,11 @@ def wrapper() -> str:
 
     for fn in FUNCTIONS:
         params = fn.py_params or fn.params
-        args = ", ".join(f"{name}: {kind}" for name, kind in params)
+        args = [f"{name}: {kind}" for name, kind in params]
         passed = ", ".join(name for name, _ in params)
         out.append("")
         out.append("")
-        out.append(f"def {fn.name}({args}) -> {fn.returns}:")
+        out.extend(_python_def("", fn.name, args, fn.returns))
         out.append(f'    """{fn.doc}"""')
         wrap = fn.returns if fn.returns in {t.py for t in TYPES} else ""
         call = f"_firepanda.{fn.name}({passed})"

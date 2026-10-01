@@ -23,12 +23,20 @@ Only the frames the query could be naming are handed across: a variable whose
 folded name is not a word of the query is never read. The statement runs over
 a catalog of those frames and nothing else, and the catalog is gone when the
 call returns, so a `CREATE TABLE` in one call is not there in the next.
+
+A parameter is written `?`, `$1` or `$name`, as in a prepared statement, and
+takes a value passed with the call: `params=[...]` for `?` and `$n`, and
+`params={...}` or a keyword for `$name`. A value is never written into the
+statement's text. The values travel as one row of a frame of their own and each
+parameter reads its column, so a string passed for one is a string and can
+never be read as SQL.
 """
 
 from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 from ._frame import DataFrame, Series, _sql
@@ -94,13 +102,22 @@ def _caller() -> dict[str, Any]:
     return found
 
 
-def sql(query: str, *, capture: bool = True) -> DataFrame:
+def sql(
+    query: str,
+    params: Any = None,
+    *,
+    capture: bool = True,
+    **named: Any,
+) -> DataFrame:
     """Runs one SQL statement in DuckDB's dialect and answers its rows as a frame.
 
     Args:
         query: The statement.
+        params: The values for the statement's parameters: a list or a tuple
+            for `?` and `$1`, or a dict for `$name`.
         capture: Whether the caller's local and global variables are in scope
             behind the registered frames.
+        named: More values for `$name` parameters, by keyword.
 
     Returns:
         What the statement answers: a query's rows, the count an `INSERT` adds,
@@ -110,18 +127,52 @@ def sql(query: str, *, capture: bool = True) -> DataFrame:
         NotImplementedError: For a statement firepanda does not run yet, which
             the message names.
         ValueError: For a statement that does not parse or does not bind, with
-            DuckDB's message, or for a name two variables answer to.
+            DuckDB's message, or for a name two variables answer to, or
+            for a parameter no value was passed for.
+        TypeError: For `params` that is neither a list, a tuple nor a dict,
+            or for values passed both by position and by name.
     """
-    return _run(query, capture, None)
+    return _run(query, capture, None, _parameters(params, named))
 
 
-def _run(query: str, capture: bool, own: DataFrame | None) -> DataFrame:
+def _parameters(params: Any, named: dict[str, Any]) -> dict[str, Any]:
+    """The values a call passed, each under what it is for: `1`, `2` and on
+    for one passed by position, and its name for one passed by name."""
+    out: dict[str, Any] = {}
+    if params is None:
+        pass
+    elif isinstance(params, Mapping):
+        for name, value in params.items():
+            if not isinstance(name, str):
+                raise TypeError(f"a parameter is named by a string, not {name!r}")
+            out[name] = value
+    elif isinstance(params, (list, tuple)):
+        for i, value in enumerate(params):
+            out[str(i + 1)] = value
+    else:
+        raise TypeError(
+            "params is a list or a tuple for ? and $1, or a dict for $name,"
+            f" not {type(params).__name__}"
+        )
+    if named and isinstance(params, (list, tuple)) and params:
+        raise TypeError("values are passed by position or by name, not both")
+    out.update(named)
+    return out
+
+
+def _run(
+    query: str,
+    capture: bool,
+    own: DataFrame | None,
+    values: dict[str, Any] | None = None,
+) -> DataFrame:
     """Runs `query` for `sql` or for `DataFrame.sql`.
 
     Args:
         query: The statement.
         capture: Whether the caller's variables are in scope.
         own: The frame `self` names, for `DataFrame.sql`.
+        values: The parameters' values, each under what it is for.
     """
     if not isinstance(query, str):
         raise TypeError(f"sql takes the statement as a string, not {type(query).__name__}")
@@ -154,4 +205,9 @@ def _run(query: str, capture: bool, own: DataFrame | None) -> DataFrame:
         names.append(name)
         whole = frame.to_frame() if isinstance(frame, Series) else frame
         frames.append(whole._inner)
-    return _sql(query, names, frames)
+    said: list[str] = []
+    row: object = None
+    if values:
+        said = list(values)
+        row = DataFrame({f"p{i + 1}": [value] for i, value in enumerate(values.values())})._inner
+    return _sql(query, names, frames, said, row)

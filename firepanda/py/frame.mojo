@@ -61,6 +61,7 @@ from firepanda.py.convert import (
 )
 from firepanda.sql.catalog import Catalog
 from firepanda.sql.ddl import execute
+from firepanda.sql.parameters import Arguments
 from firepanda.sql.run import Dialect
 from firepanda.py.errors import (
     CANCELLED,
@@ -2732,8 +2733,17 @@ def raise_for_test(kind: PythonObject) raises -> PythonObject:
     raise tagged(VALUE, String("no such kind ", kind.__repr__()))
 
 
+comptime _PARAMETERS = "__firepanda_parameters"
+"""The name the values passed for a statement's parameters are registered under.
+"""
+
+
 def run_sql(
-    query: PythonObject, names: PythonObject, frames: PythonObject
+    query: PythonObject,
+    names: PythonObject,
+    frames: PythonObject,
+    parameters: PythonObject,
+    values: PythonObject,
 ) raises -> PythonObject:
     """Runs one SQL statement over frames named for it, in DuckDB's dialect.
 
@@ -2743,10 +2753,24 @@ def run_sql(
     against them. The catalog is thrown away afterwards, so a `CREATE` in the
     statement changes nothing the next call sees.
 
+    A value passed for a parameter is never written into the statement. The
+    values are one row of a frame of their own, registered under a name no
+    query writes, and each parameter is bound to a scalar subquery that reads
+    its value's column. The text of that subquery is fixed here, so nothing a
+    caller passes is ever parsed as SQL. It takes `first` of the column rather
+    than the column, because the lowering runs a scalar subquery only when its
+    block is one row by construction, and a fold with no `GROUP BY` is; `first`
+    reports the one row as it is, a null included.
+
     Args:
         query: The statement.
         names: The name each frame is registered under, a list of strings.
         frames: The frames, a list as long as `names`.
+        parameters: What each value is for, a list of strings: `1`, `2` and on
+            for a value passed by position, and the name for one passed by
+            name. Empty when the call passed none.
+        values: A frame of one row with one column per parameter, `p1` for the
+            first and on, or `None` when `parameters` is empty.
 
     Returns:
         What the statement answers, as a new frame.
@@ -2775,6 +2799,20 @@ def run_sql(
             catalog.register(name, DataFrame(copy=frame[]))
         except cause:
             raise retagged(VALUE, cause)
+    if len(parameters) != 0:
+        var said = List[String]()
+        var texts = List[String]()
+        for i in range(len(parameters)):
+            said.append(words(parameters[i], "parameter").lower())
+            texts.append(
+                String("(SELECT first(p", i + 1, ") FROM ", _PARAMETERS, ")")
+            )
+        var row = PyDataFrame._other(values, "values")
+        try:
+            catalog.register(_PARAMETERS, DataFrame(copy=row[]))
+        except cause:
+            raise retagged(VALUE, cause)
+        _ = catalog.bind(Arguments(said^, texts^))
     var answer: DataFrame
     try:
         answer = execute(Dialect(), text, catalog)

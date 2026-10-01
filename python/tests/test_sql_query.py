@@ -136,3 +136,48 @@ def test_self_comes_before_a_registration(firepanda: ModuleType) -> None:
         assert firepanda.sql("SELECT x FROM self")["x"].tolist() == [7]
     finally:
         firepanda.unregister("self")
+
+
+def test_a_parameter_takes_a_value_by_position(firepanda: ModuleType) -> None:
+    """`?` takes the values in order and `$n` takes the `n`th."""
+    orders = firepanda.DataFrame(ORDERS)
+    got = firepanda.sql("SELECT b FROM orders WHERE b > ? AND a = ? ORDER BY b", params=[15, 2])
+    assert got["b"].tolist() == [20, 50]
+    got = firepanda.sql("SELECT $2 - $1 AS d", [3, 10])
+    assert got["d"].tolist() == [7]
+    del orders
+
+
+def test_a_parameter_takes_a_value_by_name(firepanda: ModuleType) -> None:
+    """`$name` takes a value passed in a dict or by keyword."""
+    orders = firepanda.DataFrame(ORDERS)
+    got = firepanda.sql("SELECT count(*) AS n FROM orders WHERE a = $k", {"k": 1})
+    assert got["n"].tolist() == [2]
+    got = firepanda.sql("SELECT count(*) AS n FROM orders WHERE a = $k", k=1)
+    assert got["n"].tolist() == [2]
+    got = orders.sql("SELECT max(b) AS m FROM self WHERE a = $k", k=2)
+    assert got["m"].tolist() == [50]
+
+
+def test_a_value_is_never_read_as_sql(firepanda: ModuleType) -> None:
+    """A string passed for a parameter comes back as the same string."""
+    said = "x'); DROP TABLE orders; --"
+    got = firepanda.sql("SELECT $s AS s", s=said)
+    assert got["s"].tolist() == [said]
+    got = firepanda.sql("SELECT $1 IS NULL AS z", [None])
+    assert got["z"].tolist() == [True]
+
+
+def test_a_parameter_and_its_value_have_to_match(firepanda: ModuleType) -> None:
+    """A parameter with no value, a value with no parameter, and a statement
+    with parameters and no values are each refused with DuckDB's message."""
+    with pytest.raises(ValueError, match="parameters: 2"):
+        firepanda.sql("SELECT ? + ? AS x", [1])
+    with pytest.raises(ValueError, match="excess parameters: 2"):
+        firepanda.sql("SELECT ? AS x", [1, 2])
+    with pytest.raises(ValueError, match="use PREPARE"):
+        firepanda.sql("SELECT ? AS x")
+    with pytest.raises(TypeError, match="not both"):
+        firepanda.sql("SELECT $k AS x", [1], k=2)
+    with pytest.raises(TypeError, match="not int"):
+        firepanda.sql("SELECT ? AS x", 1)
