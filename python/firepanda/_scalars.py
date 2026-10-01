@@ -1290,10 +1290,10 @@ class Timestamp(_datetime.datetime):
             A `numpy.datetime64`.
 
         Raises:
-            ValueError: If a dtype is asked for.
+            ValueError: If a dtype or a copy is asked for.
         """
-        if dtype is not None:
-            raise InvalidArgumentError("dtype and copy arguments are ignored")
+        if dtype is not None or copy:
+            raise InvalidArgumentError("Timestamp.to_numpy dtype and copy arguments are ignored.")
         return self.to_datetime64()
 
     def timestamp(self) -> float:
@@ -2293,10 +2293,10 @@ class Timedelta(_datetime.timedelta):
             A `numpy.timedelta64`.
 
         Raises:
-            ValueError: If a dtype is asked for.
+            ValueError: If a dtype or a copy is asked for.
         """
-        if dtype is not None:
-            raise InvalidArgumentError("dtype and copy arguments are ignored")
+        if dtype is not None or copy:
+            raise InvalidArgumentError("Timedelta.to_numpy dtype and copy arguments are ignored")
         return self.to_timedelta64()
 
     def view(self, dtype: Any) -> Any:
