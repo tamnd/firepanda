@@ -366,7 +366,7 @@ def _apply_prefix(
 
     Args:
         ops: The line of operators. Only the first `lead` are used.
-        lead: How many leading operators to run. At least one.
+        lead: How many leading operators to run. Zero to only fold.
         chunk: The chunk, consumed.
 
     Returns:
@@ -426,7 +426,7 @@ def _run_head(
     Args:
         ops: The line of operators. Only the first `lead` are used, plus the
             one at `fold_at` if there is one.
-        lead: How many leading operators to run. At least one.
+        lead: How many leading operators to run. Zero to only fold.
         fold_at: The position of a `Reduce` to fold each chunk into a partial
             row with, or -1 for none.
         taken: The batch. Every element is moved out.
@@ -583,11 +583,14 @@ struct Pipeline(Movable):
         # out over it. This is the first point where both halves of that are
         # known: the scan was built before `add` was called, and the line is
         # complete now.
-        if worker_count() > 1 and self._prefix_lead() > 0:
+        var folds = self._folds_source()
+        if worker_count() > 1 and (folds or self._prefix_lead() > 0):
             self.source.cut()
         var lead = self._parallel_lead()
         if lead > 0:
             self._run_batched(lead, sink)
+        elif folds and worker_count() > 1 and self.source.num_chunks() > 1:
+            self._run_batched(0, sink)
         else:
             while True:
                 if self._finished():
@@ -681,7 +684,8 @@ struct Pipeline(Movable):
         the sequential driver rather than an approximation of it.
 
         Args:
-            lead: How many leading operators to run in parallel. At least one.
+            lead: How many leading operators to run in parallel. Zero when the
+                line starts with the reduction, which is then all there is.
             sink: Where the rows that reach the end go.
 
         Raises:
@@ -715,6 +719,27 @@ struct Pipeline(Movable):
                     self._push(lead, made[at].take(), sink)
                 else:
                     self.operators[fold_at][Reduce].absorb(made[at].take())
+
+    def _folds_source(self) -> Bool:
+        """Reports whether the line starts with a reduction of the source.
+
+        There is no prefix in front of it to hand out, but the folding is
+        itself the work worth spreading: every chunk becomes a one row partial
+        and the partials merge in order afterwards. Before, a line like this
+        ran one chunk at a time on the calling thread, and a chunk no taller
+        than a morsel gave the kernel nothing to spread either. The reduction
+        decides, because only one that reads its values more than once gains
+        from having them in cache.
+
+        Returns:
+            True if the first operator is a `Reduce` that says folding it
+            morsel by morsel pays.
+        """
+        return (
+            len(self.operators) > 0
+            and self.operators[0].isa[Reduce]()
+            and self.operators[0][Reduce].folds_by_morsel()
+        )
 
     def _fold_at(self, lead: Int) -> Int:
         """Returns where a reduction the prefix can fold into sits, or -1.

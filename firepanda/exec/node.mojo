@@ -8115,6 +8115,29 @@ struct Reduce(Movable):
         # partial answers are one row, and nothing but `absorb` reads this.
         return Chunk(made^, 1)
 
+    def folds_by_morsel(self) -> Bool:
+        """Reports whether folding each morsel on its own core is worth it.
+
+        It is when nothing is held and at least two slots read the values,
+        because then every pass after the first over a morsel reads it from
+        the cache its core just filled, where the whole column kernels each
+        walk the column out of memory again. ClickBench q29 is ninety sums
+        over one column and runs in a third less time this way. A count of
+        rows reads nothing, and a held column has to be stacked back whole
+        from the pieces, so either is slower cut up than not.
+
+        Returns:
+            True if the reduction should be folded morsel by morsel.
+        """
+        if len(self._kept) > 0:
+            return False
+        var passes = 0
+        for t in range(len(self._produce)):
+            var kind = self._produce[t]
+            if kind != AggKind.SIZE and kind != AggKind.COUNT:
+                passes += 1
+        return passes >= 2
+
     def reads_codes(self, column: Int) -> Bool:
         """Reports whether an input column can reach this node as codes.
 

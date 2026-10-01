@@ -131,6 +131,9 @@ The one pass pairing of a tall side against a short one now also covers a short 
 ### Changed: List a sparse filter's kept rows and prefetch them
 
 A filter morsel that keeps fewer than one row in eight now lists the rows it keeps first and then copies them with a prefetch sixteen rows ahead, where before it copied each kept row as it found it in the mask and waited on a cache miss for nearly every one. A microbenchmark keeping one row in eighty went from 1.40 to 1.43 ms to 0.60 to 0.72 ms. Over three interleaved rounds on a shared six core box, best of fifteen, q14 at scale factor one went from 14.6 to 20.0 ms to 13.2 to 14.6 ms, with the other queries inside the noise.
+### Changed: a reduction that reads its values more than once folds morsel by morsel
+
+A query whose plan starts with a reduction, such as `SELECT SUM(a), AVG(b), MIN(c) FROM t`, now cuts the table into morsels and folds each on its own core when the reduction reads the values at least twice and holds no column whole, merging the partial rows in order. Every pass after the first then reads the morsel from cache. On ClickBench at 1M rows, q29, ninety sums over one column, went from 43.5 ms to 25.1 ms and q6 from 1.5 ms to 1.1 ms. A count of rows and a distinct count still run as before.
 
 ## [0.8.38] - 2026-10-01
 
