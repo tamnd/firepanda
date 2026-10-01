@@ -34114,8 +34114,8 @@ def _pivot_values(frame: Any, across: Any, index: Any, values: Any) -> Any:
     number types are all floats, as pandas reads them.
 
     Raises:
-        NotImplementedError: For a list of values of several kinds, which pandas
-            reads as objects.
+        NotImplementedError: For a list of values of several kinds other than
+            numbers beside text, which pandas reads as objects.
     """
     if values is NO_DEFAULT:
         taken = {across}
@@ -34126,16 +34126,27 @@ def _pivot_values(frame: Any, across: Any, index: Any, values: Any) -> Any:
     else:
         names = list(values)
         printed = {_word(frame[name].dtype) for name in names}
-        if len(printed) > 1:
-            if not all(_numeric_kind(word) in ("int64", "float64") for word in printed):
-                raise NotImplementedError(
-                    "pivot: value columns of several kinds are read by pandas as one"
-                    " block of objects, and firepanda has no object column"
-                )
+        numbers = {word for word in printed if _numeric_kind(word) in ("int64", "float64")}
+        if len(printed) > 1 and numbers == printed:
             frame = frame.astype(dict.fromkeys(names, "float64"))
+        elif len(printed) > 1 and numbers and printed - numbers <= {"str", "string"}:
+            # Numbers beside text are one block of objects in pandas, and the
+            # text keeps its own type.
+            listed = [name for name in names if _word(frame[name].dtype) in numbers]
+            frame = frame.astype(dict.fromkeys(listed, "object"))
+        elif len(printed) > 1:
+            raise NotImplementedError(
+                "pivot: value columns of several kinds are read by pandas as one"
+                " block of objects, and firepanda holds those only for numbers beside text"
+            )
     pieces = [
         ((name,), frame.pivot(columns=across, index=index, values=name)) for name in names
     ]
+    for key, piece in pieces:
+        if _word(frame[key[0]].dtype) == "object":
+            # A gap among objects is NaN in pandas, as it is among the numbers they were.
+            for column in piece.columns:
+                piece[column] = piece[column].fillna(float("nan"))
     return _pivot_joined(pieces, True, False)
 
 
@@ -35548,12 +35559,15 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
             # Text is read at microseconds beside a span, and at nanoseconds beside a count.
             units.append("ns" if counts else "us")
         target = max(units, key=["s", "ms", "us", "ns"].index)
-    counts = [None if span is None else span.value for span in spans]
+    # Counted in the target unit, so a span past the nanosecond range still fits.
+    scale = {"s": 1_000_000_000, "ms": 1_000_000, "us": 1_000, "ns": 1}[target]
+    counts = [None if span is None else span._nanos // scale for span in spans]
     # An empty list is built from one count and cut back, so it keeps the labels' type.
     built = to_datetime(
-        Series(counts or [0], dtype="int64" if None not in counts else None), unit="ns"
+        Series(counts or [0], dtype="int64" if None not in counts else None), unit=target
     )
-    built = (built - Timestamp(0)).dt.as_unit(target).iloc[: len(counts)]
+    zero = Timestamp(0).as_unit(target)
+    built = (built.dt.as_unit(target) - zero).dt.as_unit(target).iloc[: len(counts)]
     if column is None:
         from ._timedelta import TimedeltaIndex
 

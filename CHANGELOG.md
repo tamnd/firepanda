@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: spans past the nanosecond range
+
+`to_timedelta`, `timedelta_range` and a cast of whole numbers to `timedelta64[s]` now count in the unit they answer in, so a span longer than an int64 of nanoseconds, like `timedelta_range("1 Day", periods=3, freq="100000D", unit="s")`, is held as pandas holds it instead of overflowing.
+
+### Added: pivot with numbers beside text values
+
+`DataFrame.pivot` with several value columns of numbers and text now answers what pandas answers. The number columns become object columns with NaN in the gaps and the text columns stay text, and a mix of integers and floats becomes float64.
+
 ### Fixed: the extension tests collect again
 
 A test module that imports firepanda at its top, as `test_clipboard.py`, `test_multiindex_labels.py`, `test_object_columns.py` and `test_optional.py` do, ran that import while pytest collected it, before the fixture had staged the package. The name then found the Mojo sources at the root of the repository as an empty namespace package, the four modules failed to collect, and the extension job stopped there on every pull request without running a test. The conftest now stages the package when it is imported, ahead of collection, and the fixture hands back that one.
