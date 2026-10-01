@@ -9930,6 +9930,9 @@ def _objects_converted(column: Series, whole: bool, floating: bool, text: bool) 
         return column.astype("string" if text else "str")
     if kind == "integer" and whole:
         return column.astype("Int64")
+    if kind == "integer" and not bool(column.isna().any()):
+        # pandas infers the objects first, which leaves whole numbers int64.
+        return column.astype("int64")
     if kind in ("integer", "floating", "mixed-integer-float"):
         values = [value for value in column.tolist() if not _missing(value)]
         if whole and all(math.isfinite(value) and float(value).is_integer() for value in values):
