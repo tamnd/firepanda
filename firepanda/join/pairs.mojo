@@ -731,6 +731,7 @@ def join_indices[
     right_keys: List[Int],
     right_rows: Int,
     kind: JoinKind,
+    ordered: Bool = True,
 ) raises -> JoinIndices:
     """Pairs the rows of two frames on a set of key columns.
 
@@ -743,10 +744,15 @@ def join_indices[
             `left_keys`.
         right_rows: The right frame's height.
         kind: Which rows to keep.
+        ordered: Whether an inner join has to come back in left row order. Only
+            an inner join that builds on its left side looks at this, and with
+            it off that join comes back in right row order instead, which is the
+            order it was paired in. See the exchange below for what that saves.
 
     Returns:
         One entry per output row, in left row order for every kind but right,
-        which comes out in right row order.
+        which comes out in right row order. An inner join with `ordered` off
+        may come out in right row order too.
 
     Raises:
         If the key lists disagree in length, if they are empty for a kind that
@@ -801,18 +807,27 @@ def join_indices[
         # the data, and an inner join is the one kind where exchanging them
         # changes nothing about which rows come out. So exchange them, and put
         # the order back afterwards.
-        return _by_left_row(
-            join_indices(
-                right_columns,
-                right_keys,
-                right_rows,
-                left_columns,
-                left_keys,
-                left_rows,
-                JoinKind.INNER,
-            ).swapped(),
+        #
+        # Putting it back is more than the sort. It hands the caller right rows
+        # in left row order, which for a short left side is the long side's rows
+        # in no order at all, and every column gathered from that side is then a
+        # cache miss a row. TPC-H q2 pairs 2,000 suppliers with 800,000 part
+        # supplies and its three part supply gathers were most of the query. A
+        # caller that does not need the order, which is what Polars assumes by
+        # default, gets the pairs in right row order and gathers the long side
+        # front to back.
+        var exchanged = join_indices(
+            right_columns,
+            right_keys,
+            right_rows,
+            left_columns,
+            left_keys,
             left_rows,
-        )
+            JoinKind.INNER,
+        ).swapped()
+        if not ordered:
+            return exchanged^
+        return _by_left_row(exchanged^, left_rows)
 
     # Two sorted keys and a semi or anti join is a walk rather than a table.
     # The question costs two scans that stop at the first pair out of order,
