@@ -1485,6 +1485,26 @@ def test_a_sparse_filter_keeps_the_rows_at_the_end_of_every_morsel() raises:
         assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
 
 
+def test_a_sparse_filter_copies_scattered_rows_in_order() raises:
+    # One row in about eighty, scattered, so every morsel lists its kept rows
+    # and copies them with the prefetch running ahead, and the list ends short
+    # of the lookahead in the last morsel, which is the stretch after the final
+    # prefetch.
+    comptime ROWS = (1 << 18) + 7
+    var col = build[DType.float64](ROWS, 0)
+    var mask = Array[DType.bool](ROWS)
+    var state = UInt64(12345)
+    for i in range(ROWS):
+        state = state * 6364136223846793005 + 1442695040888963407
+        mask[i] = (state >> 33) % 80 == 0
+
+    var kept = filter_rows(col, mask)
+    var kept_twin = filter_scalar(col, mask)
+    assert_equal(len(kept), len(kept_twin), "kept row count")
+    for i in range(len(kept)):
+        assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
 def test_a_filter_past_the_split_of_a_narrow_dtype_skips_too() raises:
     # The block read is over the mask, which is a byte a row whatever the
     # column holds, but the fallback copy is as wide as the dtype and the
