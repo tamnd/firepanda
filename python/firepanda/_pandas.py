@@ -9895,6 +9895,8 @@ def _converted(
     if flagged is not None and len(column) and not bool(column.isna().all()):
         return _masked.as_masked(column, "boolean") if flags else column
     printed = _word(column.dtype)
+    if printed == "object":
+        return _objects_converted(column, whole, floating, text)
     if printed == "string" and not _objects.is_object(column._inner):
         return _masked.as_masked(column, "string") if text else column
     if printed.startswith(("int", "uint")):
@@ -9911,6 +9913,29 @@ def _converted(
         return _masked.as_masked(column, "Int64")
     if floating:
         return _masked.as_masked(column, _masked.masked_for(printed))
+    return column
+
+
+def _objects_converted(column: Series, whole: bool, floating: bool, text: bool) -> Series:
+    """A column of objects as `convert_dtypes` leaves it, by the kind pandas infers.
+
+    Text becomes `string`, or pandas' default text type without `text`, whole
+    numbers `Int64` and floats `Int64` when every one is whole and `Float64`
+    otherwise, and anything mixed stays objects.
+    """
+    from .api.types import infer_dtype
+
+    kind = infer_dtype(column.tolist(), skipna=True)
+    if kind == "string":
+        return column.astype("string" if text else "str")
+    if kind == "integer" and whole:
+        return column.astype("Int64")
+    if kind in ("integer", "floating", "mixed-integer-float"):
+        values = [value for value in column.tolist() if not _missing(value)]
+        if whole and all(math.isfinite(value) and float(value).is_integer() for value in values):
+            return column.astype("Int64")
+        if floating:
+            return column.astype("Float64")
     return column
 
 
@@ -20804,24 +20829,24 @@ class SeriesMixin(_Carries):
         )
         return both["__firepanda_left"], both["__firepanda_right"]
 
-    def _corr(self, other: Series, method: Any, min_periods: Any) -> float:
+    def _corr(self, other: Series, method: Any, min_periods: Any) -> Any:
         """The correlation with another column over the labels both have."""
         mine, theirs = self._aligned_with(other)
         if len(mine) == 0:
             return math.nan
         mine, theirs = _as_floats([mine, theirs], raw_gaps=True)
         _correlation_method(method)
-        return _pearson(mine, theirs, method, min_periods)
+        return _numpy_number(_pearson(mine, theirs, method, min_periods))
 
-    def _cov(self, other: Series, min_periods: Any, ddof: Any) -> float:
+    def _cov(self, other: Series, min_periods: Any, ddof: Any) -> Any:
         """The covariance with another column over the labels both have."""
         mine, theirs = self._aligned_with(other)
         if len(mine) == 0:
             return math.nan
         mine, theirs = _as_floats([mine, theirs], raw_gaps=True)
-        return _covariance(mine, theirs, min_periods, ddof)
+        return _numpy_number(_covariance(mine, theirs, min_periods, ddof))
 
-    def _autocorr(self, lag: int) -> float:
+    def _autocorr(self, lag: int) -> Any:
         """The correlation with the column moved `lag` rows along, as pandas writes it."""
         return self._corr(cast("Any", self).shift(lag), "pearson", None)
 
@@ -29350,7 +29375,7 @@ def _searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
 
             positions = [_searched_one(index, one, side) for one in value]
             return FirepandaArray(Series(positions, dtype="int64"))
-        return _searched_one(index, value, side)
+        return _numpy_position(_searched_one(index, value, side))
     except Exception as error:
         raise translate(error) from None
 
@@ -29383,7 +29408,21 @@ def _temporal_searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
         from ._frame import Series
 
         return FirepandaArray(Series([one(key) for key in value], dtype="int64"))
-    return one(value)
+    return _numpy_position(one(value))
+
+
+def _numpy_number(number: float) -> Any:
+    """A float as numpy's float64, which is how pandas answers a statistic."""
+    import numpy
+
+    return numpy.float64(number)
+
+
+def _numpy_position(position: int) -> Any:
+    """A position as numpy's int64, which is how pandas answers one."""
+    import numpy
+
+    return numpy.int64(position)
 
 
 def _searched_one(index: Any, value: Any, side: str) -> int:
@@ -30756,21 +30795,23 @@ class IndexMixin:
 
     def all(self, *args: Any, **kwargs: Any) -> Any:
         """Whether every label is true, a missing label counting as true as numpy counts it."""
-        return all(_missing(label) or bool(label) for label in self.tolist())
+        answer = all(_missing(label) or bool(label) for label in self.tolist())
+        return _numpy_answer(answer, "all", self.dtype)
 
     def any(self, *args: Any, **kwargs: Any) -> Any:
         """Whether any label is true, a missing label counting as true as numpy counts it."""
-        return any(_missing(label) or bool(label) for label in self.tolist())
+        answer = any(_missing(label) or bool(label) for label in self.tolist())
+        return _numpy_answer(answer, "any", self.dtype)
 
-    def argmax(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> int:
+    def argmax(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The position of the first largest label."""
         self._one_axis(axis)
-        return int(self.to_series().argmax(skipna=skipna))
+        return _numpy_answer(int(self.to_series().argmax(skipna=skipna)), "argmax", self.dtype)
 
-    def argmin(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> int:
+    def argmin(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The position of the first smallest label."""
         self._one_axis(axis)
-        return int(self.to_series().argmin(skipna=skipna))
+        return _numpy_answer(int(self.to_series().argmin(skipna=skipna)), "argmin", self.dtype)
 
     def _one_axis(self, axis: Any) -> None:
         """Holds that `axis` names the one axis an index has, with numpy's words."""

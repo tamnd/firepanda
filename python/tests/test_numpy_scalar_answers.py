@@ -61,3 +61,17 @@ def test_a_numpy_scalar_is_an_operand():
 def test_the_extreme_of_a_masked_column():
     assert fp.Series([1, 4, 2], dtype="Int64").argmax() == 1
     assert fp.Series([1.0, None, 4.0], dtype="Float64").idxmax() == 2
+
+
+def test_statistics_and_positions_are_numpy():
+    s = fp.Series([1, 2, 4, 7])
+    t = fp.Series([2.0, 1.0, 5.0, 3.0])
+    assert type(s.corr(t)) is numpy.float64
+    assert type(s.cov(t)) is numpy.float64
+    assert type(s.autocorr()) is numpy.float64
+    assert type(s.searchsorted(3)) is numpy.int64
+    assert s.searchsorted(3) == 2
+    assert type(fp.Index([3, 1, 2]).argmax()) is numpy.int64
+    assert fp.Index([3, 1, 2]).argmin() == 1
+    dates = fp.Index(fp.to_datetime(["2020-01-01", "2020-01-03"]))
+    assert type(dates.searchsorted(fp.Timestamp("2020-01-02"))) is numpy.int64
