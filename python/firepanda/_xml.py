@@ -231,7 +231,8 @@ class _Reader:
 
         from ._pandas import _json_source
 
-        if not hasattr(source, "read") and self.storage_options is not None:
+        if self.storage_options is not None:
+            # Only an fsspec URL takes storage options, never a local path or a handle.
             raise InvalidArgumentError(
                 "storage_options passed with file object or non-fsspec file path"
             )

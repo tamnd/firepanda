@@ -41,3 +41,11 @@ def test_read_xml_string_dtype():
 def test_double_pyarrow_header_pads():
     frame = pd.DataFrame({"longname": pd.Series([4.0, None], dtype="double[pyarrow]")})
     assert repr(frame).splitlines()[0] == "   longname"
+
+
+def test_read_xml_storage_options_with_a_handle():
+    import pytest
+
+    xml = "<data><row><a>x</a></row></data>"
+    with pytest.raises(ValueError, match="storage_options passed with file object"):
+        pd.read_xml(io.StringIO(xml), parser="etree", storage_options={"anon": True})
