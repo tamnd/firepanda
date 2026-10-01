@@ -176,8 +176,8 @@ def test_a_column_has_no_second_axis_to_name(firepanda):
         frame(firepanda)["v"].drop("x", axis=1)
 
 
-def test_a_level_is_refused_because_there_is_no_multiindex(firepanda):
-    with pytest.raises(NotImplementedError, match="level="):
+def test_a_level_on_flat_labels_is_pandas_assertion(firepanda):
+    with pytest.raises(AssertionError, match="axis must be a MultiIndex"):
         frame(firepanda).drop([0], level=0)
 
 
