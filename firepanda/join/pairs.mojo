@@ -124,6 +124,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.exec.morsel import parallel_morsels
 from firepanda.exec.parallel import parallel_for, worker_count
+from firepanda.hash.function import hash_of
 from firepanda.kernel.sort import is_sorted_any
 
 from .keys import BuildSide, align_keys, build_side
@@ -194,8 +195,8 @@ nearly nine blocks in ten are all misses and are stepped over whole.
 comptime SPARSE_PROBE_MARGIN = 16
 """How much taller the left has to be before a sparse key pairs in one pass.
 
-An inner join of a tall left side against a short right side whose keys sit in
-a direct table with a sieve, which is a dimension table filtered down to a few
+An inner join of a tall left side against a short right side whose keys sit
+thinly enough in their range for a sieve, which is a dimension table filtered down to a few
 keys, is mostly misses. The ordinary route still writes an ordinal for every left
 row and then reads that list twice to count and emit the pairs, and at q8's six
 million lines that is three passes over 24 MB to keep forty thousand pairs.
@@ -939,8 +940,10 @@ def _sparse_route[
     """Pairs a tall left side against a sparse right side in one pass.
 
     Only an inner join on one integer key with no nulls, a right side at least
-    `SPARSE_PROBE_MARGIN` times shorter, and a right side whose keys get a direct
-    table with a sieve. Anything else answers nothing and goes the ordinary way.
+    `SPARSE_PROBE_MARGIN` times shorter, and a right side whose keys get a sieve,
+    in front of a direct table or a hashed one. Anything else answers nothing and
+    goes the ordinary way. A hashed table is asked only about the rows the sieve
+    lets through, where the ordinary route hashes every row of the left first.
 
     Each left morsel asks the sieve and the table about its rows and keeps its
     pairs in lists of its own, and the lists are laid end to end in morsel order
@@ -988,7 +991,11 @@ def _sparse_route[
                 ref build = right.as_typed_view[candidate]()
                 var codes = Array[DType.uint32](overwritten=right_rows)
                 var built = build_side[candidate](build, 0, codes, left_rows)
-                if not built.direct or len(built.bits) == 0:
+                # A direct table keeps its sieve in `bits` and a hashed one in
+                # `seats`, with `span` set only when it has one.
+                if (built.direct and len(built.bits) == 0) or (
+                    not built.direct and built.span == 0
+                ):
                     return None
                 var table = bucket_side(
                     codes, 0, right_rows, List[Bool](), 0, False, built.groups()
@@ -1003,7 +1010,7 @@ def _pair_sparse[
     """The walk behind `_sparse_route`, once the key dtype is known.
 
     Args:
-        built: The right side's direct table, which has a sieve.
+        built: The right side's table, direct or hashed, with a sieve.
         table: The right side's rows per ordinal.
         probe: The left side's key column, which has no nulls.
 
@@ -1019,6 +1026,8 @@ def _pair_sparse[
     var rows = len(probe)
     var low = Int(built.base.cast[dt]())
     var span = built.span
+    var direct = built.direct
+    var seed = built.table.seed()
     var pieces = (rows + LEFT_MORSEL_ROWS - 1) // LEFT_MORSEL_ROWS
     var lefts = List[List[Int]](length=pieces, fill=List[Int]())
     var rights = List[List[Int]](length=pieces, fill=List[Int]())
@@ -1026,7 +1035,9 @@ def _pair_sparse[
     def walk(start: Int, stop: Int) raises {mut lefts, mut rights, imm}:
         var reads = probe.unsafe_ptr()
         var slots = built.seats.bitcast[DType.uint32]()
-        var words = built.bits.bitcast[DType.uint64]()
+        var words = (
+            built.bits if direct else built.seats
+        ).bitcast[DType.uint64]()
         var mine_left = List[Int]()
         var mine_right = List[Int]()
         for i in range(start, stop):
@@ -1036,7 +1047,17 @@ def _pair_sparse[
             var word = words.unsafe_offset(at >> 6).unsafe_load()
             if (word >> UInt64(at & 63)) & 1 == 0:
                 continue
-            var g = Int(slots.unsafe_offset(at).unsafe_load()) - 1
+            var g: Int
+            if direct:
+                g = Int(slots.unsafe_offset(at).unsafe_load()) - 1
+            else:
+                # The bits say the value is held and the table says which
+                # ordinal it has, hashing only the rows that got this far.
+                g = built.table.find(
+                    hash_of(reads.unsafe_offset(i).unsafe_load(), seed)
+                )
+                if g < 0:
+                    continue
             if table.unique:
                 mine_left.append(i)
                 mine_right.append(Int(table.only[g]))

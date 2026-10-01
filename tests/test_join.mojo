@@ -2143,50 +2143,67 @@ def test_a_sparse_direct_table_with_a_sieve_pairs_every_hit() raises:
 
 
 def test_a_tall_side_against_a_sparse_short_side_pairs_in_one_pass() raises:
-    """Three hundred thousand rows on the left against a thousand on the right.
+    """A tall left side against a short right side whose keys are spread thin.
 
-    The right side's keys are spread thin enough for a direct table with a
-    sieve, so the pairing is done in one walk of the left. Every third right
-    key is held twice, which takes the walk through a bucket rather than a
-    single row, and the pairs have to come out in left row order and in right
-    row order within a left row, as the ordinary route gives them.
+    Twice: a thousand right keys three hundred apart, which get a direct table
+    with a sieve, and twenty thousand a hundred apart, whose range is too wide
+    for a direct table and which get a hashed one with a sieve. Either way the
+    pairing is one walk of the left. Every third right key is held twice, which
+    takes the walk through a bucket rather than a single row, and the pairs have
+    to come out in left row order and in right row order within a left row, as
+    the ordinary route gives them.
     """
-    var short_rows = 1_000
-    var tall_rows = 300_000
-    var small = Array[DType.int64](short_rows)
-    for i in range(short_rows):
-        small[i] = Int64((i // 3 * 2 + i % 3 % 2) * 300)
-    var right = one_column(Series("k", small^))
-    var tall = Array[DType.int64](tall_rows)
-    for i in range(tall_rows):
-        tall[i] = Int64((i * 7_919) % 250_000)
-    var left = one_column(Series("k", tall^))
-    var paired = join_indices(
-        left.column_refs(),
-        keys(0),
-        tall_rows,
-        right.column_refs(),
-        keys(0),
-        short_rows,
-        JoinKind.INNER,
-    )
-    var held = right.column("k").as_typed[DType.int64]()
-    var probed = left.column("k").as_typed[DType.int64]()
-    var expected_left = List[Int]()
-    var expected_right = List[Int]()
-    for i in range(tall_rows):
-        var v = Int(probed[i])
-        if v % 300 != 0:
-            continue
+    for shape in range(2):
+        var short_rows = 1_000 if shape == 0 else 20_000
+        var tall_rows = 300_000 if shape == 0 else 400_000
+        var apart = 300 if shape == 0 else 100
+        var small = Array[DType.int64](short_rows)
+        for i in range(short_rows):
+            small[i] = Int64((i // 3 * 2 + i % 3 % 2) * apart)
+        var right = one_column(Series("k", small^))
+        var tall = Array[DType.int64](tall_rows)
+        for i in range(tall_rows):
+            tall[i] = Int64((i * 7_919) % (short_rows * apart))
+        var left = one_column(Series("k", tall^))
+        var paired = join_indices(
+            left.column_refs(),
+            keys(0),
+            tall_rows,
+            right.column_refs(),
+            keys(0),
+            short_rows,
+            JoinKind.INNER,
+        )
+        var held = right.column("k").as_typed[DType.int64]()
+        var probed = left.column("k").as_typed[DType.int64]()
+        # The rows holding each key, by key over the spacing, so the check is
+        # not a scan of the right side per hit.
+        var first = List[Int](length=short_rows + 1, fill=-1)
+        var second = List[Int](length=short_rows + 1, fill=-1)
         for r in range(short_rows):
-            if Int(held[r]) == v:
+            var slot = Int(held[r]) // apart
+            if first[slot] < 0:
+                first[slot] = r
+            else:
+                second[slot] = r
+        var expected_left = List[Int]()
+        var expected_right = List[Int]()
+        for i in range(tall_rows):
+            var v = Int(probed[i])
+            if v % apart != 0 or v // apart > short_rows:
+                continue
+            var slot = v // apart
+            if first[slot] >= 0:
                 expected_left.append(i)
-                expected_right.append(r)
-    assert_true(len(expected_left) > 0, "the probe should hit")
-    assert_equal(len(paired), len(expected_left), "pair count")
-    for p in range(len(paired)):
-        assert_equal(paired.left_at[p], expected_left[p], "left row")
-        assert_equal(paired.right_at[p], expected_right[p], "right row")
+                expected_right.append(first[slot])
+            if second[slot] >= 0:
+                expected_left.append(i)
+                expected_right.append(second[slot])
+        assert_true(len(expected_left) > 0, "the probe should hit")
+        assert_equal(len(paired), len(expected_left), "pair count")
+        for p in range(len(paired)):
+            assert_equal(paired.left_at[p], expected_left[p], "left row")
+            assert_equal(paired.right_at[p], expected_right[p], "right row")
 
 
 def main() raises:
