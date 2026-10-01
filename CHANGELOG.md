@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SeriesGroupBy nlargest, nsmallest, unique and monotonic flags; TimedeltaIndex reductions
+
+A grouped column now answers nlargest and nsmallest on the group key and the row label, unique as one list a group, and is_monotonic_increasing and is_monotonic_decreasing a group, as pandas does. TimedeltaIndex gains mean, median, std and sum with the pandas signatures.
+
+### Fixed: drop by a MultiIndex tuple, equals across label kinds, combine with a numpy function
+
+drop takes a tuple on a MultiIndex as one key and passes errors by name, equals compares columns by place so 1 and 1.0 labels match, and DataFrame.combine wraps the array a function such as np.minimum hands back.
+
 ### Added: df[slice] picks rows
 
 A slice inside a frame's brackets now picks rows, as in pandas: by position when it holds whole numbers, whatever the labels are, and by label otherwise, so `df[::-1]`, `df[:2]` and `df["b":"d"]` work. It used to raise TypeError.

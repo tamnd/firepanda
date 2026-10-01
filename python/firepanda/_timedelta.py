@@ -245,6 +245,41 @@ class TimedeltaIndex(HeldFreq, Index):
         moved._freq = self.freq
         return moved
 
+    def mean(self, *, skipna: bool = True, axis: Any = 0) -> Any:
+        """The average span, or NaT when there is none."""
+        return self._column().mean(skipna=skipna)
+
+    def median(self, *, axis: Any = None, skipna: bool = True, **kwargs: Any) -> Any:
+        """The middle span, or NaT when there is none."""
+        return self._column().median(skipna=skipna)
+
+    def std(
+        self,
+        *,
+        axis: Any = None,
+        dtype: Any = None,
+        out: Any = None,
+        ddof: int = 1,
+        keepdims: bool = False,
+        skipna: bool = True,
+    ) -> Any:
+        """The spread of the spans, or NaT when there are too few."""
+        return self._column().std(ddof=ddof, skipna=skipna)
+
+    def sum(
+        self,
+        *,
+        axis: Any = None,
+        dtype: Any = None,
+        out: Any = None,
+        keepdims: bool = False,
+        initial: Any = None,
+        skipna: bool = True,
+        min_count: int = 0,
+    ) -> Any:
+        """The spans added up, a zero span when there are none."""
+        return self._column().sum(skipna=skipna, min_count=min_count)
+
     def _column(self) -> Series:
         """The labels as a column of spans."""
         return (
