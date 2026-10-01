@@ -16,12 +16,20 @@ does, the query a `CREATE TABLE ... AS`, a `CREATE VIEW` or an `INSERT` carries,
 goes through the transform and the lowering as any query does.
 
 What a statement says and this does not do is refused by name, never parsed and
-dropped: a `PRIMARY KEY` nothing would check, a `DEFAULT` nothing would fill, an
-`ON CONFLICT` with no key to conflict on. A `NOT NULL` is kept, on the field,
-and an insert checks it. Anything that is not one of these statements goes on to
+dropped: a `CHECK` or a `FOREIGN KEY` nothing would check, a `DEFAULT` nothing
+would fill, an `ON CONFLICT` that would do something other than refuse. A `NOT
+NULL` is kept, on the field, and an insert checks it. A `PRIMARY KEY` or a
+`UNIQUE` is kept in the catalog beside the frame, and an insert that would leave
+two rows agreeing on one is refused with DuckDB's message, which names the key. `BEGIN`, `COMMIT` and `ROLLBACK` are here too, since a transaction is the
+catalog keeping what it held and putting it back. A statement that fails as it
+runs inside one aborts it, as in DuckDB, and one that fails to parse or bind
+does not, since it did nothing. Anything that is not one of these statements
+goes on to
 `Dialect.run`, which runs a query and refuses the rest with the sentence it
 always had.
 """
+
+from std.collections import Set
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
@@ -29,12 +37,21 @@ from firepanda.array.strings import StringBuilder
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame import DataFrame
+from firepanda.frame.align import value_at
 from firepanda.kernel.binary import all_null
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_any
 
 from .ast import NO_NODE, Ast
-from .catalog import KIND_FRAME, KIND_VIEW, NOT_FOUND, Catalog, View, fold
+from .catalog import (
+    KIND_FRAME,
+    KIND_VIEW,
+    NOT_FOUND,
+    Catalog,
+    Unique,
+    View,
+    fold,
+)
 from .matcher import Parse, parse_rule
 from .parameters import Arguments
 from .run import Dialect
@@ -69,6 +86,106 @@ def execute(
     var top = reading.find(reading.tree.root, "Statement")
     if top == NO_NODE:
         top = reading.tree.root
+    var transaction = reading.find(top, "TransactionStatement")
+    if transaction != NO_NODE:
+        return _transaction(reading, transaction, catalog)
+    if not catalog.in_transaction():
+        return _statement(dialect, sql, reading, top, catalog)
+    if catalog.aborted():
+        raise Error(
+            "TransactionContext Error: Current transaction is aborted (please"
+            " ROLLBACK)"
+        )
+    try:
+        return _statement(dialect, sql, reading, top, catalog)
+    except e:
+        if _aborts(String(e)) and not _unbound(
+            dialect, sql, reading, top, catalog
+        ):
+            catalog.abort()
+        raise e^
+
+
+def _transaction(
+    reading: _Read, node: UInt32, mut catalog: Catalog
+) raises -> DataFrame:
+    """Runs a `BEGIN`, a `COMMIT` or a `ROLLBACK`, each answering nothing.
+
+    `START` is `BEGIN`, `END` is `COMMIT` and `ABORT` is `ROLLBACK`, and `WORK`
+    or `TRANSACTION` after any of them says nothing more. `READ WRITE` is what
+    a transaction is anyway.
+    """
+    if reading.find(node, "BeginTransaction") != NO_NODE:
+        catalog.begin(reading.find(node, "ReadOnly") != NO_NODE)
+    elif reading.find(node, "CommitTransaction") != NO_NODE:
+        catalog.commit()
+    else:
+        catalog.rollback()
+    return DataFrame()
+
+
+def _aborts(message: String) -> Bool:
+    """Whether a statement that failed with this message fails its transaction.
+
+    DuckDB fails the transaction when a statement fails while it runs, and not
+    when it fails before: a statement that does not parse or does not bind has
+    done nothing, and the transaction goes on. firepanda's own refusal of a
+    statement it does not run is the second kind too.
+    """
+    var before: List[String] = [
+        "Parser Error",
+        "Binder Error",
+        "Catalog Error",
+        "Not implemented Error",
+        "Not Implemented Error",
+        "firepanda ",
+    ]
+    for prefix in before:
+        if message.startswith(prefix):
+            return False
+    return True
+
+
+def _unbound(
+    dialect: Dialect,
+    sql: StringSlice,
+    reading: _Read,
+    top: UInt32,
+    catalog: Catalog,
+) -> Bool:
+    """Whether a statement that failed is a query that never reached a row.
+
+    `_aborts` goes by the message, and the message does not always say. A name
+    that resolves against nothing is refused by the plan's binding in its own
+    words rather than as a `Binder Error`, and that refusal comes before any
+    row is read just as DuckDB's does. So a query that failed is asked again,
+    without running: if it does not lower or bind, nothing ran and the
+    transaction goes on. This only happens on the way out of a failure, so a
+    statement that succeeds pays nothing for it.
+    """
+    var below = reading.tree.children(top)
+    if len(below) == 0 or reading.name(below[0]) != "SelectStatement":
+        return False
+    try:
+        var ast = Ast()
+        var statement = dialect.rules.parse_statement(
+            sql, dialect.grammar, ast
+        )
+        dialect.settle(ast, catalog)
+        dialect.check_ast(ast, statement, catalog)
+    except:
+        return True
+    return False
+
+
+def _statement(
+    dialect: Dialect,
+    sql: StringSlice,
+    reading: _Read,
+    top: UInt32,
+    mut catalog: Catalog,
+) raises -> DataFrame:
+    """Runs one statement that is not a transaction's beginning or end."""
     var prepare = reading.find(top, "PrepareStatement")
     if prepare != NO_NODE:
         return _prepare(reading, prepare, catalog)
@@ -82,6 +199,16 @@ def execute(
         )
         return _nothing()
     var create = reading.find(top, "CreateStatement")
+    var writes = (
+        create != NO_NODE
+        or reading.find(top, "InsertStatement") != NO_NODE
+        or reading.find(top, "DropStatement") != NO_NODE
+    )
+    if writes and catalog.read_only():
+        raise Error(
+            'TransactionContext Error: Cannot write to database "memory" -'
+            " transaction is launched in read-only mode"
+        )
     if create != NO_NODE:
         var variation = reading.find(create, "CreateTableStmt")
         if variation != NO_NODE:
@@ -431,13 +558,33 @@ def _create_table(
     var fields = List[Field]()
     var columns = List[AnyArray]()
     var list = reading.find(table, "CreateColumnList")
-    if reading.has(list, "CreateTableConstraint"):
-        _refuse(
-            "a table constraint",
-            "because a table is a frame and nothing would check it",
-        )
+    # Each key as the names it was written with, in the order written, which
+    # is the order an insert checks them in. A column's own `PRIMARY KEY` or
+    # `UNIQUE` is a key of that one column.
+    var keyed = List[List[String]]()
+    var primary = List[Bool]()
     var seen = List[String]()
-    for column in reading.all(list, "ColumnDefinition"):
+    for element in reading.all(list, "CreateTableColumnElement"):
+        var constraint = reading.find(element, "CreateTableConstraint")
+        if constraint != NO_NODE:
+            var is_primary = reading.has(constraint, "TopPrimaryKeyConstraint")
+            if not is_primary and not reading.has(
+                constraint, "TopUniqueConstraint"
+            ):
+                _refuse(
+                    "a CHECK or a FOREIGN KEY on a table",
+                    (
+                        "because nothing would check it. PRIMARY KEY and"
+                        " UNIQUE are the table constraints it keeps"
+                    ),
+                )
+            var names = List[String]()
+            for entry in reading.all(constraint, "ColId"):
+                names.append(_identifier(reading.text(entry)))
+            keyed.append(names^)
+            primary.append(is_primary)
+            continue
+        var column = reading.find(element, "ColumnDefinition")
         var called = _identifier(
             reading.text(reading.find(column, "DottedIdentifier"))
         )
@@ -460,18 +607,24 @@ def _create_table(
             )
         if reading.has(column, "GeneratedColumn"):
             _refuse("a generated column", "because nothing would compute it")
-        if reading.has(column, "ConstraintNameClause"):
-            _refuse("a named constraint", "because nothing would check it")
         var nullable = True
         for constraint in reading.all(column, "ColumnConstraint"):
             if reading.has(constraint, "NotNullColumnConstraint"):
                 nullable = False
+            elif reading.has(constraint, "PrimaryKeyConstraint") or reading.has(
+                constraint, "UniqueConstraint"
+            ):
+                var one = List[String]()
+                one.append(called.copy())
+                keyed.append(one^)
+                primary.append(reading.has(constraint, "PrimaryKeyConstraint"))
             elif not reading.has(constraint, "NullConstraint"):
                 _refuse(
                     String(reading.text(constraint).upper(), " on a column"),
                     (
                         "because a table is a frame and nothing would check or"
-                        " fill it. NOT NULL is the constraint it keeps"
+                        " fill it. NOT NULL, PRIMARY KEY and UNIQUE are the"
+                        " constraints it keeps"
                     ),
                 )
         var type = engine_type(parse_type(reading.text(written)))
@@ -481,7 +634,55 @@ def _create_table(
         columns.append(_nulls(type, 0))
     if len(fields) == 0:
         raise Error("Parser Error: Table must have at least one column!")
+
+    var uniques = List[Unique]()
+    var primaries = 0
+    for k in range(len(keyed)):
+        if primary[k]:
+            primaries += 1
+            if primaries > 1:
+                raise Error(
+                    String(
+                        'Parser Error: table "',
+                        name,
+                        '" has more than one primary key',
+                    )
+                )
+        var places = List[Int]()
+        for called in keyed[k]:
+            var found = -1
+            for j in range(len(fields)):
+                if fold(fields[j].name) == fold(called):
+                    found = j
+                    break
+            if found == -1:
+                raise Error(
+                    String(
+                        'Catalog Error: table "',
+                        name,
+                        '" does not have a column named "',
+                        called,
+                        '"',
+                    )
+                )
+            if found in places:
+                raise Error(
+                    String(
+                        'Parser Error: column "',
+                        called,
+                        '" appears twice in ',
+                        "primary key" if primary[k] else "unique",
+                        " constraint",
+                    )
+                )
+            places.append(found)
+            # A primary key's columns are never missing, which is the one
+            # thing it says that a UNIQUE does not.
+            if primary[k]:
+                fields[found].nullable = False
+        uniques.append(Unique(places^, primary[k]))
     catalog.register(name, DataFrame(Schema(fields^), columns^))
+    catalog.constrain(catalog.find(name), uniques^)
     return _nothing()
 
 
@@ -526,6 +727,103 @@ def _create_view(
     return _nothing()
 
 
+def _key_text(
+    filled: DataFrame, key: Unique, between: StringSlice
+) raises -> List[String]:
+    """Each row's key as text, its parts joined by `between`, and empty for a
+    row with a missing part, which no key compares equal to anything."""
+    var texts = List[List[String]]()
+    var missing = List[Bool](length=len(filled), fill=False)
+    for column in key.columns:
+        var whole = _whole(filled, column)
+        var text = cast_any(whole, LogicalType.STRING)
+        var read = List[String](capacity=len(filled))
+        for i in range(len(filled)):
+            if not whole.is_valid(i):
+                missing[i] = True
+                read.append(String())
+            else:
+                read.append(value_at(text, i).as_string())
+        texts.append(read^)
+    var out = List[String](capacity=len(filled))
+    for i in range(len(filled)):
+        var line = String()
+        if not missing[i]:
+            for part in range(len(texts)):
+                if part > 0:
+                    line += between
+                line += texts[part][i]
+        out.append(line^)
+    return out^
+
+
+def _check_keys(
+    name: String, filled: DataFrame, before: Int, uniques: List[Unique]
+) raises:
+    """Refuses an insert that leaves two rows agreeing on a key.
+
+    The rows from `before` on are the new ones. Against the rows already there
+    first, key by key and new row by new row, and only then among the new rows
+    themselves, which is the order DuckDB finds them in and so the one whose
+    message comes back. Each insert reads the whole table's keys again, which
+    is a scan a hash index kept beside the table would save, and a table here
+    is a frame a session builds by hand.
+
+    Raises:
+        DuckDB's constraint error for the first key two rows share.
+    """
+    var texts = List[List[String]](capacity=len(uniques))
+    for key in uniques:
+        # A separator no text holds, so two keys are one only when every
+        # part is.
+        texts.append(_key_text(filled, key, "\x1f"))
+    for k in range(len(uniques)):
+        var held = Set[String]()
+        for i in range(before):
+            if texts[k][i].byte_length() > 0:
+                held.add(texts[k][i])
+        for i in range(before, len(filled)):
+            if texts[k][i].byte_length() > 0 and texts[k][i] in held:
+                var shown = String()
+                for part in range(len(uniques[k].columns)):
+                    if part > 0:
+                        shown += ", "
+                    var column = uniques[k].columns[part]
+                    shown += filled.schema[column].name
+                    shown += ": "
+                    shown += _key_text(filled, _one(column), "")[i]
+                raise Error(
+                    String(
+                        'Constraint Error: Duplicate key "',
+                        shown,
+                        '" violates ',
+                        "primary key" if uniques[k].primary else "unique",
+                        " constraint.",
+                    )
+                )
+    for k in range(len(uniques)):
+        var held = Set[String]()
+        for i in range(before, len(filled)):
+            if texts[k][i].byte_length() == 0:
+                continue
+            if texts[k][i] in held:
+                raise Error(
+                    String(
+                        "Constraint Error: PRIMARY KEY or UNIQUE constraint"
+                        ' violation: duplicate key "',
+                        _key_text(filled, uniques[k], ", ")[i],
+                        '"',
+                    )
+                )
+            held.add(texts[k][i])
+
+
+def _one(column: Int) -> Unique:
+    var columns = List[Int]()
+    columns.append(column)
+    return Unique(columns^, False)
+
+
 def _insert(
     dialect: Dialect, reading: _Read, insert: UInt32, mut catalog: Catalog
 ) raises -> DataFrame:
@@ -538,12 +836,12 @@ def _insert(
     if reading.has(insert, "OrAction"):
         _refuse(
             "INSERT OR REPLACE or INSERT OR IGNORE",
-            "because a table here has no key for a row to conflict on",
+            "yet, and a row that conflicts with a key is refused",
         )
     if reading.has(insert, "OnConflictClause"):
         _refuse(
             "ON CONFLICT",
-            "because a table here has no key for a row to conflict on",
+            "yet, and a row that conflicts with a key is refused",
         )
     if reading.has(insert, "ReturningClause"):
         _refuse("RETURNING", "yet")
@@ -658,7 +956,9 @@ def _insert(
         var parts = table.columns[j].chunks.copy()
         parts.append(added^)
         columns.append(concat_any(parts))
-    catalog.register(name, DataFrame(table.schema.copy(), columns^))
+    var filled = DataFrame(table.schema.copy(), columns^)
+    _check_keys(name, filled, len(table), catalog.uniques_at(at))
+    catalog.refill(at, filled^)
 
     var counted = Array[DType.int64](1)
     counted[0] = Int64(count)

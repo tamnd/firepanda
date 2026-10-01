@@ -23,6 +23,12 @@ the spelling the caller used, which is the spelling that comes back in
 `Did you mean`. This is the one place where a quoted name behaves like a bare
 one, and getting it the other way round would refuse queries DuckDB accepts.
 
+**A transaction is a copy of the lists.** `BEGIN` keeps what the catalog holds
+and `ROLLBACK` puts it back. Nothing changes a frame in place, so keeping one is
+keeping a handle, and the copy costs the length of the lists and not the size of
+the data. There is one transaction at a time and nobody else to isolate it from,
+since a catalog belongs to one session.
+
 **It scans rather than hashes.** The catalog a REPL actually has holds a handful
 of names, and a linear scan over a short list of short strings beats a hash of
 the probe followed by a probe of the table. Section 14 of the specification says
@@ -54,7 +60,7 @@ comptime KIND_VIEW: UInt8 = 1
 """A view, which is a query text under a name."""
 
 
-struct View(Movable):
+struct View(Copyable, Movable):
     """A named query, unexpanded.
 
     The text rather than a plan, because there is no plan layer to hold yet. A
@@ -85,6 +91,62 @@ struct View(Movable):
         self.columns = columns^
 
 
+struct Unique(Copyable, Movable):
+    """A `PRIMARY KEY` or a `UNIQUE` on a table: the columns no two rows may
+    agree on all of."""
+
+    var columns: List[Int]
+    """The key's columns, by position in the table, in the order written."""
+
+    var primary: Bool
+    """Whether it is the primary key, which says so in its message."""
+
+    def __init__(out self, var columns: List[Int], primary: Bool):
+        """A key over some columns.
+
+        Args:
+            columns: The columns, by position.
+            primary: Whether it is the primary key.
+        """
+        self.columns = columns^
+        self.primary = primary
+
+
+struct _Saved(Movable):
+    """What the catalog held when a transaction began, to go back to."""
+
+    var keys: List[String]
+    var names: List[String]
+    var kinds: List[UInt8]
+    var slots: List[Int]
+    var frames: List[DataFrame]
+    var uniques: List[List[Unique]]
+    var views: List[View]
+
+    def __init__(out self, catalog: Catalog):
+        self.keys = catalog._keys.copy()
+        self.names = catalog._names.copy()
+        self.kinds = catalog._kinds.copy()
+        self.slots = catalog._slots.copy()
+        self.frames = catalog._frames.copy()
+        self.uniques = catalog._uniques.copy()
+        self.views = catalog._views.copy()
+
+    def restore(deinit self, mut catalog: Catalog):
+        """Hands everything back to the catalog it was taken from.
+
+        Args:
+            catalog: The catalog, which gets back what it held.
+        """
+        catalog._keys = self.keys^
+        catalog._names = self.names^
+        catalog._kinds = self.kinds^
+        catalog._slots = self.slots^
+        catalog._frames = self.frames^
+        catalog._uniques = self.uniques^
+        catalog._views = self.views^
+
+
 struct Catalog(Movable, Sized):
     """A session scoped namespace of frames and views."""
 
@@ -102,6 +164,10 @@ struct Catalog(Movable, Sized):
 
     var _frames: List[DataFrame]
     """The registered frames, in registration order."""
+
+    var _uniques: List[List[Unique]]
+    """The keys each frame holds to, one list per frame in `_frames`, empty for
+    a frame registered rather than created with a key."""
 
     var _views: List[View]
     """The defined views, in definition order."""
@@ -127,6 +193,17 @@ struct Catalog(Movable, Sized):
     var _prepared_names: List[String]
     var _prepared_sql: List[String]
 
+    var _saved: List[_Saved]
+    """What the catalog held when the running transaction began: one entry
+    while a transaction runs and none outside one."""
+
+    var _aborted: Bool
+    """Whether a statement failed while running inside the transaction, after
+    which nothing but its end is run."""
+
+    var _read_only: Bool
+    """Whether the running transaction was begun `READ ONLY`."""
+
     def __init__(out self):
         """Constructs an empty catalog."""
         self._keys = List[String]()
@@ -134,12 +211,102 @@ struct Catalog(Movable, Sized):
         self._kinds = List[UInt8]()
         self._slots = List[Int]()
         self._frames = List[DataFrame]()
+        self._uniques = List[List[Unique]]()
         self._views = List[View]()
         self._generation = 0
         self.settings = Settings()
         self.arguments = Arguments()
         self._prepared_names = List[String]()
         self._prepared_sql = List[String]()
+        self._saved = List[_Saved]()
+        self._aborted = False
+        self._read_only = False
+
+    def in_transaction(self) -> Bool:
+        """Whether a `BEGIN` has run with no `COMMIT` or `ROLLBACK` after it."""
+        return len(self._saved) > 0
+
+    def aborted(self) -> Bool:
+        """Whether the running transaction has failed and waits to be ended."""
+        return self._aborted
+
+    def read_only(self) -> Bool:
+        """Whether the running transaction was begun `READ ONLY`."""
+        return self._read_only
+
+    def begin(mut self, read_only: Bool) raises:
+        """Starts a transaction, keeping what the catalog holds to go back to.
+
+        A frame is not copied, only the handle to it, and nothing changes a
+        frame in place: an insert makes a new one. So keeping the catalog is
+        a copy of its lists and not of its data.
+
+        Args:
+            read_only: Whether the transaction may change nothing.
+
+        Raises:
+            If one is running already, which aborts it, as DuckDB does.
+        """
+        if self.in_transaction():
+            self._aborted = True
+            raise Error(
+                "TransactionContext Error: cannot start a transaction within a"
+                " transaction"
+            )
+        self._saved.append(_Saved(self))
+        self._aborted = False
+        self._read_only = read_only
+
+    def commit(mut self) raises:
+        """Ends the running transaction and keeps what it did.
+
+        An aborted transaction is rolled back instead, without a word, which is
+        what DuckDB's `COMMIT` does with one.
+
+        Raises:
+            If no transaction is running.
+        """
+        if not self.in_transaction():
+            raise Error(
+                "TransactionContext Error: cannot commit - no transaction is"
+                " active"
+            )
+        if self._aborted:
+            self._restore()
+            return
+        _ = self._saved.pop()
+        self._read_only = False
+
+    def rollback(mut self) raises:
+        """Ends the running transaction and undoes everything it did.
+
+        Raises:
+            If no transaction is running.
+        """
+        if not self.in_transaction():
+            raise Error(
+                "TransactionContext Error: cannot rollback - no transaction is"
+                " active"
+            )
+        self._restore()
+
+    def abort(mut self):
+        """Marks the running transaction failed, if one is running."""
+        if self.in_transaction():
+            self._aborted = True
+
+    def _restore(mut self):
+        """Puts back what the catalog held when the transaction began.
+
+        The generation moves on rather than back: a plan bound inside the
+        transaction was bound against names that are gone, and going back to
+        the old number would let a later change land on a number that plan
+        was cached under.
+        """
+        self._saved.pop().restore(self)
+        self._generation += 1
+        self._aborted = False
+        self._read_only = False
 
     def __len__(self) -> Int:
         """How many names are registered.
@@ -253,6 +420,7 @@ struct Catalog(Movable, Sized):
         var at = self.find(name)
         if at != NOT_FOUND and self._kinds[at] == KIND_FRAME:
             self._frames[self._slots[at]] = frame^
+            self._uniques[self._slots[at]] = List[Unique]()
             self._names[at] = String(name)
             self._generation += 1
             return
@@ -263,6 +431,7 @@ struct Catalog(Movable, Sized):
         self._kinds.append(KIND_FRAME)
         self._slots.append(len(self._frames))
         self._frames.append(frame^)
+        self._uniques.append(List[Unique]())
         self._generation += 1
 
     def set(mut self, name: StringSlice, value: StringSlice) raises:
@@ -370,6 +539,37 @@ struct Catalog(Movable, Sized):
         var before = self.arguments.copy()
         self.arguments = arguments^
         return before^
+
+    def refill(mut self, at: Int, var frame: DataFrame):
+        """Puts new rows in a frame's place and keeps its keys, which is what an
+        insert does and a register does not.
+
+        Args:
+            at: The index `find` returned, whose kind is `KIND_FRAME`.
+            frame: The frame with the rows it now holds.
+        """
+        self._frames[self._slots[at]] = frame^
+        self._generation += 1
+
+    def constrain(mut self, at: Int, var uniques: List[Unique]):
+        """Gives a frame the keys its rows hold to.
+
+        Args:
+            at: The index `find` returned, whose kind is `KIND_FRAME`.
+            uniques: The keys, in the order the table wrote them.
+        """
+        self._uniques[self._slots[at]] = uniques^
+
+    def uniques_at(self, at: Int) -> List[Unique]:
+        """The keys a frame's rows hold to.
+
+        Args:
+            at: The index `find` returned, whose kind is `KIND_FRAME`.
+
+        Returns:
+            The keys, in the order the table wrote them.
+        """
+        return self._uniques[self._slots[at]].copy()
 
     def define(mut self, name: StringSlice, var view: View) raises:
         """Puts a view under a name, replacing whatever was there.
@@ -517,6 +717,7 @@ struct Catalog(Movable, Sized):
         var slot = self._slots[at]
         if kind == KIND_FRAME:
             _ = self._frames.pop(slot)
+            _ = self._uniques.pop(slot)
         else:
             _ = self._views.pop(slot)
         for other in range(len(self._slots)):
