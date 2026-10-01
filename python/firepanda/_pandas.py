@@ -12366,16 +12366,32 @@ class DataFrameMixin(_Carries):
         """The frame as one column, each row's values in turn, labelled by row and column.
 
         This is pandas' `future_stack` stacking, which keeps missing values and
-        the column order, and takes neither `dropna` nor `sort`.
+        the column order, and takes neither `dropna` nor `sort`. With
+        `future_stack=False` flat columns stack the older way, which leaves out
+        each missing value unless `dropna` is False.
 
         Raises:
-            ValueError: For `dropna` or `sort`, which pandas refuses the same way.
-            NotImplementedError: For the older stacking, and for columns of
-                several types, which pandas answers as objects.
+            ValueError: For `dropna` or `sort` with the new stacking, which pandas
+                refuses the same way.
+            NotImplementedError: For the older stacking over several column
+                levels, and for columns of several types, which pandas answers as
+                objects.
         """
         from ._frame import Series
         from ._multi import MultiIndex
 
+        if not future_stack:
+            # The older stacking of flat columns is the new one with each missing
+            # value left out, and `sort` orders nothing when there is one level.
+            if _column_depth(_shown_names(self)) > 1:
+                raise NotImplementedError(
+                    "stack with future_stack=False over several column levels is the older"
+                    " stacking pandas is removing, and firepanda has only the new one there"
+                )
+            stacked = self.stack(level)
+            if dropna is NO_DEFAULT or _flag("dropna", dropna):
+                stacked = stacked[stacked.notna()]
+            return stacked
         if dropna is not NO_DEFAULT:
             raise InvalidArgumentError(
                 "dropna must be unspecified as the new implementation does not introduce"
@@ -12386,11 +12402,6 @@ class DataFrameMixin(_Carries):
             raise InvalidArgumentError(
                 "Cannot specify sort, this argument will be removed in a future version of"
                 " pandas. Sort the result using .sort_index instead."
-            )
-        if not future_stack:
-            raise NotImplementedError(
-                "stack with future_stack=False is the older stacking pandas is removing,"
-                " and firepanda has only the new one"
             )
         if _column_depth(_shown_names(self)) > 1:
             return _stacked_levels(self, level)

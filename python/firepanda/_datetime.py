@@ -719,6 +719,23 @@ class DatetimeIndex(HeldFreq, Index):
             )
         return found
 
+    def get_slice_bound(self, label: Any, side: str) -> int:
+        """The position a label maps to when the index is read in order.
+
+        On sorted labels the bound is the end of the range `slice_indexer` reads
+        for the label, so text such as a day stands for every instant in it, as
+        in pandas.
+        """
+        if side not in ("left", "right"):
+            raise InvalidArgumentError(
+                f"Invalid value for side kwarg, must be either 'left' or 'right': {side}"
+            )
+        if self.is_monotonic_increasing:
+            if side == "left":
+                return int(self.slice_indexer(label, None).start)
+            return int(self.slice_indexer(None, label).stop)
+        return super().get_slice_bound(label, side)
+
     def indexer_at_time(self, time: Any, asof: bool = False) -> list[int]:
         """The positions of the labels whose time of day is `time`."""
         if asof:

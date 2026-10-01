@@ -60,6 +60,11 @@ class IntervalIndex(Index):
             # Built already, by `Index.__new__` answering a list of intervals with one.
             self._inner  # noqa: B018
             return
+        if isinstance(data, IntervalIndex):
+            # pandas keeps the name and the type of an index it is handed, and
+            # reads only `closed` off the call.
+            name = data.name if name is None else name
+            dtype = None
         values = [None if is_gap(value) else value for value in data]
         if any(not isinstance(value, Interval) for value in values if value is not None):
             raise TypeError("type <class 'object'> with value is not an interval")
