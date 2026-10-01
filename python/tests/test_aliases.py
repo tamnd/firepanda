@@ -207,9 +207,8 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 def test_what_is_not_written_is_refused(firepanda: ModuleType) -> None:
-    """A list for isna, which pandas answers with numpy, and a duplicate column."""
-    with pytest.raises(NotImplementedError):
-        firepanda.isna([1, None])
+    """A duplicate column, and a list for isna answers numpy flags as pandas does."""
+    assert firepanda.isna([1, None]).tolist() == [False, True]
     with pytest.raises(NotImplementedError):
         frame(firepanda).insert(0, "a", 1, allow_duplicates=True)
 

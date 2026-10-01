@@ -5831,6 +5831,37 @@ def _labels_differ(left: Any, right: Any, axis: int) -> bool:
     return not left.index.equals(right.index)
 
 
+def _tight_axis(labels: Any, names: Any) -> Any:
+    """One axis of a `tight` mapping, levels of tuples when it names several of them."""
+    from ._frame import Index
+    from ._multi import MultiIndex
+
+    names = list(names) if names is not None else [None]
+    if len(names) > 1:
+        return MultiIndex.from_tuples([tuple(label) for label in labels], names=names)
+    return Index(list(labels), name=names[0] if names else None)
+
+
+def _numpy_instants(data: Any) -> Any:
+    """A list of numpy instants as the numpy array pandas reads it as.
+
+    pandas reads `[np.datetime64("2000-01-01"), ...]` as a column of instants
+    in the unit numpy gives the values together, so such a list goes through
+    the numpy array reading rather than becoming objects. A gap is NaT there.
+    Anything else comes back as it was.
+    """
+    if not isinstance(data, list | tuple) or not data:
+        return data
+    if type(data[0]).__name__ != "datetime64" and not _missing(data[0]):
+        return data
+    if {type(value).__name__ for value in data if not _missing(value)} != {"datetime64"}:
+        return data
+    import numpy
+
+    gap = numpy.datetime64("NaT")
+    return numpy.array([gap if _missing(value) else value for value in data])
+
+
 def _scalar_fill(this: Any, other: Any, fill_value: Any) -> tuple[Any, Any] | None:
     """The two operands of an operation with one value, with `fill_value` in place.
 
@@ -10814,7 +10845,8 @@ def _relevelled(owner: Any, axis: Any, change: Any, verb: str | None = None) -> 
     index = owner.index if number == 0 else owner.columns
     if verb is not None and not isinstance(index, MultiIndex):
         raise TypeError(f"Can only {verb} levels on a hierarchical axis.")
-    return _with_axis(owner, change(index), number)
+    # Through `set_axis` rather than around it, so the column axis keeps its names.
+    return owner.set_axis(change(index), axis=number)
 
 
 def _cross_section(owner: Any, key: Any, axis: Any, level: Any, drop_level: bool) -> Any:
@@ -12282,12 +12314,10 @@ class DataFrameMixin(_Carries):
         `df.axes[1]` is asking for the columns and there is no second reading
         of it.
 
-        The second entry is a list here where pandas hands back an `Index`,
-        which is the divergence `columns` carries rather than a new one, and
-        this is one more place it shows.
+        The second entry is the column labels as an index, the one `keys` answers.
         """
 
-        return [self.index, self._inner.names()]
+        return [self.index, _column_labels(self)]
 
     @property
     def dtypes(self) -> Series:
@@ -13338,7 +13368,9 @@ class DataFrameMixin(_Carries):
                 data = {name: _floated(values) for name, values in data.items()}
             return cls(data, dtype=dtype)
         if orient == "tight":
-            return cls(data["data"], index=data["index"], columns=data["columns"], dtype=dtype)
+            index = _tight_axis(data["index"], data.get("index_names"))
+            columns = _tight_axis(data["columns"], data.get("column_names"))
+            return cls(data["data"], index=index, columns=columns, dtype=dtype)
         labels = list(data)
         rows = list(data.values())
         if rows and all(isinstance(row, dict) for row in rows):
@@ -13367,10 +13399,16 @@ class DataFrameMixin(_Carries):
         `exclude` names columns to leave out. `coerce_float` is accepted and
         unused, since a column here is read as floats when its values are.
         """
-        rows = list(data)
+        fields = getattr(getattr(data, "dtype", None), "names", None)
+        rows = [] if fields else list(data)
         if nrows is not None and not isinstance(data, (list, tuple)):
             rows = rows[:nrows]
-        if rows and all(isinstance(row, dict) for row in rows):
+        if fields:
+            # A numpy record array names its columns, each field keeping its type.
+            # nrows reads from an iterator only, so an array keeps every row.
+            names = list(fields) if columns is None else list(columns)
+            pieces = {name: data[name] for name in names if name in fields}
+        elif rows and all(isinstance(row, dict) for row in rows):
             names: list[Any] = []
             for row in rows:
                 names.extend(name for name in row if name not in names)
@@ -18084,6 +18122,7 @@ class SeriesMixin(_Carries):
                 out = data.reindex(index).rename_axis(_labels_of(index)[1])
                 self._inner = out._inner if name is None else out._inner.relabel(_names.held(name))
             else:
+                data = _numpy_instants(data)
                 if _is_numpy(data):
                     data, typed = _numpy_values(data, "Series")
                 elif data is not None and _is_scalar(data):
@@ -29589,11 +29628,10 @@ def _searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
         elif hasattr(value, "tolist") and getattr(value, "ndim", 0) > 0:
             value = value.tolist()
         if isinstance(value, (list, tuple)):
-            from ._array import FirepandaArray
-            from ._frame import Series
+            import numpy
 
             positions = [_searched_one(index, one, side) for one in value]
-            return FirepandaArray(Series(positions, dtype="int64"))
+            return numpy.array(positions, dtype=numpy.intp)
         return _numpy_position(_searched_one(index, value, side))
     except Exception as error:
         raise translate(error) from None
@@ -30038,6 +30076,10 @@ class IndexMixin:
         if dtype is not None:
             self._typed(data, dtype, label)
             return
+        if (instants := _numpy_instants(data)) is not data:
+            from ._frame import Series
+
+            data = Series(instants)
         try:
             if isinstance(data, IndexMixin):
                 self._inner = data._inner.renamed(label)
@@ -31647,7 +31689,12 @@ class IndexMixin:
             )
             made = self.take(order)
             return (made, order) if return_indexer else made
-        column = _nan_as_missing(self.to_series())
+        column = self.to_series()
+        if _nan_sort_keys([column]):
+            # The labels are taken by position, so each NaN stays the NaN it was.
+            order = _keyed_order([column], _nan_as_missing, ascending, na_position)
+            made = self.take(order)
+            return (made, order) if return_indexer else made
         front = _na_first(na_position)
         down = _directions(ascending, 1)[0]
         try:
@@ -32646,9 +32693,8 @@ def melt(
 def isna(obj: Any) -> Any:
     """Whether a value is missing, or where a column, frame or index is missing.
 
-    A scalar is missing when it is None, `NaT`, `NA` or a float NaN. A list is refused rather
-    than answered, since pandas answers a numpy array for one and numpy is not a
-    dependency here, so turn it into a column first.
+    A scalar is missing when it is None, `NaT`, `NA` or a float NaN. A list or a numpy
+    array answers a numpy array of flags, as pandas does, which needs numpy installed.
 
     Args:
         obj: A scalar, a column, a frame or an index.
@@ -32657,14 +32703,25 @@ def isna(obj: Any) -> Any:
         A flag for a scalar, and flags of the same shape for anything else.
 
     Raises:
-        NotImplementedError: For a list or another sequence.
+        NotImplementedError: For a mapping or a set.
     """
     if hasattr(obj, "isna"):
         return obj.isna()
-    if isinstance(obj, (list, tuple, dict, set)):
+    if _is_numpy(obj) or isinstance(obj, (list, tuple)):
+        # pandas answers a numpy array of flags the shape of the values, so numpy is needed.
+        numpy = _numpy()
+        values = numpy.asarray(obj, dtype=object) if not _is_numpy(obj) else obj
+        if values.dtype.kind in "fc":
+            return numpy.isnan(values)
+        if values.dtype.kind in "mM":
+            return numpy.isnat(values)
+        if values.dtype.kind != "O":
+            return numpy.zeros(values.shape, dtype=bool)
+        flags = [isna(value) for value in values.ravel().tolist()]
+        return numpy.array(flags, dtype=bool).reshape(values.shape)
+    if isinstance(obj, (dict, set)):
         raise UnsupportedError(
-            "firepanda:unsupported: isna on a list answers a numpy array in pandas and "
-            "numpy is not a firepanda dependency, so pass a Series"
+            "firepanda:unsupported: isna on a mapping or a set, so pass a Series"
         )
     return obj is None or obj is NaT or obj is NA or (isinstance(obj, float) and obj != obj)
 
@@ -32673,7 +32730,8 @@ def notna(obj: Any) -> Any:
     """The opposite of `isna`, for a scalar, a column, a frame or an index. See `isna`."""
     if hasattr(obj, "notna"):
         return obj.notna()
-    return not isna(obj)
+    flags = isna(obj)
+    return ~flags if _is_numpy(flags) else not flags
 
 
 def isnull(obj: Any) -> Any:
