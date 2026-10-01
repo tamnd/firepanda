@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: where's NaN from the other side and transpose's row labels
+
+`Series.where` and `mask` on a numpy float column now hold a gap taken from the other side as NaN rather than a null, so the column exports as pandas' does, and `DataFrame.combine` with a `where` function agrees with pandas. `DataFrame.transpose` now takes its row labels from the typed columns rather than the stored names, so `frame.T.T` and a fill along `axis=1` keep whole-number row labels and concat with their source.
+
 ### Added: to_numeric dtype_backend, align fill against a column, and concat levels
 
 `to_numeric` takes `dtype_backend="numpy_nullable"` and `"pyarrow"` and answers the nullable or arrow column of the kind it read, keeping whole numbers given as text and flags given in an object column as pandas does, and a nullable or arrow column now keeps its own family. `DataFrame.align` against a column fills every gap with `fill_value` and widens a moved whole number side as pandas does, `concat` takes `levels` beside `keys` and refuses a key its level lacks in pandas' words, `infer_dtype` names whole numbers beside NaN `integer-na` with `skipna=False`, and `Timestamp.to_numpy` and `Timedelta.to_numpy` refuse `copy=True` with pandas' messages.
