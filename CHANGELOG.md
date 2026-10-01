@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the older flat stack, DatetimeIndex bounds by text, and IntervalIndex from an index
+
+`DataFrame.stack(future_stack=False)` now stacks flat columns the older way, leaving out each missing value unless `dropna=False`, where it was refused. `DatetimeIndex.get_slice_bound` now reads a text label such as a day as pandas does on sorted labels. `IntervalIndex(index)` keeps the name and type of the index it is handed and reads only `closed` off the call, as pandas does.
+
 ### Changed: group reductions take the cython engine
 
 A group reduction, `transform`, `agg` and `aggregate` now accept `engine="cython"`, `engine=None` and `engine_kwargs` as pandas does, since pandas reads `engine` only to see whether it names numba. The numba engine is still refused.
