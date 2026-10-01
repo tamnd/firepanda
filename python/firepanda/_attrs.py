@@ -180,6 +180,8 @@ _FREQ_DROPS = frozenset(
         "resample",
         "to_period",
         "to_timestamp",
+        "tz_convert",
+        "tz_localize",
         "merge",
         "join",
         "droplevel",
