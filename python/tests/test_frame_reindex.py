@@ -118,9 +118,10 @@ def test_a_repeated_label_in_the_frame_is_refused(firepanda):
         twice.reindex([10])
 
 
-def test_a_word_cannot_fill_a_column_of_numbers(firepanda):
-    with pytest.raises(TypeError):
-        made(firepanda).reindex([10, 99], fill_value="nothing")
+def test_a_word_fills_a_column_of_numbers_as_objects(firepanda):
+    out = made(firepanda).reindex([10, 99], fill_value="nothing")
+    assert "object" in {str(kind) for kind in out.dtypes.tolist()}
+    assert out.iloc[1].tolist()[0] == "nothing"
 
 
 def test_the_columns_come_back_in_the_order_they_were_asked_for(firepanda):

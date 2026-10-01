@@ -45,6 +45,7 @@ from ._pandas import (
     _SIGNED,
     NO_DEFAULT,
     _beyond_nanoseconds,
+    _c_composites,
     _gap_part,
     _held_values,
     _instants,
@@ -265,6 +266,8 @@ class DatetimeIndex(HeldFreq, Index):
         before it calls, which is the same thing `tools/bindings.py` does for the
         `dt` accessor. A gap reads out as `_gap_part` says.
         """
+        if kind == "strftime":
+            arg = _c_composites(arg)
         try:
             part = self._inner.temporal_part(kind, arg)
             answer = Index._wrap(part)

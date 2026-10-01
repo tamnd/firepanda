@@ -113,9 +113,10 @@ def test_a_repeated_label_in_the_series_is_refused(firepanda):
         twice["count"].reindex([10])
 
 
-def test_a_word_cannot_fill_a_series_of_numbers(firepanda):
-    with pytest.raises(TypeError):
-        made(firepanda).reindex([10, 99], fill_value="nothing")
+def test_a_word_fills_a_series_of_numbers_as_objects(firepanda):
+    out = made(firepanda).reindex([10, 99], fill_value="nothing")
+    assert str(out.dtype) == "object"
+    assert out.tolist()[1] == "nothing"
 
 
 def test_the_axis_is_taken_and_ignored(firepanda):

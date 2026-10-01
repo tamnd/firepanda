@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Fixed: the extension tests collect again
 
 A test module that imports firepanda at its top, as `test_clipboard.py`, `test_multiindex_labels.py`, `test_object_columns.py` and `test_optional.py` do, ran that import while pytest collected it, before the fixture had staged the package. The name then found the Mojo sources at the root of the repository as an empty namespace package, the four modules failed to collect, and the extension job stopped there on every pull request without running a test. The conftest now stages the package when it is imported, ahead of collection, and the fixture hands back that one.
+### Added: C strftime composites, level arithmetic from a flat frame, and text reindex fills
+
+`strftime` writes out the C library's `%r`, `%c`, `%x` and `%X` as pandas does. A flat frame added to, compared with or divided by a MultiIndex frame with `level=` spreads its rows onto the other's. `loc` reads a column key that is not a mask as labels, groupby `ffill` and `bfill` work on number column names, `to_timedelta` reads a numpy array of numbers, and `reindex` with a text `fill_value` beside numbers answers an object column instead of refusing.
 
 ### Added: compound rounding frequencies, short temporal dtype names and a few index fixes
 
