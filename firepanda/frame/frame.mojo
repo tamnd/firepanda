@@ -3325,6 +3325,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         kind: JoinKind = JoinKind.INNER,
         suffix: String = "_right",
         columns: List[String] = List[String](),
+        ordered: Bool = True,
     ) raises -> Self:
         """Joins two frames on columns that have the same name in both.
 
@@ -3339,6 +3340,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             kind: Which rows to keep.
             suffix: Appended to a right column whose name collides.
             columns: Which output columns to build, or empty for all of them.
+            ordered: Whether the rows have to come out in left row order. See
+                `join_on`.
 
         Returns:
             The joined frame.
@@ -3346,7 +3349,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             As `join_on` does.
         """
-        return self.join_on(other, on, on, kind, suffix, columns)
+        return self.join_on(other, on, on, kind, suffix, columns, ordered)
 
     def join_on(
         self,
@@ -3356,6 +3359,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         kind: JoinKind = JoinKind.INNER,
         suffix: String = "_right",
         columns: List[String] = List[String](),
+        ordered: Bool = True,
     ) raises -> Self:
         """Joins two frames on keys that are named differently on each side.
 
@@ -3388,6 +3392,11 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             suffix: Appended to a right column whose name collides.
             columns: Which output columns to build, in the order wanted, or
                 empty for all of them in their natural order.
+            ordered: Whether the rows have to come out in left row order, as in
+                pandas. False lets an inner join against a much taller right
+                side come out in right row order instead, which is Polars'
+                default and is much cheaper to gather. Every other kind ignores
+                it.
 
         Returns:
             The joined frame.
@@ -3436,6 +3445,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 kind,
                 suffix,
                 columns,
+                ordered,
             )
 
         var pairs = join_indices(
@@ -3446,6 +3456,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             right_at,
             other.rows,
             kind,
+            ordered,
         )
 
         # Only these two can produce an output row that no left row backs, so

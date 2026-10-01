@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Let an inner join skip putting an exchanged pairing back in left row order
+
+`join` and `join_on` take `ordered=False`, which lets an inner join against a much taller right side come out in right row order, as a Polars join does by default. The join builds on the short left side either way, and putting the pairs back in left row order meant gathering every right column one cache miss a row. On TPC-H q2 at scale factor one, which joins 2,000 suppliers with 800,000 part supplies, the query went from about 35 ms to about 26 ms on a shared six core box, best of fifteen. The default stays the pandas order.
+
 ### Fixed: Group every category in pivot_table and keep names in a mixed concat
 
 `pivot_table(observed=False)` now gives a row for every category of a categorical key, holding the aggregate of no rows, as pandas does, and a categorical row key labels the table with a `CategoricalIndex`. `concat` of parts whose row labels are of different types now keeps a name they share, and a `CategoricalIndex` meeting other labels is read as the values it holds, so text and categories give a text index as in pandas.

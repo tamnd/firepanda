@@ -2043,5 +2043,59 @@ def test_an_exchanged_join_with_a_tall_pairing_sorts_back_on_every_core() raises
                 )
 
 
+def test_an_unordered_exchanged_join_keeps_the_pairs_in_right_row_order() raises:
+    """The same exchange with the order left as it was paired.
+
+    The pairs are the ones the ordered join finds and only their order differs:
+    right rows only go up, and a right row that pairs with two left rows lists
+    them in left row order. The frame level join gives the same rows as the
+    ordered one, once both are sorted.
+    """
+    var left_rows = 3_000
+    var right_rows = 300_000
+    var probe = Array[DType.int64](left_rows)
+    for i in range(left_rows):
+        probe[i] = Int64(i % 2_000)
+    var built = Array[DType.int64](right_rows)
+    for i in range(right_rows):
+        built[i] = Int64((i * 7) % 2_500)
+    var left = one_column(Series("k", probe^))
+    var right = one_column(Series("k", built^))
+    var paired = join_indices(
+        left.column_refs(),
+        keys(0),
+        left_rows,
+        right.column_refs(),
+        keys(0),
+        right_rows,
+        JoinKind.INNER,
+        False,
+    )
+    assert_equal(len(paired), left_rows * 120)
+    for r in range(len(paired)):
+        var at = paired.left_at[r]
+        var there = paired.right_at[r]
+        assert_equal((there * 7) % 2_500, at % 2_000, "paired unequal keys")
+        if r > 0:
+            var before = paired.right_at[r - 1]
+            assert_true(before <= there, "out of right row order")
+            if before == there:
+                assert_true(
+                    paired.left_at[r - 1] < at, "out of left row order"
+                )
+
+    var ordered = left.join(right, on("k"))
+    var loose = left.join(right, on("k"), ordered=False)
+    assert_equal(len(loose), len(ordered))
+    var a = ordered.column("k").as_typed[DType.int64]()
+    var b = loose.column("k").as_typed[DType.int64]()
+    var seen = List[Int](length=2_000, fill=0)
+    for r in range(len(ordered)):
+        seen[Int(a[r])] += 1
+        seen[Int(b[r])] -= 1
+    for k in range(2_000):
+        assert_equal(seen[k], 0, String("key ", k, " count differs"))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
