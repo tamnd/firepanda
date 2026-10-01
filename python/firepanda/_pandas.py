@@ -5608,6 +5608,38 @@ def _labels_differ(left: Any, right: Any, axis: int) -> bool:
     return not left.index.equals(right.index)
 
 
+def _one_side_filled(left: Any, right: Any, fill_value: Any) -> tuple[Any, Any] | None:
+    """Two operands lined up with `fill_value` in each place only one of them misses.
+
+    pandas lines the two up first, so a label one side lacks is a NaN there,
+    widening whole numbers to floats, and then fills a NaN on one side. The
+    kernel fills only the labels and keeps whole numbers whole, so when either
+    side holds a NaN or the row labels differ the two are lined up and filled
+    here. A place both sides miss stays missing.
+
+    Returns:
+        The two operands, or None when they share their row labels and neither
+        holds anything missing.
+    """
+    lost, gone = left.isna(), right.isna()
+    if not (_any_true(lost) or _any_true(gone) or _labels_differ(left, right, 0)):
+        return None
+    left, right = left.align(right, join="outer")
+    lost, gone = left.isna(), right.isna()
+    only_left, only_right = lost & ~gone, gone & ~lost
+    if _any_true(only_left):
+        left = left.mask(only_left, fill_value)
+    if _any_true(only_right):
+        right = right.mask(only_right, fill_value)
+    return left, right
+
+
+def _any_true(flags: Any) -> bool:
+    """Whether a column or a frame of flags holds a single True."""
+    answer = flags.any()
+    return bool(answer.any()) if isinstance(answer, SeriesMixin) else bool(answer)
+
+
 def _nan_over_gaps(inner: Any, op: str, left: Any, right: Any) -> Any:
     """An aligned column of arithmetic with each gap held as a NaN, as pandas holds it.
 
@@ -5686,7 +5718,10 @@ def _power_realigned(inner: Any, op: str, left: Any, right: Any, flip: bool) -> 
             answer = DataFrame._wrap(inner)
             rows, columns = answer.index.to_list(), _shown_names(answer)
             lined = [side.reindex(index=rows, columns=columns) for side in (left, right)]
-            return lined[0]._inner.binary_frame(lined[1]._inner, op, flip, None)
+            made = DataFrame._wrap(lined[0]._inner.binary_frame(lined[1]._inner, op, flip, None))
+            # Labels read back as tuples lose the names of the levels, so they are put back.
+            names = answer.index.names if _is_multi(answer.index) else answer.index.name
+            return made.rename_axis(names)._inner
         if inner.null_count() == 0:
             return inner
         rows = Series._wrap(inner).index.to_list()
@@ -15252,9 +15287,21 @@ class DataFrameMixin(_Carries):
             along = self.index if number == 0 else self.columns
             if isinstance(other, SeriesMixin) and _is_multi(along) and not _is_multi(other.index):
                 other = _spread_on_level(other, along, level, fill_value)
+            elif (
+                isinstance(other, DataFrameMixin)
+                and _is_multi(self.index)
+                and not _is_multi(other.index)
+            ):
+                # Two frames align on both axes, and the rows read the other
+                # frame's by one level, a missing label standing as a gap.
+                other = _spread_on_level(other, self.index, level)
             elif isinstance(other, (DataFrameMixin, SeriesMixin)):
                 _no_level(level)
         other = _listed_frame_operand(self, other, number)
+        if isinstance(other, DataFrameMixin) and fill_value is not None:
+            sides = _one_side_filled(self, other, fill_value)
+            if sides is not None:
+                return sides[0]._named(sides[1], op, axis, None, None, flip)
         try:
             if isinstance(other, DataFrameMixin):
                 answer = self._inner.binary_frame(other._inner, op, flip, fill_value)
@@ -19918,6 +19965,10 @@ class SeriesMixin(_Carries):
                 scaled = _span_arithmetic(self, other, op, flip)
         if scaled is not None:
             return scaled
+        if isinstance(other, SeriesMixin) and fill_value is not None:
+            sides = _one_side_filled(self, other, fill_value)
+            if sides is not None:
+                return sides[0]._named(sides[1], op, axis, None, None, flip)
         try:
             if isinstance(other, SeriesMixin):
                 answer = self._inner.binary_series(other._inner, op, flip, fill_value)
@@ -32481,7 +32532,8 @@ def _concat_index_units(frames: list[DataFrame]) -> list[DataFrame]:
     if wanted is None:
         numbers = ("int", "uint", "float")
         families = {"number" if kind.startswith(numbers) else kind for kind in kinds}
-        if len(families) < 2 or any(isinstance(frame.index, MultiIndex) for frame in frames):
+        layered = [isinstance(frame.index, MultiIndex) for frame in frames]
+        if all(layered) or (len(families) < 2 and not any(layered)):
             return frames
         # Labels of two kinds meet as objects, each label kept as it was, and
         # a name every part shares stays on them.

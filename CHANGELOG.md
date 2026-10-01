@@ -41,6 +41,9 @@ A join key whose values sit close enough together is matched through a table ind
 ### Changed: Let an inner join skip putting an exchanged pairing back in left row order
 
 `join` and `join_on` take `ordered=False`, which lets an inner join against a much taller right side come out in right row order, as a Polars join does by default. The join builds on the short left side either way, and putting the pairs back in left row order meant gathering every right column one cache miss a row. On TPC-H q2 at scale factor one, which joins 2,000 suppliers with 800,000 part supplies, the query went from about 35 ms to about 26 ms on a shared six core box, best of fifteen. The default stays the pandas order.
+### Fixed: Fill one-sided NaN in arithmetic and read frames by level
+
+An arithmetic method given fill_value now lines both sides up first and fills a missing value on one side only, as pandas does, so a NaN already in the data is filled too and not just a label gap. A frame with a MultiIndex combined with a flat frame through level= reads the other frame by that level, the power path keeps the index names, and a concat mixing a MultiIndex with a flat index builds an object index of tuples and labels.
 
 ### Fixed: Group every category in pivot_table and keep names in a mixed concat
 
