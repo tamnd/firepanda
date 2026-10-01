@@ -56,7 +56,7 @@ from ._pandas import (
     _spelled,
     _zone_name,
 )
-from ._scalars import NaT
+from ._scalars import NaT, _single_frequency
 from .errors import DTypeError, InvalidArgumentError, translate
 
 __all__ = ["DatetimeIndex"]
@@ -322,6 +322,7 @@ class DatetimeIndex(HeldFreq, Index):
                 " carries the whole frequency vocabulary and firepanda parses"
                 " the string spelling only"
             )
+        freq = _single_frequency(freq)
         if (_is_default(ambiguous) and _is_default(nonexistent)) or self.tz is None:
             return self._moved(kind, freq)
         return self._placed(kind, freq, ambiguous, nonexistent)

@@ -69,7 +69,16 @@ from ._attrs import Flags, carried, flags_of, hold, hold_freq, row_freq
 from ._expression import applied
 from ._held_freq import HeldFreq, freq_shown
 from ._na import NA
-from ._scalars import NaT, Timedelta, _inward, _outward, _outward_one, _temporal, _zone_name
+from ._scalars import (
+    NaT,
+    Timedelta,
+    _inward,
+    _outward,
+    _outward_one,
+    _single_frequency,
+    _temporal,
+    _zone_name,
+)
 from .errors import (
     ColumnNotFoundError,
     DataError,
@@ -4064,6 +4073,11 @@ def _named_dtype(dtype: Any) -> str:
     # an object that is not a dtype at all was rendered above and `str(object())`
     # begins with a `<`. Stripping that unconditionally would put the angle
     # bracket in the message on one side and not the other.
+    if name[:1] in {"<", "=", "|"} and name[1:3] in ("M8", "m8"):
+        name = name[1:]
+    if name[:3] in ("M8[", "m8["):
+        # numpy's short spelling of a moment or a span with its unit.
+        name = ("datetime64" if name[0] == "M" else "timedelta64") + name[2:]
     if name[:1] in {"<", "=", "|"} and name[1:] in _DTYPE_NAMES:
         name = name[1:]
     if name[:1] == ">":
@@ -21606,6 +21620,7 @@ class DatetimeMixin:
                 " the whole frequency vocabulary and firepanda parses the string"
                 " spelling only"
             )
+        freq = _single_frequency(freq)
         if (_is_default(ambiguous) and _is_default(nonexistent)) or self._zone() is None:
             return self._part(kind, freq)
         return self._placed(kind, freq, ambiguous, nonexistent)
@@ -25492,6 +25507,17 @@ class StringMixin:
         is a count and the scan stops after it, so `replace(pat, repl, n=2,
         case=False)` is answered rather than refused.
         """
+        if isinstance(pat, re.Pattern):
+            if regex is False:
+                raise InvalidArgumentError(
+                    "Cannot use a compiled regex as replacement pattern with regex=False"
+                )
+            if case is not None or flags:
+                raise InvalidArgumentError(
+                    "case and flags cannot be set when pat is a compiled regex"
+                )
+            # pandas reads a compiled pattern as its text and its flags.
+            pat, flags, regex = pat.pattern, pat.flags & ~re.UNICODE, True
         if isinstance(pat, dict):
             if repl is not None:
                 raise InvalidArgumentError(
@@ -29855,7 +29881,7 @@ class IndexMixin:
                 self._inner = data._inner.to_index(label)
                 if type(self).__name__ == "Index":
                     self.__class__ = self._class_of(self._inner)
-            elif (moved := _instant_index(data, label)) is not None:
+            elif (moved := _instant_index(data := _nan_text(data), label)) is not None:
                 # pandas answers a list of instants with a DatetimeIndex, and of
                 # spans with a TimedeltaIndex, so this becomes one.
                 self._inner = moved._inner
@@ -30892,8 +30918,12 @@ class IndexMixin:
         bins: Any = None,
         dropna: bool = True,
     ) -> Series:
-        """How often each label appears, as the column of labels would count it."""
-        return self.to_series().value_counts(
+        """How often each label appears, as the column of labels would count it.
+
+        The column is read on fresh positions, because the labels as its labels
+        repeat and dropping the missing ones would have to line them up.
+        """
+        return self.to_series().reset_index(drop=True).value_counts(
             normalize=normalize, sort=sort, ascending=ascending, bins=bins, dropna=dropna
         )
 
@@ -31135,7 +31165,13 @@ class IndexMixin:
         if self._temporal:
             # `where` reads instants and spans, and keeps the labels the mask leaves.
             return self.where([not m for m in mask], value)
-        replacement = value if isinstance(value, (list, tuple)) else [value]
+        if isinstance(value, (list, tuple)):
+            replacement = list(value)
+        elif hasattr(value, "__len__") and not isinstance(value, (str, bytes, dict)):
+            # An index, a column or an array is a whole column of replacements.
+            replacement = value.tolist() if hasattr(value, "tolist") else list(value)
+        else:
+            replacement = [value]
         try:
             return Index._wrap(self._inner.putmask([bool(m) for m in mask], list(replacement)))
         except Exception as error:
@@ -31637,13 +31673,41 @@ class IndexMixin:
         """
         from ._frame import Index
 
+        left = self
+        if isinstance(other, Index):
+            mine, theirs = str(self.dtype), str(other.dtype)
+            numbers = ("int8", "int16", "int32", "int64", "uint8", "uint16", "uint32")
+            numbers += ("float32", "float64")
+            if mine != theirs and mine in numbers and theirs in numbers:
+                # Two number widths meet at the type both fit in, as numpy has it.
+                import numpy
+
+                common = str(numpy.promote_types(mine, theirs))
+                left, other = self.astype(common), other.astype(common)
         try:
-            return Index._wrap(getattr(self._inner, which)(_unwrap(other, "other"), sort))
+            answer = Index._wrap(getattr(left._inner, which)(_unwrap(other, "other"), sort))
         except Exception as error:
             raise translate(error) from None
+        # A difference is a filter of this side, and keeps its type.
+        return answer.astype(self.dtype) if which == "difference" and left is not self else answer
 
     str = Namespace(IndexStrings)
     """The string accessor, which answers indexes where the column one answers columns."""
+
+
+def _nan_text(data: Any) -> Any:
+    """A list of text with NaN for its gaps, with None in their place, or the data as it came.
+
+    pandas reads a float NaN among text as a missing text, the way it reads
+    None, and a column of text holds a gap as None.
+    """
+    if not isinstance(data, (list, tuple)):
+        return data
+    nan = [isinstance(cell, float) and cell != cell for cell in data]
+    text = [isinstance(cell, str) for cell in data]
+    if not any(nan) or not any(text) or not all(map(operator.or_, nan, text)):
+        return data
+    return [None if n else cell for cell, n in zip(data, nan, strict=True)]
 
 
 def _label_of(data: Any) -> str | None:
@@ -33055,6 +33119,15 @@ def _temporal_cast_refused(printed: str, wanted: str) -> str:
     return ""
 
 
+def _long_temporal(wanted: str) -> str:
+    """numpy's short spelling of an instant or span type, `<M8[ns]`, in its long form."""
+    if wanted[:1] in {"<", "=", "|"} and wanted[1:3] in ("M8", "m8"):
+        wanted = wanted[1:]
+    if wanted[:3] in ("M8[", "m8["):
+        return ("datetime64" if wanted[0] == "M" else "timedelta64") + wanted[2:]
+    return wanted
+
+
 def _counts_target(printed: str, dtype: Any) -> str:
     """The instant or span type an `astype` reads a column of numbers into, or empty text.
 
@@ -33062,6 +33135,7 @@ def _counts_target(printed: str, dtype: Any) -> str:
     `astype("timedelta64[s]")` on 5 is five seconds, and a missing number is NaT.
     """
     wanted = str(dtype) if isinstance(dtype, str) or type(dtype).__name__ == "dtype" else ""
+    wanted = _long_temporal(wanted)
     numbers = printed.startswith(("int", "uint", "float"))
     if not numbers or not wanted.startswith(("datetime64[", "timedelta64[")) or "," in wanted:
         return ""
@@ -33075,6 +33149,7 @@ def _text_temporal_target(printed: str, dtype: Any) -> str:
     `astype("datetime64[ns]")` on `"2026-01-01"` is that day.
     """
     wanted = str(dtype) if isinstance(dtype, str) or type(dtype).__name__ == "dtype" else ""
+    wanted = _long_temporal(wanted)
     if printed not in ("string", "str") or "," in wanted:
         return ""
     if not wanted.startswith(("datetime64[", "timedelta64[")):
@@ -33102,6 +33177,7 @@ def _unit_change(printed: str, dtype: Any) -> str:
     """
     unit = _unit_of(printed)
     wanted = str(dtype) if isinstance(dtype, str) or type(dtype).__name__ == "dtype" else ""
+    wanted = _long_temporal(wanted)
     target = _unit_of(wanted)
     if not unit or not target or target not in _UNIT_ORDER:
         return ""
