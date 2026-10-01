@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: pyarrow type names in constructors, and the string type in read_csv
+
+`Series`, `DataFrame` and `pd.array` now take a `dtype` such as `"int64[pyarrow]"` or `"double[pyarrow]"`. Before, they raised "data type not understood", while `astype` already took these names. `read_csv` and `read_xml` with `dtype="string"` or `StringDtype()` now read pandas' masked string type, not plain `str`. A frame's repr pads the header of a `double[pyarrow]` column the way pandas pads any number column.
+
 ### Fixed: Build a read_stata index_col of narrow integers as int64
 
 `read_stata(index_col=...)` now gives an int64 index when the column is stored as a narrow integer such as int8 or int32, as pandas does, instead of keeping the stored width.
