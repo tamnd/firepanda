@@ -226,6 +226,16 @@ way and one in eight was even, so the line is at one in eight. q6's filter of
 two columns went from 2.2 to 1.2 ms.
 """
 
+comptime FILTER_LOOKAHEAD = 16
+"""Kept rows a sparse filter runs ahead of itself when issuing prefetches.
+
+A sparse morsel lists its kept rows before copying them, so the copy knows where
+it will read sixteen rows from now and asks for that line early. Six million
+doubles keeping one row in eighty went from 1.40 to 1.43 ms to 0.60 to 0.72 ms
+on a shared six core box, best of fifteen over three rounds, measured with
+sixteen. The take uses eight; this one has not been tried at eight.
+"""
+
 comptime MASK_SAMPLE_BLOCK = 64
 """Rows `mask_keeps_more_than` reads at each place it looks.
 
@@ -1448,6 +1458,17 @@ def _filter_spread[
             # row and advancing by the bit. Eight mask bytes are one word, a
             # true byte is a one in the low bit of its byte, and the lowest set
             # bit of the word names the next kept row of the eight.
+            #
+            # The kept rows are found first and copied second, rather than
+            # copied as they are found. Each one is a cache line of the column
+            # nobody has asked for yet, and while the copy was interleaved with
+            # the mask walk only a few of those misses were in flight at once.
+            # With the rows in a list, the copy asks for the line
+            # `FILTER_LOOKAHEAD` rows ahead. See that constant for the numbers.
+            var base = i
+            var spots = List[Int32](unsafe_uninit_length=limit - written)
+            var spot = spots.unsafe_ptr()
+            var found = 0
             while i + 8 <= end:
                 var word = (
                     mask_bytes.unsafe_offset(i)
@@ -1456,19 +1477,39 @@ def _filter_spread[
                 )
                 while word != 0:
                     var k = Int(count_trailing_zeros(word)) >> 3
-                    target.unsafe_offset(written).unsafe_write(
-                        source.unsafe_offset(i + k).unsafe_load()
-                    )
-                    written += 1
+                    spot.unsafe_offset(found).unsafe_write(Int32(i + k - base))
+                    found += 1
                     word &= word - 1
                 i += 8
             while i < end:
                 if Bool(mask_values.unsafe_offset(i).unsafe_load()):
-                    target.unsafe_offset(written).unsafe_write(
-                        source.unsafe_offset(i).unsafe_load()
-                    )
-                    written += 1
+                    spot.unsafe_offset(found).unsafe_write(Int32(i - base))
+                    found += 1
                 i += 1
+            var from_here = source.unsafe_offset(base)
+            for f in range(min(FILTER_LOOKAHEAD, found)):
+                prefetch[PrefetchOptions().for_read().high_locality()](
+                    from_here.unsafe_offset(
+                        Int(spot.unsafe_offset(f).unsafe_load())
+                    )
+                )
+            for f in range(found):
+                if f + FILTER_LOOKAHEAD < found:
+                    prefetch[PrefetchOptions().for_read().high_locality()](
+                        from_here.unsafe_offset(
+                            Int(
+                                spot.unsafe_offset(
+                                    f + FILTER_LOOKAHEAD
+                                ).unsafe_load()
+                            )
+                        )
+                    )
+                target.unsafe_offset(written + f).unsafe_write(
+                    from_here.unsafe_offset(
+                        Int(spot.unsafe_offset(f).unsafe_load())
+                    ).unsafe_load()
+                )
+            _ = spots^
             return
 
         if skipping:
