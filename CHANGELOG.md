@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: df[slice] picks rows
+
+A slice inside a frame's brackets now picks rows, as in pandas: by position when it holds whole numbers, whatever the labels are, and by label otherwise, so `df[::-1]`, `df[:2]` and `df["b":"d"]` work. It used to raise TypeError.
+
+### Fixed: backward label slices
+
+A label slice with a negative step, such as `s.loc["y":"w":-1]` or `Index.slice_indexer("y", "w", -1)`, now walks back through every label as pandas does, including text bounds on instants, where it used to stop after the first row.
+
 ### Added: union_categoricals
 
 `api.types.union_categoricals` now puts categoricals, category columns and category indexes end to end, as pandas does. Matching categories keep the first one's order, different ones come in order of first appearance, `sort_categories` sorts them, `ignore_order` drops the order flag, and ordered categoricals that disagree, mixed category types and parts that are not categorical are refused in pandas' words. It used to refuse every call.
