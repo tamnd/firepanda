@@ -11428,6 +11428,7 @@ class DataFrameMixin(_Carries):
             self._inner = self._shaped(data, index, columns)
         if listed:
             self._inner = _int_gaps_widened(self._inner, listed)
+        dtype = _arrow_named(dtype)
         if dtype is not None and (
             type(dtype).__name__ == "ArrowDtype"
             or _masked.masked_name(dtype) is not None
@@ -17679,6 +17680,7 @@ class SeriesMixin(_Carries):
         if _is_period_type(dtype):
             dtype = None
         if dtype is not None:
+            dtype = _arrow_named(dtype)
             arrow = (
                 type(dtype).__name__ == "ArrowDtype"
                 or _masked.masked_name(dtype) is not None
@@ -36172,7 +36174,7 @@ def _text_float_format(float_format: Any) -> Any:
 
 def _head_numeric(dtype: str) -> bool:
     """Whether a column's name prints a space ahead, which pandas gives any type of numbers."""
-    return _text_numeric(dtype) or dtype.startswith(("Int", "UInt", "Float", "boolean"))
+    return _text_numeric(dtype) or dtype.startswith(("Int", "UInt", "Float", "boolean", "double["))
 
 
 def _text_numeric(dtype: str) -> bool:

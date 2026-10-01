@@ -807,7 +807,11 @@ def _typed(
     if dtype is not None:
         kind = _kind(dtype)
         if kind == "text":
-            return _Column("u", values)
+            text = _Column("u", values)
+            if str(dtype) == "string":
+                # pandas' masked string type, which the plain text is cast to once read.
+                text.after = dtype
+            return text
         if kind == "category":
             return _Column("u", values, dtype)
         if kind.startswith(("int", "uint")):
