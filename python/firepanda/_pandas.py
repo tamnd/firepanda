@@ -11204,6 +11204,13 @@ def _column_to_numpy(column: Any, dtype: Any, na_value: Any) -> Any:
     gaps = bool(column.isna().any())
     kind = _numpy_type(printed, gaps)
     spans = _SPANS.fullmatch(printed)
+    if spans and dtype is not None and _is_object_dtype(dtype):
+        # Objects are pandas' Timestamp and Timedelta with NaT in a gap, never numpy's.
+        blank = NaT if na_value is NO_DEFAULT or na_value is None else na_value
+        answer = np.empty(len(column), dtype=object)
+        for at, value in enumerate(column.tolist()):
+            answer[at] = blank if _missing(value) else value
+        return answer
     if spans and na_value is NO_DEFAULT:
         counts = iter(column.dropna().astype("int64").tolist())
         least = int(np.iinfo(np.int64).min)
@@ -29010,6 +29017,37 @@ def _searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
         raise translate(error) from None
 
 
+def _temporal_searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
+    """Where one instant or span or each of several would go in labels of them kept in order.
+
+    Raises:
+        ValueError: For a side other than left or right, with numpy's words.
+        TypeError: For a value that is not an instant or a span of the labels' kind.
+    """
+    if side not in ("left", "right"):
+        raise InvalidArgumentError(f"search side must be 'left' or 'right' (got {side!r})")
+    values = index.to_series()
+    if sorter is not None:
+        values = values.iloc[list(sorter)]
+
+    def one(key: Any) -> int:
+        moment = _temporal_key(values, key)
+        if moment is None:
+            raise DTypeError(f"value should be a 'Timestamp' or 'Timedelta', got {key!r}")
+        below = values < moment if side == "left" else values <= moment
+        return int(below.sum())
+
+    several = hasattr(value, "tolist") and getattr(value, "ndim", 0) > 0
+    if isinstance(value, (IndexMixin, SeriesMixin)) or several:
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        from ._array import FirepandaArray
+        from ._frame import Series
+
+        return FirepandaArray(Series([one(key) for key in value], dtype="int64"))
+    return one(value)
+
+
 def _searched_one(index: Any, value: Any, side: str) -> int:
     """Where one value would go, asked of the kernel and then of Python.
 
@@ -30014,11 +30052,20 @@ class IndexMixin:
 
         Raises:
             ValueError: For an unknown `how`.
-            NotImplementedError: When either side is a `MultiIndex`.
+            ValueError: For a `MultiIndex` with no level named as this index is.
         """
         from ._frame import Index
         from ._multi import MultiIndex
 
+        if isinstance(other, MultiIndex) and not isinstance(self, MultiIndex):
+            # The MultiIndex answers it from its side, with the sides and indexers swapped.
+            if level is None:
+                if self.name is None or self.name not in other.names:
+                    raise InvalidArgumentError("cannot join with no overlapping index names")
+                level = self.name
+            flipped = {"left": "right", "right": "left"}.get(how, how)
+            joined = other.join(self, how=flipped, level=level, return_indexers=return_indexers)
+            return (joined[0], joined[2], joined[1]) if return_indexers else joined
         if isinstance(self, MultiIndex) or isinstance(other, MultiIndex):
             raise NotImplementedError("join with a MultiIndex is not supported yet")
         if not isinstance(other, IndexMixin):
@@ -30523,6 +30570,8 @@ class IndexMixin:
         `sorter` is the positions that put the labels in order, and the answer
         is then a position in that order, as numpy's is.
         """
+        if self._temporal:
+            return _temporal_searched(self, value, side, sorter)
         return _searched(self._inner, value, side, sorter)
 
     def isin(self, values: Any, level: Any = None) -> Any:
@@ -30691,6 +30740,10 @@ class IndexMixin:
         has to say so in a way a slice will read.
         """
         forward = step is None or int(step) >= 0
+        if forward and self._temporal and self.is_monotonic_increasing:
+            # Instants and spans are compared, and text read, as the slice reads them.
+            found = self.slice_indexer(start, end)
+            return (found.start, found.stop)
         try:
             if forward:
                 first, last = self._inner.slice_locs(start, end)
