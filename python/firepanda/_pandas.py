@@ -1340,7 +1340,7 @@ def _no_scaling_by_nat(owner: Any, other: Any, op: str, flip: bool) -> None:
 
 
 def _listed_frame_operand(frame: Any, other: Any, axis: int) -> Any:
-    """A list, a tuple or a numpy array beside a frame, as a series along the axis.
+    """A list, a tuple, a dict or a numpy array beside a frame, as a series along the axis.
 
     pandas lines the values up with the columns, or with the rows for the
     named form on the rows, and refuses a length that does not match with its
@@ -1348,7 +1348,8 @@ def _listed_frame_operand(frame: Any, other: Any, axis: int) -> Any:
     """
     from ._frame import Series
 
-    listed = isinstance(other, (list, tuple)) or (_is_numpy(other) and other.ndim == 1)
+    keyed = isinstance(other, dict)
+    listed = keyed or isinstance(other, (list, tuple)) or (_is_numpy(other) and other.ndim == 1)
     if not listed:
         return other
     labels = _shown_names(frame) if axis == 1 else frame.index
@@ -1356,6 +1357,9 @@ def _listed_frame_operand(frame: Any, other: Any, axis: int) -> Any:
         raise InvalidArgumentError(
             f"Unable to coerce to Series, length must be {len(labels)}: given {len(other)}"
         )
+    if keyed:
+        # A mapping is read by its keys, a label it does not name standing as a gap.
+        return Series(list(other.values()), index=list(other)).reindex(labels)
     return Series(other if _is_numpy(other) else list(other), index=labels)
 
 
@@ -1503,6 +1507,37 @@ def _is_scalar(value: Any) -> bool:
     return isinstance(value, (str, bytes)) or not isinstance(value, collections.abc.Iterable)
 
 
+_UFUNC_MASKED = frozenset(
+    {"Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64"}
+    | {"Float32", "Float64", "boolean"}
+)
+
+
+def _ufunc_masked(column: Any) -> bool:
+    """Whether a column is one of pandas' masked kinds, whose gaps are `NA`."""
+    return str(column.dtype) in _UFUNC_MASKED
+
+
+def _ufunc_operand(item: Any) -> Any:
+    """A ufunc's input as numpy reads it, a masked column with its gaps as NaN."""
+    if not isinstance(item, SeriesMixin):
+        return item
+    if _ufunc_masked(item):
+        return item.to_numpy(dtype="float64", na_value=float("nan"))
+    return item.to_numpy()
+
+
+def _list_of_arrays(labels: Any) -> bool:
+    """Whether `index=` is a list of lists or arrays, which pandas reads as a MultiIndex."""
+    if not isinstance(labels, list) or not labels:
+        return False
+    return all(
+        isinstance(array, (list, IndexMixin, SeriesMixin))
+        or (_is_numpy(array) and array.ndim == 1)
+        for array in labels
+    )
+
+
 def _written_index(index: Any, multi: bool = False) -> Any:
     """An `index=` argument, with a `MultiIndex` written as the text labels that hold it.
 
@@ -1513,6 +1548,9 @@ def _written_index(index: Any, multi: bool = False) -> Any:
     from ._frame import Index
     from ._multi import MultiIndex
 
+    if _list_of_arrays(index):
+        # pandas' ensure_index reads a list of arrays as the levels of a MultiIndex.
+        index = MultiIndex.from_arrays([list(array) for array in index])
     if _all_tuples(index):
         if multi:
             index = MultiIndex.from_tuples(list(index))
@@ -8710,7 +8748,8 @@ def _written_one(printed: str, value: Any) -> tuple[str, Any]:
     """
     from ._scalars import NaT, Timedelta, Timestamp
 
-    if value is None or value is NaT or (isinstance(value, float) and value != value):
+    gap = value is None or value is NaT or value is NA
+    if gap or (isinstance(value, float) and value != value):
         if printed == "bool":
             raise _refused(printed, "nan")
         widened = "float64" if printed in _SIGNED or printed in _UNSIGNED else printed
@@ -10630,6 +10669,10 @@ def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
     frame = isinstance(owner, DataFrame)
     owner_type = "DataFrame" if frame else "Series"
     number = _align_axis(axis, owner_type, (0, 1) if frame else (0,)) or 0
+    if _list_of_arrays(labels):
+        from ._multi import MultiIndex
+
+        labels = MultiIndex.from_arrays([list(array) for array in labels])
     name = labels.name if isinstance(labels, Index) else None
     values = labels.tolist() if hasattr(labels, "tolist") else list(labels)
     current = _shown_names(owner) if number == 1 else owner.index.tolist()
@@ -11484,6 +11527,10 @@ class DataFrameMixin(_Carries):
         answer and differ only in how much work they do.
         """
         index = _written_index(index)
+        if _list_of_arrays(columns):
+            from ._multi import MultiIndex
+
+            columns = MultiIndex.from_arrays([list(array) for array in columns])
         _no_repeated_columns(columns)
         listed = set()
         if isinstance(data, collections.abc.Mapping):
@@ -18356,6 +18403,32 @@ class SeriesMixin(_Carries):
         return func(self, *args, **kwargs)
 
     aggregate = agg
+
+    def __array_ufunc__(self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any) -> Any:
+        """A numpy ufunc over the column, answered as a column on the same labels.
+
+        Columns that are not on the same labels, frames, `out=` and the ufunc
+        methods other than a call go to numpy as plain arrays, as before.
+        """
+        import numpy
+
+        columns = [item for item in inputs if isinstance(item, SeriesMixin)]
+        plain = [_ufunc_operand(item) for item in inputs]
+        result = getattr(ufunc, method)(*plain, **kwargs)
+        lined_up = all(item.index.equals(self.index) for item in columns)
+        framed = any(isinstance(item, DataFrameMixin) for item in inputs)
+        if method != "__call__" or "out" in kwargs or not lined_up or framed:
+            return result
+        if not isinstance(result, numpy.ndarray) or result.ndim != 1 or result.dtype == object:
+            return result
+        names = {item.name for item in columns}
+        from ._frame import Series
+
+        answer = Series(result, index=self.index, name=names.pop() if len(names) == 1 else None)
+        masked = any(_ufunc_masked(item) for item in columns)
+        if masked and result.dtype.kind in "fb":
+            answer = answer.astype("Float64" if result.dtype.kind == "f" else "boolean")
+        return answer
 
     def transform(self, func: Any, axis: Any = 0, *args: Any, **kwargs: Any) -> Series:
         """A function that answers a column of the same labels, by name or itself.
