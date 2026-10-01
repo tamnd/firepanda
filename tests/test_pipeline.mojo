@@ -1959,6 +1959,27 @@ def test_a_reduction_over_chunks_gives_the_whole_frame_answer() raises:
     assert_equal(one_int(out, "seen"), 6, "every row, counted once")
 
 
+def test_a_reduction_over_a_tall_chunk_folds_every_morsel() raises:
+    """A reduction at the front of the line cuts the chunk into morsels and
+    folds them on every core. The answers are the ones the whole column gives,
+    the count included, and the short piece past the morsel is in them."""
+    var rows = MORSEL_ROWS + 3
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    aggs.append(GroupAgg(0, AggKind.SIZE, "rows"))
+    aggs.append(GroupAgg(0, AggKind.MAX, "high"))
+    aggs.append(GroupAgg(0, AggKind.MEAN, "average"))
+    var pipeline = Pipeline(tall_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(one_int(out, "total"), Int64(rows * (rows + 1) // 2), "sum")
+    assert_equal(one_int(out, "rows"), Int64(rows), "every row")
+    assert_equal(one_int(out, "high"), Int64(rows), "the last row")
+    var mean = out.column("average").as_typed[DType.float64]()[0]
+    assert_equal(mean, Float64(rows + 1) / 2.0, "the middle")
+
+
 def test_a_mean_over_uneven_chunks_is_not_a_mean_of_means() raises:
     """The chunks are two, three and one row long, so the means of the chunks
     are 1.5, 4 and 6 and averaging those gives 3.833. The answer is 3.5, which
