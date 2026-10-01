@@ -8753,7 +8753,8 @@ def _written_one(printed: str, value: Any) -> tuple[str, Any]:
         if printed == "bool":
             raise _refused(printed, "nan")
         widened = "float64" if printed in _SIGNED or printed in _UNSIGNED else printed
-        return widened, None
+        # numpy's floats hold a gap as NaN, which is what pandas writes there.
+        return widened, math.nan if widened in ("float32", "float64") else None
     value = _plain(value)
     if printed in _WHOLE_RANGES and not isinstance(value, bool):
         least, most = _WHOLE_RANGES[printed]
