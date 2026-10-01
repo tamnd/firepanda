@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ._array import FirepandaArray
-from .errors import InvalidArgumentError
+from .errors import DTypeError, InvalidArgumentError
 
 if TYPE_CHECKING:
     from ._frame import Index, Series
@@ -293,6 +293,62 @@ class Categorical(FirepandaArray):
         if isinstance(key, FirepandaArray):
             key = key.tolist()
         return Categorical._held_by(self._column.iloc[key])
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Values put in place, each one of the categories.
+
+        Raises:
+            TypeError: For a value not among the categories, in pandas' words.
+        """
+        from ._pandas import _missing
+
+        values = self._column.tolist()
+        places = range(len(values))
+        if isinstance(key, int):
+            chosen, new = [places[key]], [value]
+        else:
+            if isinstance(key, slice):
+                chosen = list(places[key])
+            elif all(isinstance(item, bool) for item in list(key)):
+                chosen = [at for at, flag in zip(places, list(key), strict=True) if flag]
+            else:
+                chosen = [places[at] for at in list(key)]
+            many = isinstance(value, list | tuple | FirepandaArray)
+            new = list(value) if many else [value] * len(chosen)
+        categories = self.categories.tolist()
+        for item in new:
+            if not _missing(item) and item not in categories:
+                raise DTypeError(
+                    f"Cannot setitem on a Categorical with a new category ({item}), "
+                    "set the categories first"
+                )
+        for at, item in zip(chosen, new, strict=True):
+            values[at] = item
+        self._column = Categorical(values, categories=categories, ordered=self.ordered)._column
+
+    def _again(self, column: Series) -> Categorical:
+        return Categorical._held_by(column)
+
+    def map(self, mapper: Any, na_action: Any = None) -> Any:
+        """`mapper` applied to each category, a categorical when no two meet, else an index."""
+        from ._frame import Index
+
+        pick = mapper.get if isinstance(mapper, dict) else mapper
+        renamed = [pick(category) for category in self.categories.tolist()]
+        if len(set(renamed)) == len(renamed):
+            return self._changed("rename_categories", renamed)
+        return Index(self._mapped(mapper, "ignore"))
+
+    def sort_values(
+        self, *, inplace: bool = False, ascending: bool = True, na_position: str = "last"
+    ) -> Categorical | None:
+        """The values in the order of the categories."""
+        order = self.argsort(ascending=ascending, na_position=na_position).tolist()
+        ordered = Categorical._held_by(self._column.iloc[order])
+        if not inplace:
+            return ordered
+        self._column = ordered._column
+        return None
 
     def _changed(self, method: str, *args: Any, **kwargs: Any) -> Categorical:
         """The categorical after one of the column's `cat` methods."""

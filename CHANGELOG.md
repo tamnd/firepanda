@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: array methods, Categorical sort and setting, IntervalArray makers, IntervalIndex.is_overlapping
+
+The arrays pandas answers gain argmax, argmin, argsort, duplicated, isin, item, map, nbytes, searchsorted, shift, view and interpolate, with a masked array's isin, map and nbytes answered as pandas answers them. Categorical gains sort_values, item assignment that refuses a new category, and map over its categories. IntervalArray takes a list of intervals and gains from_breaks, from_arrays, from_tuples, its ends, contains, overlaps and set_closed, and IntervalIndex gains is_overlapping, overlaps and set_closed. An array class such as NumpyExtensionArray now takes plain values.
+
 ### Added: SeriesGroupBy nlargest, nsmallest, unique and monotonic flags; TimedeltaIndex reductions
 
 A grouped column now answers nlargest and nsmallest on the group key and the row label, unique as one list a group, and is_monotonic_increasing and is_monotonic_decreasing a group, as pandas does. TimedeltaIndex gains mean, median, std and sum with the pandas signatures.

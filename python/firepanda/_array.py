@@ -30,6 +30,8 @@ import re
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from .errors import InvalidArgumentError
+
 if TYPE_CHECKING:
     from ._frame import Series
 
@@ -39,7 +41,12 @@ class FirepandaArray:
 
     __slots__ = ("_column",)
 
-    def __init__(self, column: Series) -> None:
+    def __init__(self, column: Series, *args: Any, **kwargs: Any) -> None:
+        if not hasattr(column, "reset_index"):
+            # Plain values, as `pd.arrays.NumpyExtensionArray(numpy_array)` passes them.
+            from ._frame import Series
+
+            column = Series(list(column) if not hasattr(column, "dtype") else column)
         self._column = column.reset_index(drop=True).rename(None)
         if type(self) is FirepandaArray:
             self.__class__ = _class_of(str(self._column.dtype))
@@ -168,6 +175,129 @@ class FirepandaArray:
         """The mean of the values."""
         return self._reduced("mean", skipna)
 
+    def _again(self, column: Series) -> FirepandaArray:
+        """An array of the same kind over another column."""
+        return FirepandaArray(column)
+
+    def _place(self, name: str, skipna: bool) -> Any:
+        import numpy
+
+        if not skipna and bool(self._column.isna().any()):
+            raise InvalidArgumentError("Encountered an NA value with skipna=False")
+        return numpy.int64(self.argsort(ascending=name == "argmin")[0])
+
+    def argmax(self, skipna: bool = True) -> Any:
+        """The position of the largest value."""
+        return self._place("argmax", skipna)
+
+    def argmin(self, skipna: bool = True) -> Any:
+        """The position of the smallest value."""
+        return self._place("argmin", skipna)
+
+    def argsort(
+        self,
+        *,
+        ascending: bool = True,
+        kind: str = "quicksort",
+        na_position: str = "last",
+        **kwargs: Any,
+    ) -> Any:
+        """The positions that put the values in order, ties kept in place, as a numpy array."""
+        import numpy
+
+        ordered = self._column.sort_values(
+            ascending=ascending, kind="stable", na_position=na_position
+        )
+        return numpy.array(ordered.index.tolist(), dtype=numpy.int64)
+
+    def duplicated(self, keep: Any = "first") -> Any:
+        """Whether each value repeats one kept, as a numpy array of bools."""
+        import numpy
+
+        return numpy.array(self._column.duplicated(keep=keep).tolist(), dtype=bool)
+
+    def isin(self, values: Any) -> Any:
+        """Whether each value is among `values`, as a numpy array of bools."""
+        import numpy
+
+        if isinstance(values, FirepandaArray):
+            values = values.tolist()
+        return numpy.array(self._column.isin(values).tolist(), dtype=bool)
+
+    def item(self, index: Any = None) -> Any:
+        """The one value of an array of one.
+
+        Raises:
+            ValueError: For an array of any other length, in numpy's words.
+        """
+        if index is None and len(self._column) != 1:
+            raise InvalidArgumentError("can only convert an array of size 1 to a Python scalar")
+        return self.to_numpy()[0 if index is None else index]
+
+    def _mapped(self, mapper: Any, na_action: Any) -> list[Any]:
+        if na_action not in (None, "ignore"):
+            raise InvalidArgumentError(
+                f"na_action must either be 'ignore' or None, {na_action!r} was passed"
+            )
+        pick = mapper.get if isinstance(mapper, dict) else mapper
+        return [
+            value if na_action == "ignore" and _gap(value) else pick(value)
+            for value in self._column.tolist()
+        ]
+
+    def map(self, mapper: Any, na_action: Any = None) -> Any:
+        """`mapper` applied to each value, as a numpy array."""
+        import numpy
+
+        text = isinstance(self, ArrowStringArray)
+        return numpy.array(self._mapped(mapper, na_action), dtype=object if text else None)
+
+    @property
+    def nbytes(self) -> int:
+        """The bytes the values take."""
+        return int(self._column.nbytes)
+
+    def searchsorted(self, value: Any, side: str = "left", sorter: Any = None) -> Any:
+        """Where `value` goes to keep the values in order, as numpy answers it."""
+        import numpy
+
+        if isinstance(value, FirepandaArray):
+            value = value.tolist()
+        return numpy.searchsorted(self.to_numpy(), value, side=side, sorter=sorter)
+
+    def shift(self, periods: int = 1, fill_value: Any = None) -> FirepandaArray:
+        """The values moved by `periods` places, the places left a gap or `fill_value`."""
+        if fill_value is None:
+            return self._again(self._column.shift(periods))
+        return self._again(self._column.shift(periods, fill_value=fill_value))
+
+    def view(self, dtype: Any = None) -> Any:
+        """The same values, or with `dtype` their numpy bytes read as that type."""
+        if dtype is not None:
+            return self.to_numpy().view(dtype)
+        return self._again(self._column)
+
+    def interpolate(
+        self,
+        *,
+        method: str,
+        axis: int,
+        index: Any,
+        limit: Any,
+        limit_direction: str,
+        limit_area: Any,
+        copy: bool,
+        **kwargs: Any,
+    ) -> FirepandaArray:
+        """The gaps filled along `index`, as a column's `interpolate` fills them."""
+        from ._frame import Series
+
+        column = Series(self._column.tolist(), index=index, dtype=self._column.dtype)
+        filled = column.interpolate(
+            method=method, limit=limit, limit_direction=limit_direction, limit_area=limit_area
+        )
+        return self._again(filled)
+
     def _operated(self, other: Any, name: str) -> Any:
         """An operator applied value by value, as the column applies it."""
         if isinstance(other, FirepandaArray):
@@ -276,6 +406,28 @@ class IntegerArray(FirepandaArray):
 
     __slots__ = ()
 
+    def isin(self, values: Any) -> Any:
+        """Whether each value is among `values`, as a masked array of bools."""
+        from ._frame import Series
+
+        return FirepandaArray(Series(super().isin(values).tolist(), dtype="boolean"))
+
+    def map(self, mapper: Any, na_action: Any = None) -> Any:
+        """`mapper` applied to each value, as a numpy array with NaN for a gap."""
+        import numpy
+
+        values = self._mapped(mapper, na_action)
+        if any(_gap(value) for value in values):
+            values = [numpy.nan if _gap(value) else value for value in values]
+        return numpy.array(values)
+
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the values and of the mask, as pandas counts them."""
+        bits = re.search(r"\d+", str(self.dtype))
+        width = int(bits.group()) // 8 if bits else 1
+        return len(self._column) * (width + 1)
+
     def _shown(self, value: Any) -> str:
         return "<NA>" if _gap(value) else str(value)
 
@@ -360,6 +512,91 @@ class IntervalArray(FirepandaArray):
     """Intervals, which is `pandas.arrays.IntervalArray`."""
 
     __slots__ = ()
+
+    @classmethod
+    def _of(cls, index: Any) -> IntervalArray:
+        from ._frame import Series
+
+        return cls(Series(index))
+
+    @classmethod
+    def from_breaks(
+        cls, breaks: Any, closed: str = "right", copy: bool = False, dtype: Any = None
+    ) -> IntervalArray:
+        """Intervals between each break and the next."""
+        from ._interval_index import IntervalIndex
+
+        return cls._of(IntervalIndex.from_breaks(breaks, closed=closed, dtype=dtype))
+
+    @classmethod
+    def from_arrays(
+        cls, left: Any, right: Any, closed: str = "right", copy: bool = False, dtype: Any = None
+    ) -> IntervalArray:
+        """Intervals from a list of left ends and a list of right ends."""
+        from ._interval_index import IntervalIndex
+
+        return cls._of(IntervalIndex.from_arrays(left, right, closed=closed, dtype=dtype))
+
+    @classmethod
+    def from_tuples(
+        cls, data: Any, closed: str = "right", copy: bool = False, dtype: Any = None
+    ) -> IntervalArray:
+        """Intervals from pairs of ends, None for a gap."""
+        from ._interval_index import IntervalIndex
+
+        return cls._of(IntervalIndex.from_tuples(data, closed=closed, dtype=dtype))
+
+    def _index(self) -> Any:
+        from ._interval_index import IntervalIndex
+
+        return IntervalIndex(self._column)
+
+    @property
+    def closed(self) -> str:
+        """Which ends each interval holds."""
+        return self._index().closed
+
+    @property
+    def left(self) -> Any:
+        """The left ends, as an index."""
+        return self._index().left
+
+    @property
+    def right(self) -> Any:
+        """The right ends, as an index."""
+        return self._index().right
+
+    @property
+    def mid(self) -> Any:
+        """The middle of each interval, as an index."""
+        return self._index().mid
+
+    @property
+    def length(self) -> Any:
+        """Each interval's length, as an index."""
+        return self._index().length
+
+    @property
+    def is_empty(self) -> Any:
+        """Whether each interval holds no point, as numpy bools."""
+        return self._index().is_empty
+
+    @property
+    def is_non_overlapping_monotonic(self) -> bool:
+        """Whether the intervals increase and none overlaps the next."""
+        return self._index().is_non_overlapping_monotonic
+
+    def contains(self, other: Any) -> Any:
+        """Whether each interval holds the point `other`, as numpy bools."""
+        return self._index().contains(other)
+
+    def overlaps(self, other: Any) -> Any:
+        """Whether each interval shares a point with the interval `other`, as numpy bools."""
+        return self._index().overlaps(other)
+
+    def set_closed(self, closed: str) -> IntervalArray:
+        """The same ends, each interval holding the ends `closed` names."""
+        return self._of(self._index().set_closed(closed))
 
     def _shown(self, value: Any) -> str:
         return "nan" if _gap(value) else str(value)

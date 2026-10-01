@@ -72,7 +72,7 @@ class IntervalIndex(Index):
         if kind is None:
             sides = {value.closed for value in values if value is not None}
             if len(sides) > 1:
-                raise InvalidArgumentError("intervals must all be closed on the same side.")
+                raise InvalidArgumentError("intervals must all be closed on the same side")
             subtype = "float64" if values else "int64"
             kind = f"interval[{subtype}, {closed or 'right'}]" if not sides else None
             if kind is None:
@@ -229,6 +229,34 @@ class IntervalIndex(Index):
             for a, b in itertools.pairwise(found)
         )
         return rising or falling
+
+    @property
+    def is_overlapping(self) -> bool:
+        """Whether any two intervals share a point, gaps aside."""
+        found = sorted(
+            (value for value in self._values if value is not None),
+            key=lambda value: (value.left, value.right),
+        )
+        both = self.closed == "both"
+        furthest = None
+        for value in found:
+            if furthest is not None and (
+                value.left < furthest or (value.left == furthest and both)
+            ):
+                return True
+            furthest = value.right if furthest is None else max(furthest, value.right)
+        return False
+
+    def overlaps(self, other: Any) -> Any:
+        """Whether each interval shares a point with the interval `other`, as numpy bools."""
+        import numpy
+
+        return numpy.array([value is not None and value.overlaps(other) for value in self._values])
+
+    def set_closed(self, closed: str) -> IntervalIndex:
+        """The same ends, each interval holding the ends `closed` names."""
+        pairs = [None if value is None else (value.left, value.right) for value in self._values]
+        return type(self).from_tuples(pairs, closed=closed, name=self.name)
 
     @property
     def is_empty(self) -> Any:
