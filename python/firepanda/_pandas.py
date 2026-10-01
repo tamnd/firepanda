@@ -2561,7 +2561,8 @@ def _reindex_level(owner: Any, target: Any, level: Any, method: Any, value: Any)
     Onto a `MultiIndex` from flat labels, each row reads the value at its label
     on the level, missing when there is none. From a `MultiIndex` onto flat
     labels, the rows whose label on the level is asked for are kept, in the
-    order the labels are asked for. Between two flat indexes the level means
+    order the labels are asked for on the outer level and in their own order
+    on an inner one. Between two flat indexes the level means
     nothing and None sends the reindex on as usual.
 
     Raises:
@@ -2582,7 +2583,11 @@ def _reindex_level(owner: Any, target: Any, level: Any, method: Any, value: Any)
         number = source._level_numbers([level])[0]
         held = source.get_level_values(number).tolist()
         order = list(dict.fromkeys(_sequence(target)))
-        return owner.take([at for label in order for at, one in enumerate(held) if one == label])
+        kept = [at for label in order for at, one in enumerate(held) if one == label]
+        if number:
+            # On an inner level pandas keeps the rows in the order they stand.
+            kept.sort()
+        return owner.take(kept)
     return None
 
 
@@ -9921,7 +9926,10 @@ def _zoned_axis(
         return _with_row_labels(owner, instants)
     else:
         moved = getattr(DatetimeIndex(labels, name=labels.name), method)(tz, *extra)
-    return _with_row_labels(owner, moved)
+    made = _with_row_labels(owner, moved)
+    # The step is the moved index's own, which pandas keeps or drops by the clock.
+    hold_freq(made, moved.freq)
+    return made
 
 
 def _zoned_level(
@@ -11396,6 +11404,18 @@ class DataFrameMixin(_Carries):
                     if isinstance(values, (list, tuple)) and None in values
                 }
             data = self._arrays_as_series(data, index)
+        if (
+            isinstance(data, dict)
+            and index is not None
+            and any(isinstance(value, dict) for value in data.values())
+        ):
+            # With rows named, a mapping column is read by those labels alone.
+            from ._frame import Series
+
+            data = {
+                name: Series(value) if isinstance(value, dict) else value
+                for name, value in data.items()
+            }
         if isinstance(data, DataFrameMixin):
             self._inner = self._copied(data, index, columns)
         elif data is None and (index is not None or columns is not None):
@@ -11493,12 +11513,39 @@ class DataFrameMixin(_Carries):
         numpy array, a one value column or a series in it goes the long way,
         through `_shaped`, which is where those are read.
         """
+        if data and any(isinstance(value, dict) for value in data.values()):
+            data = DataFrameMixin._keyed_columns(data)
         if data and any(
             _is_numpy(value) or _is_scalar(value) or isinstance(value, SeriesMixin)
             for value in data.values()
         ):
             return DataFrameMixin._shaped(data, None, None)
         return DataFrameMixin._across(data)
+
+    @staticmethod
+    def _keyed_columns(data: dict) -> dict:
+        """Each mapping in `data` made a series on the keys of them all.
+
+        Pandas reads a mapping column as row label to value, the rows being
+        every key the mappings hold in the order first seen, and a key one
+        mapping lacks a gap there. A list beside them has no labels to line
+        up by, so pandas refuses the mix.
+        """
+        from ._frame import Series
+
+        if any(
+            not isinstance(value, (dict, SeriesMixin)) and not _is_scalar(value)
+            for value in data.values()
+        ):
+            raise InvalidArgumentError(
+                "Mixing dicts with non-Series may lead to ambiguous ordering."
+            )
+        mappings = [value for value in data.values() if isinstance(value, dict)]
+        keys = list(dict.fromkeys(key for value in mappings for key in value))
+        return {
+            name: Series(value).reindex(keys) if isinstance(value, dict) else value
+            for name, value in data.items()
+        }
 
     @staticmethod
     def _gapped_flags(built: Any, data: Any) -> Any:

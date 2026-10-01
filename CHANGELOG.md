@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Read mapping columns by key and keep the pandas step after a clock change
+
+A frame built from a mapping whose columns are mappings now reads each one as row label to value, the rows being every key in the order first seen and a missing key a gap, as pandas does. With rows named the mappings are read by those labels, and a mapping beside a list is refused in pandas' words. tz_convert and tz_localize on a frame or a series give the moved labels the step the index method gives them, so a day moved to another clock no longer shows the old frequency. reindex with level= on an inner level of a MultiIndex keeps the rows in the order they stand, as pandas does.
+
 ### Changed: Pair a tall side against a hashed sparse short side in one pass
 
 The one pass pairing of a tall side against a short one now also covers a short side whose keys are too spread for a direct table and land in a hashed one with a sieve. A left row that passes the sieve looks its key up in the hash table and skips the row when it is not there. Before, such a join fell back to writing an ordinal for every left row and reading that list twice more. Over three interleaved rounds on a shared six core box, best of fifteen, q12 at scale factor one went from 26.1 to 32.8 ms to 18.3 to 32.2 ms, q3 from 51.3 to 62.7 ms to 43.2 to 72.2 ms and q10 from 51.0 to 95.6 ms to 42.3 to 68.7 ms, on a box loaded enough that the spread is wide and the best runs say more than the worst.
