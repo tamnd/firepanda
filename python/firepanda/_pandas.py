@@ -1413,8 +1413,16 @@ def _listed_frame_operand(frame: Any, other: Any, axis: int) -> Any:
     named form on the rows, and refuses a length that does not match with its
     own message.
     """
-    from ._frame import Series
+    from ._frame import DataFrame, Series
 
+    if _is_numpy(other) and other.ndim == 2:
+        # A grid of values lines up with the frame cell by cell, so its shape must match.
+        if tuple(other.shape) != frame.shape:
+            raise InvalidArgumentError(
+                f"Unable to coerce to DataFrame, shape must be {frame.shape}: "
+                f"given {tuple(other.shape)}"
+            )
+        return DataFrame(other, index=frame.index, columns=frame.columns)
     keyed = isinstance(other, dict)
     listed = keyed or isinstance(other, (list, tuple)) or (_is_numpy(other) and other.ndim == 1)
     if not listed:
@@ -7299,6 +7307,8 @@ def _replacements(to_replace: Any, value: Any, owner: str) -> list[tuple[Any, An
         TypeError: For nothing named to replace, and for a run of values against
             a single thing to replace.
     """
+    # A numpy scalar, such as a value read back out of a column, is the value it holds.
+    to_replace, value = _plain(to_replace), _plain(value)
     if isinstance(to_replace, dict) or _keyed(to_replace):
         if value is not NO_DEFAULT:
             raise InvalidArgumentError(_REPLACE_BOTH)
@@ -7435,6 +7445,43 @@ def _matched(inner: Any, old: Any) -> Any:
             return None
         raise raised from None
     return _no_gaps(flags)
+
+
+def _objects_replaced(column: Any, pairs: list[tuple[Any, Any]]) -> Any:
+    """A column of python objects with its pairs replaced value by value, as pandas does."""
+    from ._frame import Series
+
+    held = column.tolist()
+    made = list(held)
+    for old, new in pairs:
+        for place, value in enumerate(held):
+            if (_nothing(old) and _nothing(value)) or _same_object(value, old):
+                made[place] = new
+    return Series(made, index=column.index, name=column.name, dtype="object")
+
+
+def _none_widens(column: Any, pairs: list[tuple[Any, Any]], to_replace: Any) -> bool:
+    """Whether a None put in by `replace` turns the column into python objects.
+
+    pandas keeps the None itself, so the column becomes objects. A text or a
+    category column asked with a single value is the exception and keeps its type.
+    """
+    if not any(new is None for _, new in pairs):
+        return False
+    if not isinstance(to_replace, dict) and str(column.dtype) in ("str", "category"):
+        return False
+    held = column.tolist()
+    return any(new is None and any(_same_object(v, old) for v in held) for old, new in pairs)
+
+
+def _same_object(value: Any, old: Any) -> bool:
+    """Whether one held object is the value being replaced, a bool never matching a number."""
+    if isinstance(value, bool) is not isinstance(old, bool) or _nothing(value):
+        return False
+    try:
+        return bool(value == old)
+    except Exception:
+        return False
 
 
 def _replacing(column: Any, old: Any, new: Any, printed: str, labels: list[Any]) -> Any:
@@ -8037,7 +8084,9 @@ class _Selection:
             every = isinstance(rows, slice) and rows == slice(None)
             return part if every else part.loc[rows]
         answer = self._picked(rows, columns)
-        return _prefix_dropped(self._owner, rows, answer) if labelled else answer
+        if not labelled:
+            return answer
+        return _named_by_key(_prefix_dropped(self._owner, rows, answer), rows, columns)
 
     def _picked(self, rows: Any, columns: Any) -> Any:
         """The frame, column or value a row key and a column key name."""
@@ -8696,6 +8745,9 @@ class _Labelled(_Selection):
             first = 0 if start is None else names.index(start)
             last = len(names) if stop is None else names.index(stop) + 1
             return names[first:last]
+        if hasattr(key, "tolist") and getattr(key, "ndim", 1) == 1:
+            # An index, a series or an array of names reads as the list it holds.
+            key = key.tolist()
         if isinstance(key, (list, tuple)):
             if _is_mask(key):
                 return _named_at(names, _column_positions(names, key))
@@ -8785,6 +8837,29 @@ class _Cell:
         _Positional(owner)[row, column] = value
 
 
+def _named_by_key(answer: Any, rows: Any, columns: Any = None) -> Any:
+    """An answer of `loc` whose axes take the name of an index that picked them.
+
+    pandas names the labels it answers after an index key, even one with no
+    name, where a list or a series key leaves the name the labels had.
+    """
+    from ._frame import Index
+    from ._multi import MultiIndex
+
+    def picks(key: Any, labels: Any) -> bool:
+        exact = isinstance(key, Index) and not isinstance(key, MultiIndex)
+        plain = exact and not isinstance(labels, MultiIndex)
+        return plain and len(labels) == len(key) and labels.name != key.name
+
+    if not hasattr(answer, "index"):
+        return answer
+    if picks(rows, answer.index):
+        answer = answer.rename_axis(rows.name, axis=0)
+    if hasattr(answer, "columns") and picks(columns, answer.columns):
+        answer = answer.rename_axis(columns.name, axis=1)
+    return answer
+
+
 class _Along:
     """`s.loc` and `s.iloc`, which are the frame's pair with one axis gone.
 
@@ -8811,6 +8886,11 @@ class _Along:
 
     def __getitem__(self, key: Any) -> Any:
         """Answers a value or a series, depending on the key's shape."""
+        answer = self._read(key)
+        return _named_by_key(answer, key) if self._labelled else answer
+
+    def _read(self, key: Any) -> Any:
+        """The value or the series a key names, before the labels take the key's name."""
         from ._frame import Series
 
         key = _called_key(key, self._owner, self._labelled)
@@ -13450,6 +13530,10 @@ class DataFrameMixin(_Carries):
         }
         return type(self)(pieces, index=self.index)
 
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any:
+        """The frame as a two dimensional numpy array, which is how numpy reads one."""
+        return self.to_numpy(dtype=dtype)
+
     def to_numpy(self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT) -> Any:
         """The values as a two dimensional numpy array, in the type the columns share."""
         return _frame_to_numpy(self, dtype, na_value)
@@ -13685,7 +13769,7 @@ class DataFrameMixin(_Carries):
         elif not self.index.is_unique:
             answer = _rows_dropped(self, rows, errors)
         else:
-            answer = self._reindex(
+            answer = self._reindexed(
                 labels=None,
                 index=self.index.drop(_drop_keys(self.index, rows), errors=errors),
                 columns=None,
@@ -17459,7 +17543,16 @@ class DataFrameMixin(_Carries):
         answer = self.iloc[taken]
         return answer.sort_values(names, ascending=not largest, kind="mergesort")
 
-    def _reindex(
+    def _reindex(self, labels: Any, index: Any, columns: Any, axis: Any, *rest: Any) -> DataFrame:
+        """`_reindexed`, its axes named after an index that was handed in for them."""
+        answer = self._reindexed(labels, index, columns, axis, *rest)
+        if labels is not None and axis in (1, "columns"):
+            columns = labels
+        elif labels is not None:
+            index = labels
+        return _named_by_key(answer, index, columns)
+
+    def _reindexed(
         self,
         labels: Any,
         index: Any,
@@ -19462,7 +19555,7 @@ class SeriesMixin(_Carries):
             return _settled(self, kept.copy(), inplace)
         if not self.index.is_unique:
             return _settled(self, _rows_dropped(self, rows, errors), inplace)
-        kept = self._reindex(
+        kept = self._reindexed(
             index=self.index.drop(_drop_keys(self.index, rows), errors=errors),
             axis=None,
             method=None,
@@ -19885,6 +19978,8 @@ class SeriesMixin(_Carries):
         pairs = _replacements(to_replace, value, "Series")
         if _objects.period_name_of(self._inner):
             return _kept(self, _periods_replaced(self, pairs), inplace)
+        if _objects.is_object(self._inner) or _none_widens(self, pairs, to_replace):
+            return _kept(self, _objects_replaced(self, pairs), inplace)
         labels = self._inner.labels().to_list()
         printed = self._inner.dtype()
         answer = self._inner
@@ -21401,7 +21496,11 @@ class SeriesMixin(_Carries):
                 raise translate(error) from None
             return Series._wrap(self._inner)
 
-    def _reindex(
+    def _reindex(self, index: Any, *rest: Any) -> Series:
+        """`_reindexed`, its labels named after an index that was handed in for them."""
+        return _named_by_key(self._reindexed(index, *rest), index)
+
+    def _reindexed(
         self,
         index: Any,
         axis: Any,

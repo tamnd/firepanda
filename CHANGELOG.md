@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Replacing in objects, axes named by an index key, and frames beside numpy grids
+
+`replace` on a column of python objects matches value by value, a None put in by a mapping turns the column into objects that keep the None as pandas does, and a numpy scalar to replace is read as the value it holds. `loc` and `reindex` name the labels they answer after an index key, and `loc` takes an index, a series or an array of column names. A frame meets a two dimensional numpy array cell by cell, refusing a shape that does not match in pandas' words, and numpy reads a frame as its grid through `__array__`.
+
 ### Fixed: An index sorted with a NaN, searchsorted, numpy instants, tight mappings, record arrays and isna on arrays
 
 An index sorted with a NaN keeps the NaN where it used to answer a null. `searchsorted` with several values answers a numpy array like pandas. A list of numpy `datetime64` values builds a series or index of instants. Dropping a row level on the columns keeps the column axis name. `from_dict(orient="tight")` honours `index_names` and `column_names` and builds levels from tuple labels, and `from_records` on a numpy record array takes its column names and types from the fields, reading every row whatever `nrows` says. `isna` and `notna` on a list or a numpy array answer a numpy array of flags, and the second entry of `DataFrame.axes` is the column labels as an index.
