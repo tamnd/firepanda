@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Put a sieve in front of a sparse direct join table
+
+A join key whose values sit close enough together is matched through a table indexed by the value, four bytes a slot. When the build side fills a quarter of that table or less and the table is half a megabyte or more, a bit per slot is now kept as well and asked first, so a probe row whose key the build side does not hold is turned away from L1 rather than by a cache miss on an empty slot. A morsel stops asking the bits once a chunk lets more than half its rows through. TPC-H q17 at scale factor one, two hundred parts against six million lines, went from 15.8 to 18.6 ms to 10.6 to 14.7 ms over three interleaved rounds on a shared six core box, and q8 was 1.5 to 3.3 ms faster in each round.
+
 ### Changed: Let an inner join skip putting an exchanged pairing back in left row order
 
 `join` and `join_on` take `ordered=False`, which lets an inner join against a much taller right side come out in right row order, as a Polars join does by default. The join builds on the short left side either way, and putting the pairs back in left row order meant gathering every right column one cache miss a row. On TPC-H q2 at scale factor one, which joins 2,000 suppliers with 800,000 part supplies, the query went from about 35 ms to about 26 ms on a shared six core box, best of fifteen. The default stays the pandas order.
@@ -43,6 +47,7 @@ A `PeriodIndex` hands Arrow the array pandas exports for periods, the `pandas.pe
 ### Added: an alias on a table function
 
 `FROM range(5) AS r(i)` names the relation and its column, so `r.i` and `i` both reach it, and `FROM range(3) r` names the relation while the column keeps the function's name, as in DuckDB. A column list longer than the columns the function produces is cut to them, since DuckDB drops the extra names of a table function rather than refusing them, and `unnest([4, 5]) u(x)` names its column the same way. Two aliased table functions join like any two tables.
+
 ### Changed: IntervalIndex is an Index of interval labels
 
 `IntervalIndex` is now an `Index` whose labels are interval cells, so intervals work as row labels the way pandas' do. A series labelled by `interval_range` keeps an `IntervalIndex`, `loc` by an interval finds it and `loc` by a point finds the interval holding it, and slicing, sorting, uniques and appending stay interval indexes. `value_counts(bins=)` answers its counts under an `IntervalIndex` rather than a categorical index of intervals, `IntervalIndex([])` is of int64 ends, and `IntervalIndex.from_tuples` reads NaN as a gap.
@@ -158,6 +163,7 @@ The four running folds of a group by take `skipna` through their keywords as pan
 ### Changed: count(*) counts the rows without building a column
 
 A SQL `count(*)`, and a count of any constant that is not null, now reads the number of rows off a column the input already has. Before, the constant was built into a column the height of the table and then counted. On ClickBench at 1M rows, `SELECT COUNT(*) FROM hits` went from 7.5 ms to 0.3 ms and q2, which counts beside a sum and a mean, from 9.9 ms to 3.5 ms.
+
 ### Added: round_ok=False on as_unit for instants
 
 `Series.dt.as_unit` and `DatetimeIndex.as_unit` take `round_ok=False`, which refuses a cast to a coarser unit that would drop a fraction, with pandas' error naming the first such instant by its whole count in the unit it is held in. Spans raise pandas' own `TypeError` for the argument, since their `as_unit` does not take it.

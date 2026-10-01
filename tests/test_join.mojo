@@ -2095,6 +2095,51 @@ def test_an_unordered_exchanged_join_keeps_the_pairs_in_right_row_order() raises
         seen[Int(b[r])] -= 1
     for k in range(2_000):
         assert_equal(seen[k], 0, String("key ", k, " count differs"))
+def test_a_sparse_direct_table_with_a_sieve_pairs_every_hit() raises:
+    """A thousand keys spread over two hundred thousand values, probed twice.
+
+    The span is wide enough and the build side thin enough for the direct table
+    to get a sieve. The first probe mostly misses, so the sieve is asked all the
+    way through. The second only hits, so each morsel gives the sieve up after
+    its first chunk, and the rows after that have to pair just the same.
+    """
+    var build_rows = 1_000
+    var probe_rows = 300_000
+    var small = Array[DType.int64](build_rows)
+    for i in range(build_rows):
+        small[i] = Int64(i * 200)
+    var left = one_column(Series("k", small^))
+
+    for hitting in range(2):
+        var tall = Array[DType.int64](probe_rows)
+        for i in range(probe_rows):
+            if hitting == 1:
+                tall[i] = Int64(((i * 7_919) % build_rows) * 200)
+            else:
+                tall[i] = Int64((i * 7_919) % 250_000)
+        var right = one_column(Series("k", tall^))
+        var paired = join_indices(
+            left.column_refs(),
+            keys(0),
+            build_rows,
+            right.column_refs(),
+            keys(0),
+            probe_rows,
+            JoinKind.INNER,
+        )
+        var probed = right.column("k").as_typed[DType.int64]()
+        var expected = 0
+        for i in range(probe_rows):
+            var v = Int(probed[i])
+            if v % 200 == 0 and v < build_rows * 200:
+                expected += 1
+        assert_equal(len(paired), expected, "pair count")
+        for r in range(len(paired)):
+            assert_equal(
+                paired.left_at[r] * 200,
+                Int(probed[paired.right_at[r]]),
+                "paired unequal keys",
+            )
 
 
 def main() raises:
