@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: mask alignment, regex replace by column, empty reductions, clip widening and crosstab categories
+
+`mask` turns a labelled condition over before lining it up, so rows and columns the condition does not name are replaced as in pandas. `replace` with a pattern and a text under the same column name and `regex=True` now replaces. `any`, `all` and `count` on a frame with no columns answer bool and int64. Clipping whole numbers by a run of bounds holding a gap or a fraction makes floats once a row is replaced. `crosstab(dropna=False)` on categorical keys shows every category. A column resampler's `agg` takes a mapping of names to reductions, `GroupBy.apply` leaves out the groups that answer None beside frames, and `union`, `difference` and `symmetric_difference` between an index of text and one of numbers answer objects in pandas' order.
+
 ### Fixed: spans past the nanosecond range
 
 `to_timedelta`, `timedelta_range` and a cast of whole numbers to `timedelta64[s]` now count in the unit they answer in, so a span longer than an int64 of nanoseconds, like `timedelta_range("1 Day", periods=3, freq="100000D", unit="s")`, is held as pandas holds it instead of overflowing.
