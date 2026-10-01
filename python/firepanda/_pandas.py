@@ -12666,7 +12666,7 @@ class DataFrameMixin(_Carries):
             return type(self)(built).set_axis(self.columns)
         answer = type(self)(
             {label: _readable(list(row)) for label, row in zip(labels, rows, strict=True)},
-            index=self._inner.names(),
+            index=self.columns,
         )
         if len(types) == 1 and labels:
             kind = types.pop()
@@ -19238,9 +19238,13 @@ class SeriesMixin(_Carries):
             other = math.nan
         taken = _other_side(other, base._inner.dtype(), labels, replaced, base)
         try:
-            return _kept(self, Series._wrap(base._inner.pick(kept, taken)), inplace)
+            picked = base._inner.pick(kept, taken)
         except Exception as error:
             raise translate(error) from None
+        if widen and picked.null_count() and _numpy_float(base):
+            # A gap taken from the other side is NaN in a numpy float column, as pandas has it.
+            picked = picked.fill_null(Series([math.nan], dtype=picked.dtype())._inner)
+        return _kept(self, Series._wrap(picked), inplace)
 
     def clip(
         self,
