@@ -16,8 +16,10 @@ the layout, which matters because the layout is exactly what
 
 from __future__ import annotations
 
+import atexit
 import shutil
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -54,6 +56,31 @@ def stage(root: Path) -> Path:
     return package
 
 
+def _stage_early() -> Path | None:
+    """Stages the package before any test module is collected, when there is one.
+
+    A test module that says `import firepanda` at its top runs that line while
+    pytest collects it, which is before any fixture. Without this the name
+    resolves to the Mojo sources at the root of the repository, which Python
+    reads as a namespace package with nothing in it, and every such module fails
+    to collect. Staging here, when the conftest is imported, puts the real
+    package first on the path in time. The fixture below hands back the same one.
+
+    Returns:
+        Where it was staged, or None when no extension has been built.
+    """
+    if not (BUILT / "_firepanda.so").exists():
+        return None
+    root = Path(tempfile.mkdtemp(prefix="firepanda-staged-"))
+    atexit.register(shutil.rmtree, root, True)
+    stage(root)
+    sys.path.insert(0, str(root))
+    return root
+
+
+STAGED = _stage_early()
+
+
 @pytest.fixture
 def staged() -> Callable[[Path], Path]:
     """Hands back the staging function, for tests that want their own copy."""
@@ -61,7 +88,7 @@ def staged() -> Callable[[Path], Path]:
 
 
 @pytest.fixture(scope="session")
-def firepanda(tmp_path_factory: pytest.TempPathFactory) -> ModuleType:
+def firepanda() -> ModuleType:
     """Imports a staged firepanda, once for the whole run.
 
     Once, rather than per test, because a second import of the same extension
@@ -70,12 +97,8 @@ def firepanda(tmp_path_factory: pytest.TempPathFactory) -> ModuleType:
     interpreter with the environment stripped, and that is where the question of
     whether the artifact stands alone belongs. Here we just want the module.
     """
-    if not (BUILT / "_firepanda.so").exists():
+    if STAGED is None:
         pytest.skip("no extension built, run `pixi run build-extension` first")
-
-    root = tmp_path_factory.mktemp("staged")
-    stage(root)
-    sys.path.insert(0, str(root))
     import firepanda
 
     return firepanda
