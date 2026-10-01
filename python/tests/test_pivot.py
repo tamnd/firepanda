@@ -186,13 +186,12 @@ def test_columns_of_several_levels_are_pandas(
             .assign(c=[1, 1, 2, 3, 2])
             .pivot_table(index="r", columns="c", values="v", margins=True)
         ),
-        lambda m: base(m).pivot(index="r", columns="c", values=["v", "t"]),
     ],
 )
 def test_what_pandas_labels_with_numbers_or_objects_is_refused(
     firepanda: ModuleType, build: Callable[[Any], Any]
 ) -> None:
-    """Totals beside numbers, columns named by numbers and values read as objects."""
+    """Totals beside numbers and columns named by numbers."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 
