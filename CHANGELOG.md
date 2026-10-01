@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: abs, minus and plus over columns of objects, and quantile of numbers beside moments
+
+`abs`, `-` and `+` now run over a column of objects value by value, so the sizes of complex numbers come back as float64, as pandas' complex128 gives, and other objects stay objects. `DataFrame.quantile` with `numeric_only=False` over numbers beside datetimes answers a column of objects holding each column's quantile, rather than refusing.
+
 ### Fixed: convert_dtypes keeps whole objects int64 without convert_integer
 
 A column of whole number objects with no gaps converted with `convert_integer=False` is now `int64`, since pandas infers the objects before converting, rather than `Float64`.

@@ -15664,6 +15664,14 @@ class DataFrameMixin(_Carries):
         """Runs one of the four unary operations over every column."""
         from ._frame import DataFrame
 
+        frame = cast("DataFrame", self)
+        names = frame.columns.tolist()
+        held = [_objects.is_object(frame[name]._inner) for name in names if names.count(name) == 1]
+        if op != "invert" and len(held) == len(names) and any(held):
+            # A column of objects is run in Python, which the core cannot do.
+            made = DataFrame({name: frame[name]._unary(op) for name in names}, index=frame.index)
+            _hold_columns(made, list(frame.columns.names))
+            return made
         try:
             return DataFrame._wrap(self._inner.unary(op))
         except Exception as error:
@@ -16035,11 +16043,13 @@ class DataFrameMixin(_Carries):
             # pandas takes a quantile across each row as one down the frame turned on its side.
             read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
             return read.T._quantile(q, 0, False, interpolation, method)
-        if alone and interpolation == "linear":
+        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        timed = {_word(dtype).startswith(("datetime64", "timedelta64")) for dtype in read.dtypes}
+        if alone and interpolation == "linear" and len(timed) < 2:
             return self._reduce("quantile", wanted[0], axis, True, numeric_only, 0).rename(
                 float(wanted[0])
             )
-        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        # Numbers beside moments have no one type, so each column is read alone into objects.
         names = read._inner.names()
         _no_boolean_quantile(list(read._inner.dtypes()))
         columns = {name: read[name]._quantiles(wanted, interpolation) for name in names}
@@ -20598,6 +20608,8 @@ class SeriesMixin(_Carries):
         """Runs one of the four unary operations over every row."""
         from ._frame import Series
 
+        if op != "invert" and _objects.is_object(self._inner):
+            return _objects_unary(cast("Series", self), op)
         try:
             return Series._wrap(self._inner.unary(op))
         except Exception as error:
@@ -29412,6 +29424,25 @@ def _temporal_searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
 
         return FirepandaArray(Series([one(key) for key in value], dtype="int64"))
     return _numpy_position(one(value))
+
+
+def _objects_unary(column: Series, op: str) -> Series:
+    """`abs`, `-` or `+` over a column of objects, value by value as numpy runs it.
+
+    A complex number has no column of its own here and is held as an object,
+    so the sizes of complex numbers are floats, as pandas' complex128 gives,
+    while any other objects stay objects.
+    """
+    from ._frame import Series
+
+    run = {"abs": abs, "neg": operator.neg, "pos": operator.pos}[op]
+    values = column.tolist()
+    found = [value for value in values if not _missing(value)]
+    answers = [value if _missing(value) else run(value) for value in values]
+    if op == "abs" and found and all(isinstance(value, complex) for value in found):
+        floats = [math.nan if _missing(value) else value for value in answers]
+        return Series(floats, index=column.index, name=column.name, dtype="float64")
+    return Series(answers, index=column.index, name=column.name, dtype="object")
 
 
 def _numpy_number(number: float) -> Any:
