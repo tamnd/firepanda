@@ -225,7 +225,7 @@ faster still, which is what says the old loop was not waiting on memory.
 """
 
 comptime BYTE_ONES: UInt64 = 0x0101010101010101
-"""A one in every byte of a word, which is a true in every byte of a mask word."""
+"""A one in every byte of a word, which is a true in every byte of a mask."""
 
 comptime FILTER_SPARSE_SHARE = 8
 """Below one kept row in this many, a morsel copies only the rows it keeps.
@@ -1547,14 +1547,15 @@ def _filter_spread[
                     i += FILTER_SKIP_ROWS
                     continue
                 var stop = i + FILTER_SKIP_ROWS
-                # Eight rows at a time, each stored at the place the mask bytes
-                # before it say. Multiplying the word by a one in every byte sums
-                # the bytes up to each byte, so taking the byte itself back off
-                # leaves the count of kept rows ahead of it, and the top byte is
-                # the count for all eight. A dropped row is stored where the next
-                # kept row lands and is overwritten by it, the same trick the row
-                # at a time loop plays, but no store waits for the one before it
-                # to move the cursor. See `FILTER_GROUP_ROWS`.
+                # Eight rows at a time, each stored at the place the mask
+                # bytes before it say. Multiplying the word by a one in every
+                # byte sums the bytes up to each byte, so taking the byte
+                # itself back off leaves the count of kept rows ahead of it,
+                # and the top byte is the count for all eight. A dropped row
+                # is stored where the next kept row lands and is overwritten
+                # by it, the same trick the row at a time loop plays, but no
+                # store waits for the one before it to move the cursor. See
+                # `FILTER_GROUP_ROWS`.
                 while i < stop and written + FILTER_GROUP_ROWS <= limit:
                     var word = mask_bytes.unsafe_offset(
                         i
@@ -1562,9 +1563,10 @@ def _filter_spread[
                     var through = word * BYTE_ONES
                     var before = through - word
                     comptime for k in range(FILTER_GROUP_ROWS):
-                        target.unsafe_offset(
-                            written + Int((before >> UInt64(8 * k)) & 0xFF)
-                        ).unsafe_write(source.unsafe_offset(i + k).unsafe_load())
+                        var ahead = Int((before >> UInt64(8 * k)) & 0xFF)
+                        target.unsafe_offset(written + ahead).unsafe_write(
+                            source.unsafe_offset(i + k).unsafe_load()
+                        )
                     written += Int(through >> 56)
                     i += FILTER_GROUP_ROWS
                 while i < stop and written < limit:
