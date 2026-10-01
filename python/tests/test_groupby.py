@@ -266,7 +266,6 @@ def test_a_key_and_a_level_together_refuse(firepanda: ModuleType) -> None:
     ("call", "arguments", "expected"),
     [
         ("sum", {"engine": "numba"}, "engine"),
-        ("sum", {"engine_kwargs": {}}, "engine_kwargs"),
         ("min", {"engine": "numba"}, "engine"),
         ("std", {"engine": "numba"}, "engine"),
     ],

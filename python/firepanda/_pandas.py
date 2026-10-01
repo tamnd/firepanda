@@ -6223,6 +6223,23 @@ def _numpy_float(column: Any) -> bool:
     return printed in ("float32", "float64") and not _masked.masked_of(column)
 
 
+def _group_engine(engine: Any) -> None:
+    """Refuses the numba engine on a group reduction and lets every other name through.
+
+    pandas reads `engine` only to see whether it says numba, so the cython engine,
+    None and any other word take the one compiled path, and `engine_kwargs` goes
+    unread with them.
+
+    Raises:
+        NotImplementedError: For the numba engine, which is not here.
+    """
+    if engine == "numba":
+        raise NotImplementedError(
+            "engine='numba' is not supported yet, because there is one implementation"
+            " here and it is the one cython names"
+        )
+
+
 def _gaps_at(column: Any, kept: Any) -> Any:
     """The column with a gap in its own type in every row the flags do not keep."""
     return column._chosen(kept, NO_DEFAULT, False, None, None, False, widen=False)
@@ -26681,17 +26698,7 @@ class GroupByMixin[Answer]:
             # the value that means "nobody asked for anything" depends on the
             # reduction.
             min_count = operator.index(min_count)
-        _refuse(
-            "engine",
-            engine,
-            "there is one implementation and it is the compiled one, so there is"
-            " nothing here for this to choose between",
-        )
-        _refuse(
-            "engine_kwargs",
-            engine_kwargs,
-            "there is nothing to configure while there is nothing to choose",
-        )
+        _group_engine(engine)
         grouped = self._numeric_only(kind) if _flag("numeric_only", numeric_only) else self
         texts = grouped._text_values()
         if texts and kind in _TEXT_REFUSED:
@@ -27194,24 +27201,14 @@ class GroupByMixin[Answer]:
         Args:
             func: The name of the reduction or transform, or a function.
             args: Arguments for it, refused for a name.
-            engine: Refused.
-            engine_kwargs: Refused.
+            engine: Refused only for numba, as pandas reads it.
+            engine_kwargs: Unread, as in pandas.
             kwargs: Arguments for it by keyword, refused for a name.
 
         Returns:
             The frame or the series pandas answers.
         """
-        _refuse(
-            "engine",
-            engine,
-            "there is one implementation and it is the compiled one, so there is"
-            " nothing here for this to choose between",
-        )
-        _refuse(
-            "engine_kwargs",
-            engine_kwargs,
-            "there is nothing to configure while there is nothing to choose",
-        )
+        _group_engine(engine)
         if callable(func) and not isinstance(func, str):
             return self._transformed_by(func, args, kwargs)
         if not isinstance(func, str):
@@ -27277,8 +27274,8 @@ class GroupByMixin[Answer]:
         Args:
             func: A name, a function, a list of them or a mapping of column to one.
             *args: Arguments for a function, refused for a name.
-            engine: Refused.
-            engine_kwargs: Refused.
+            engine: Refused only for numba, as pandas reads it.
+            engine_kwargs: Unread, as in pandas.
             **kwargs: The named form, one output column a keyword, or the
                 keywords for a function.
 
@@ -27288,17 +27285,7 @@ class GroupByMixin[Answer]:
         Raises:
             TypeError: If there is neither a function nor a keyword.
         """
-        _refuse(
-            "engine",
-            engine,
-            "there is one implementation and it is the compiled one, so there is"
-            " nothing here for this to choose between",
-        )
-        _refuse(
-            "engine_kwargs",
-            engine_kwargs,
-            "there is nothing to configure while there is nothing to choose",
-        )
+        _group_engine(engine)
         function = callable(func) and not isinstance(func, str)
         if (args or (func is not None and kwargs)) and not function:
             raise UnsupportedError(
