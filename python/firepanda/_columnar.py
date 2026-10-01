@@ -217,9 +217,9 @@ def frame_of(table: Any, dtype_backend: Any = NO_DEFAULT) -> Any:
     Args:
         table: The table, as pyarrow read it.
         dtype_backend: pandas' default types when not given, as
-            `DataFrame.from_arrow` reads a table, and Arrow's types as
-            `firepanda.from_arrow` keeps them for `"numpy_nullable"` and
-            `"pyarrow"`, which are the two that keep a missing integer an integer.
+            `DataFrame.from_arrow` reads a table, pandas' nullable types for
+            `"numpy_nullable"`, and an `ArrowDtype` of each Arrow type for
+            `"pyarrow"`, the two that keep a missing integer an integer.
 
     Returns:
         The frame.
@@ -239,7 +239,7 @@ def frame_of(table: Any, dtype_backend: Any = NO_DEFAULT) -> Any:
         frame = DataFrame.from_arrow(table)
     else:
         _backend(dtype_backend)
-        frame = from_arrow(table)
+        frame = _typed(from_arrow(table), table, dtype_backend)
     if fields:
         frame = frame.set_index(fields).rename_axis([names.get(f) for f in fields])
     elif len(ranges) == 1 and ranges[0].get("kind") == "range":
@@ -253,6 +253,45 @@ def frame_of(table: Any, dtype_backend: Any = NO_DEFAULT) -> Any:
     if attrs:
         frame.attrs = attrs
     return frame
+
+
+# The nullable type pandas reads an Arrow type into under `"numpy_nullable"`.
+_NULLABLE = {
+    "int8": "Int8",
+    "int16": "Int16",
+    "int32": "Int32",
+    "int64": "Int64",
+    "uint8": "UInt8",
+    "uint16": "UInt16",
+    "uint32": "UInt32",
+    "uint64": "UInt64",
+    "float": "Float32",
+    "double": "Float64",
+    "bool": "boolean",
+    "string": "string",
+    "large_string": "string",
+}
+
+
+def _typed(frame: Any, table: Any, backend: str) -> Any:
+    """A frame read from Arrow, in the types pandas gives it under `backend`.
+
+    Under `"pyarrow"` every column keeps its Arrow type as an `ArrowDtype`, and
+    under `"numpy_nullable"` numbers, flags and text take pandas' nullable
+    types while the rest keep the types they read as. A column with no values
+    is left as it reads, since its cells carry no type to keep.
+    """
+    from ._arrowtyped import ArrowDtype
+
+    wanted: dict[Any, Any] = {}
+    for field in table.schema:
+        if len(frame) and table.column(field.name).null_count == len(frame):
+            continue
+        if backend == "pyarrow":
+            wanted[field.name] = ArrowDtype(field.type)
+        elif str(field.type) in _NULLABLE:
+            wanted[field.name] = _NULLABLE[str(field.type)]
+    return frame.astype(wanted) if wanted else frame
 
 
 def _local(path: Any, reading: bool = False) -> Any:
@@ -368,7 +407,8 @@ def read_parquet(
         dtype_backend: See `frame_of`.
         filesystem: A pyarrow file system, handed to pyarrow.
         filters: Row filters, handed to pyarrow.
-        to_pandas_kwargs: Refused, since there is no pandas frame to make.
+        to_pandas_kwargs: Refused unless empty, since there is no pandas frame
+            to make.
         **kwargs: Handed to `pyarrow.parquet.read_table`.
 
     Returns:
@@ -376,11 +416,11 @@ def read_parquet(
 
     Raises:
         ValueError: For an engine pandas does not know.
-        NotImplementedError: For `fastparquet` and `to_pandas_kwargs`.
+        NotImplementedError: For `fastparquet` and a non-empty `to_pandas_kwargs`.
     """
     _engine(engine)
     _storage(storage_options, path, _PARQUET_STORAGE)
-    if to_pandas_kwargs is not None:
+    if to_pandas_kwargs:
         raise NotImplementedError(
             "to_pandas_kwargs is not supported, because it is handed to pyarrow's"
             " to_pandas and firepanda reads the table without making a pandas frame"
