@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: the extension tests collect again
+
+A test module that imports firepanda at its top, as `test_clipboard.py`, `test_multiindex_labels.py`, `test_object_columns.py` and `test_optional.py` do, ran that import while pytest collected it, before the fixture had staged the package. The name then found the Mojo sources at the root of the repository as an empty namespace package, the four modules failed to collect, and the extension job stopped there on every pull request without running a test. The conftest now stages the package when it is imported, ahead of collection, and the fixture hands back that one.
+
 ### Added: compound rounding frequencies, short temporal dtype names and a few index fixes
 
 Rounding a Timestamp, Timedelta, DatetimeIndex or `.dt` column to a frequency of several fixed pieces such as `1h30min` now sums the pieces as pandas does. `Period("nan")` is NaT, `astype("M8[ns]")` and `astype("<m8[s]")` read numpy's short names, and `str.replace` takes a compiled pattern. `Index.value_counts` no longer fails on repeated labels with a gap, `Index.putmask` takes an Index of replacements, set operations between two number widths meet at the common type, and `Index([nan, "a"])` is a text index with a gap.
