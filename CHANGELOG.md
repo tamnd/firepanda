@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Gather a short join output's columns side by side
+
+A join whose output is a million rows or fewer now gathers its columns one per worker, where before each column was gathered across every worker in turn and the workers met at a barrier fourteen times on a q2 shaped join. A text column gathered into at least as many rows as it holds now shares its payload without first counting the bytes the gathered rows carry, since that count could only say to share it. TPC-H q2 at scale factor one, whose joined suppliers carry their names and comments eighty times over, went from 26.6 to 29.6 ms to 15.1 to 17.6 ms over three interleaved rounds on a shared six core box, best of fifteen, with the other joins unmoved.
+
 ### Changed: Put a sieve in front of a sparse direct join table
 
 A join key whose values sit close enough together is matched through a table indexed by the value, four bytes a slot. When the build side fills a quarter of that table or less and the table is half a megabyte or more, a bit per slot is now kept as well and asked first, so a probe row whose key the build side does not hold is turned away from L1 rather than by a cache miss on an empty slot. A morsel stops asking the bits once a chunk lets more than half its rows through. TPC-H q17 at scale factor one, two hundred parts against six million lines, went from 15.8 to 18.6 ms to 10.6 to 14.7 ms over three interleaved rounds on a shared six core box, and q8 was 1.5 to 3.3 ms faster in each round.

@@ -426,8 +426,16 @@ def _take_strings(
 
     # A column whose payload is empty has no element longer than twelve bytes,
     # so nothing is copied out of it and the counting pass has only one answer.
+    #
+    # Nor is there a question when the gather is at least as tall as its
+    # source, which is what a join hands a short side: TPC-H q2 gathers 2,000
+    # suppliers' names, addresses, phones and comments 160,000 times over.
+    # Copying would write each payload eighty times, and sharing it holds no
+    # more than the source already holds, so the payload is shared without
+    # counting what the rows would have copied.
     var carried = List[Int](length=workers + 1, fill=0)
-    if len(col.payload) > 0:
+    var tall = n >= height
+    if len(col.payload) > 0 and not tall:
         var totals = Buffer(workers * 8)
 
         def measure(w: Int) raises {mut totals, imm}:
@@ -465,7 +473,8 @@ def _take_strings(
 
     # See `PAYLOAD_SHARE`. A shared payload is never written, so the buffer the
     # workers write into is then empty and nothing reaches it.
-    var shared = carried[workers] * PAYLOAD_SHARE >= len(col.payload)
+    var shared = tall or carried[workers] * PAYLOAD_SHARE >= len(col.payload)
+    var nulls = col.null_count() > 0
     var views = Buffer(overwritten=n * VIEW_SIZE)
     var payload = Buffer(overwritten=0 if shared else carried[workers])
     var built = Bitmap(n, all_valid=False)
@@ -487,7 +496,7 @@ def _take_strings(
                         "take index ", at, " is outside a column of ", height
                     )
                 )
-            if at < 0 or not col.is_valid(at):
+            if at < 0 or (nulls and not col.is_valid(at)):
                 # The view of the empty string, so that reading a null's bytes
                 # gives an empty span rather than uninitialized memory, which is
                 # what `StringBuilder.append_null` writes for the same reason.

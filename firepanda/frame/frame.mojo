@@ -61,6 +61,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import TimeUnit
+from firepanda.exec.parallel import parallel_for
 from firepanda.frame.display import DisplayOptions, render_table
 from firepanda.frame.index import NOT_FOUND, Index
 from firepanda.hash.grouping import (
@@ -141,6 +142,17 @@ between two curves, because there is no size at which proving loses badly, and
 a threshold much lower would only mean scanning frames whose group by was
 already free."""
 
+
+comptime JOIN_GATHER_ACROSS_ROWS = 1 << 20
+"""Up to this many output rows a join gathers its columns side by side.
+
+Each column then goes to one core and is gathered there in full, instead of
+every column being split across all of them in turn. A million rows of eight
+bytes is eight megabytes, a few milliseconds for one core, which is past the
+point where a wait for every core costs anything next to it, and past it the
+widest join has fewer columns than a machine has cores and would leave most of
+them idle.
+"""
 
 struct DataFrame(Copyable, Movable, Sized, Writable):
     """A set of equal length named columns, addressed by position."""
@@ -3549,31 +3561,60 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var left_whole = _in_order(pairs.left_at, self.rows)
         var right_whole = _in_order(pairs.right_at, other.rows)
 
+        # A join's output is usually several columns gathered by the same two
+        # lists, and gathering them one after another splits each across the
+        # cores and waits for all of them before the next one starts. On a
+        # short output that is a dozen waits for a dozen small jobs, and a wait
+        # costs the slowest core's wake up, which on a busy machine is most of
+        # the gather. TPC-H q2's join of suppliers with part supplies builds
+        # fourteen columns of 160,000 rows. So a short output hands the columns
+        # out, one core each and all at once, which is how Polars gathers a
+        # join, and a tall one keeps each column's gather spread, where one
+        # column is enough work for every core.
+        # A coalesced key column goes through `take_pair`, which splits itself
+        # across the cores, so a right or an outer join keeps the old shape.
+        var across = (
+            len(wanted) > 1
+            and len(pairs) <= JOIN_GATHER_ACROSS_ROWS
+            and not coalescing
+        )
+        var spread = not across
+        var slots = List[Optional[AnyArray]](
+            length=len(wanted), fill=Optional[AnyArray]()
+        )
+
+        def fill(w: Int) raises {mut slots, imm}:
+            var i = wanted[w]
+            if from_right[i] and right_whole:
+                slots[w] = other.columns[source_at[i]].only().copy()
+            elif from_right[i]:
+                slots[w] = take_any(
+                    other.columns[source_at[i]].only(), pairs.right_at, spread
+                )
+            elif pair_with[i] >= 0:
+                slots[w] = take_pair(
+                    self.columns[source_at[i]].only(),
+                    other.columns[pair_with[i]].only(),
+                    pairs.left_at,
+                    pairs.right_at,
+                )
+            elif left_whole:
+                slots[w] = self.columns[source_at[i]].only().copy()
+            else:
+                slots[w] = take_any(
+                    self.columns[source_at[i]].only(), pairs.left_at, spread
+                )
+
+        if across:
+            parallel_for(fill, len(wanted))
+        else:
+            for w in range(len(wanted)):
+                fill(w)
         var kept = List[Field](capacity=len(wanted))
         var built = List[AnyArray](capacity=len(wanted))
         for w in range(len(wanted)):
             var i = wanted[w]
-            if from_right[i] and right_whole:
-                built.append(other.columns[source_at[i]].only().copy())
-            elif from_right[i]:
-                built.append(
-                    take_any(other.columns[source_at[i]].only(), pairs.right_at)
-                )
-            elif pair_with[i] >= 0:
-                built.append(
-                    take_pair(
-                        self.columns[source_at[i]].only(),
-                        other.columns[pair_with[i]].only(),
-                        pairs.left_at,
-                        pairs.right_at,
-                    )
-                )
-            elif left_whole:
-                built.append(self.columns[source_at[i]].only().copy())
-            else:
-                built.append(
-                    take_any(self.columns[source_at[i]].only(), pairs.left_at)
-                )
+            built.append(slots[w].take())
             kept.append(Field(fields[i].name, fields[i].dtype))
 
         var out = Self(Schema(kept^), built^)
