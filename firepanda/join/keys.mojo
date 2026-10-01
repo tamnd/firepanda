@@ -337,6 +337,24 @@ lets more than half its rows through, so a sieve that turns out useless costs on
 chunk in sixty four rather than every row.
 """
 
+comptime DIRECT_SIEVE_SPAN = 1 << 17
+"""The narrowest table indexed by key value that gets a sieve in front of it.
+
+The direct table is four bytes a slot, so a span this wide is half a megabyte,
+which is past a core's L2 on most machines this runs on, and a probe row whose
+key the build side does not hold still costs a miss on a slot that answers
+nothing. A bit per slot is a thirty second of that and stays in L1 to well past
+a million slots. TPC-H q8 is the shape: thirteen hundred steel parts out of two
+hundred thousand, an eight hundred kilobyte table, and six million lines, all
+but one in a hundred and fifty of which miss. On a shared six core box the
+probe was most of the join and the slot load was most of the probe. Below this
+span the table is in cache already and a bit test in front of it is one more
+load on every row.
+
+Whether the build side fills little enough of its span for a sieve to turn most
+rows away is `SIEVE_SHARE`, as it is for the hashed route.
+"""
+
 comptime PROBE_MORSEL_ROWS = 1 << 16
 """Probe rows a worker takes at a time.
 
@@ -1040,6 +1058,14 @@ struct BuildSide(Movable):
     var span: Int
     """How many slots or bits `seats` has, or zero."""
 
+    var bits: Buffer
+    """The direct route's sieve, a bit per slot, or an empty buffer.
+
+    The hashed route keeps its sieve in `seats`, where the direct route keeps
+    its slots, so the direct route's has a field of its own. It covers the same
+    `span` values from the same `base`. See `DIRECT_SIEVE_SPAN`.
+    """
+
     var base: UInt64
     """The bits of the key value that indexes slot zero, or zero.
 
@@ -1095,6 +1121,7 @@ struct BuildSide(Movable):
         self.direct = direct
         self.seats = seats^
         self.span = span
+        self.bits = Buffer(0)
         self.base = base
         self.table = table^
         self.reps = reps^
@@ -1114,6 +1141,7 @@ struct BuildSide(Movable):
         self.direct = False
         self.seats = Buffer(0)
         self.span = 0
+        self.bits = Buffer(0)
         self.base = UInt64(0)
         self.table = HashTable(0, DEFAULT_SEED)
         self.reps = List[StringView]()
@@ -1208,9 +1236,15 @@ def build_side[
         )
         var plan = direct_plan[dt](build, max(ceiling, SIEVE_SPAN))
         if plan.span >= 0 and plan.span <= ceiling:
-            return _build_direct[dt](
+            var direct = _build_direct[dt](
                 build, build_at, plan.span, plan.base, codes
             )
+            if (
+                plan.span >= DIRECT_SIEVE_SPAN
+                and len(build) * SIEVE_SHARE <= plan.span
+            ):
+                direct.bits = _sieve[dt](build, plan.span, plan.base)
+            return direct^
         var built = _build_hashed[dt](build, build_at, codes)
         # Worth keeping when most of the range is values the build side does
         # not hold, and only when the bits are no larger than the table they
@@ -1440,6 +1474,7 @@ def probe_side[
     if built.direct:
         _probe_direct[dt](
             built.seats,
+            built.bits,
             built.span,
             built.base.cast[dt](),
             built.miss,
@@ -1470,6 +1505,7 @@ def _probe_direct[
     dt: DType
 ](
     seats: Buffer,
+    bits: Buffer,
     span: Int,
     base: Scalar[dt],
     miss: UInt32,
@@ -1480,8 +1516,13 @@ def _probe_direct[
 ) raises:
     """Reads a table indexed by the key value, once per probe row.
 
+    With a sieve, each morsel asks the bits first and stops asking them after
+    the first chunk where more than half its rows got through, the same rule
+    `_probe_sieved` follows and for the same reason.
+
     Args:
         seats: The table's slots.
+        bits: A bit per slot that holds a key, or an empty buffer.
         span: How many slots it has.
         base: The value that indexes slot zero.
         miss: The ordinal for a row that matches nothing.
@@ -1522,8 +1563,50 @@ def _probe_direct[
                 miss if stored == 0 else stored - 1
             )
 
+    # A loop of its own rather than a test inside `look`, which is about four
+    # instructions a row and would carry the sieve's branch on every one of them
+    # for the joins that have no sieve.
+    def sift(start: Int, stop: Int) raises {mut codes, imm}:
+        var into = codes.unsafe_mut_ptr()
+        var reads = probe.unsafe_ptr()
+        var slots = seats.bitcast[DType.uint32]()
+        var words = bits.bitcast[DType.uint64]()
+        var sieving = True
+        var here = start
+        while here < stop:
+            var end = min(here + CHUNK_ROWS, stop)
+            var passed = 0
+            for i in range(here, end):
+                var to = probe_at + i
+                if probe_nulls and not probe.data.validity.get(i):
+                    into.unsafe_offset(to).unsafe_write(miss)
+                    continue
+                var at = Int(reads.unsafe_offset(i).unsafe_load()) - Int(base)
+                if at < 0 or at >= span:
+                    into.unsafe_offset(to).unsafe_write(miss)
+                    continue
+                if sieving:
+                    var word = words.unsafe_offset(at >> 6).unsafe_load()
+                    if (word >> UInt64(at & 63)) & 1 == 0:
+                        into.unsafe_offset(to).unsafe_write(miss)
+                        continue
+                    passed += 1
+                var stored = slots.unsafe_offset(at).unsafe_load()
+                into.unsafe_offset(to).unsafe_write(
+                    miss if stored == 0 else stored - 1
+                )
+            if sieving:
+                sieving = passed * 2 <= end - here
+            here = end
+
+    var sieved = len(bits) > 0
     if spread and probe_rows >= PARALLEL_PROBE_ROWS:
-        parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
+        if sieved:
+            parallel_morsels(sift, probe_rows, PROBE_MORSEL_ROWS)
+        else:
+            parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
+    elif sieved:
+        sift(0, probe_rows)
     else:
         look(0, probe_rows)
 
