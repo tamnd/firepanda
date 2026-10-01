@@ -26119,23 +26119,44 @@ class _GroupedWindow:
     answers are stacked under the group's key, as pandas stacks them.
     """
 
-    __slots__ = ("_args", "_grouped", "_kind", "_kwargs")
+    __slots__ = ("_args", "_grouped", "_kind", "_kwargs", "_selected")
 
-    def __init__(self, grouped: Any, kind: str, args: Any, kwargs: Any) -> None:
+    def __init__(
+        self, grouped: Any, kind: str, args: Any, kwargs: Any, selected: Any = None
+    ) -> None:
         self._grouped = grouped
         self._kind = kind
         self._args = args
         self._kwargs = kwargs
+        self._selected = selected
         if kind == "ewm" and kwargs.get("times") is not None:
             # The instants are checked against every row, and each group reads its own.
             getattr(grouped._source(), kind)(*args, **kwargs)
         else:
             getattr(grouped._source().iloc[:0], kind)(*args, **kwargs)
 
+    def __getitem__(self, key: Any) -> _GroupedWindow:
+        """The same window over one column, or a list of columns, of each group.
+
+        Raises:
+            KeyError: For a column the frame does not have, in pandas' words.
+        """
+        source = self._grouped._source()
+        if self._selected is not None or source.ndim == 1:
+            raise KeyError(f"Column not found: {key}")
+        for name in key if isinstance(key, list) else [key]:
+            if name not in source.columns:
+                raise KeyError(f"Column not found: {name}")
+        return _GroupedWindow(self._grouped, self._kind, self._args, self._kwargs, key)
+
     def __getattr__(self, name: str) -> Any:
-        from ._frame import Expanding, ExponentialMovingWindow, Rolling, Series
+        from ._frame import Expanding, ExponentialMovingWindow, Index, Rolling, Series
 
         kind = {"rolling": Rolling, "expanding": Expanding, "ewm": ExponentialMovingWindow}
+        source = self._grouped._source()
+        picks = self._selected is None and source.ndim == 2 and not name.startswith("_")
+        if picks and not hasattr(kind[self._kind], name) and name in source.columns:
+            return self[name]
         if name.startswith("_") or not hasattr(kind[self._kind], name):
             called = kind[self._kind].__name__ + "Groupby"
             raise AttributeError(f"'{called}' object has no attribute '{name}'")
@@ -26156,8 +26177,19 @@ class _GroupedWindow:
                 chosen = settings
                 if times is not None:
                     chosen = {**settings, "times": instants.loc[group.index]}
+                picked = self._selected
+                on = chosen.get("on")
+                if picked is not None and on is None:
+                    group = group[picked]
                 window = getattr(group, self._kind)(*self._args, **chosen)
-                return getattr(window, name)(*args, **kwargs)
+                if picked is None or on is None:
+                    return getattr(window, name)(*args, **kwargs)
+                # pandas labels a picked column's answer by the `on` instants in place of the rows.
+                answer = getattr(window[picked], name)(*args, **kwargs)
+                if answer.ndim == 2 and on in answer.columns:
+                    answer = answer.drop(columns=[on])
+                answer.index = Index(list(group[on]), name=on)
+                return answer
 
             return self._grouped._each_keyed(one)
 
@@ -27732,11 +27764,14 @@ class GroupByMixin[Answer]:
         closed: str | None = None,
         method: str = "single",
     ) -> _GroupedWindow:
-        """A rolling window over each group, labelled by the group and the row."""
+        """A rolling window over each group, labelled by the group and the row.
+
+        `win_type` is taken and left unused, as pandas leaves it: a window over
+        groups is never weighted there, and every row counts the same.
+        """
         settings = {
             "min_periods": min_periods,
             "center": center,
-            "win_type": win_type,
             "on": on,
             "closed": closed,
             "method": method,
