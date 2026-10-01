@@ -1505,6 +1505,33 @@ def test_a_sparse_filter_copies_scattered_rows_in_order() raises:
         assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
 
 
+def _dense_filter_agrees[dt: DType](share: UInt64) raises:
+    comptime ROWS = (1 << 18) + 13
+    var col = build[dt](ROWS, 0)
+    var mask = Array[DType.bool](ROWS)
+    var state = UInt64(777)
+    for i in range(ROWS):
+        state = state * 6364136223846793005 + 1442695040888963407
+        mask[i] = (state >> 33) % share != 0
+
+    var kept = filter_rows(col, mask)
+    var kept_twin = filter_scalar(col, mask)
+    assert_equal(len(kept), len(kept_twin), "kept row count")
+    for i in range(len(kept)):
+        assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
+def test_a_dense_filter_places_eight_rows_at_a_time_in_order() raises:
+    # Dropping one row in two, in eight and in a thousand, so a group of eight
+    # keeps anything from none to all of its rows, and every morsel ends with
+    # fewer than eight places left, which is where the group stops and the row
+    # at a time loop finishes.
+    for share in [UInt64(2), UInt64(8), UInt64(1000)]:
+        _dense_filter_agrees[DType.float64](share)
+        _dense_filter_agrees[DType.int32](share)
+        _dense_filter_agrees[DType.int8](share)
+
+
 def test_a_filter_past_the_split_of_a_narrow_dtype_skips_too() raises:
     # The block read is over the mask, which is a byte a row whatever the
     # column holds, but the fallback copy is as wide as the dtype and the
