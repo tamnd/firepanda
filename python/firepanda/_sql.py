@@ -12,6 +12,7 @@ without SQLAlchemy pandas refuses it too or only guesses at it.
 from __future__ import annotations
 
 import datetime
+import importlib
 import sqlite3
 import warnings
 from collections.abc import Iterator
@@ -413,7 +414,7 @@ def _column(values: list[Any]) -> Series:
     return Series(values, dtype=object)
 
 
-def _framed(rows: list[Any], names: list[str]) -> DataFrame:
+def _framed(rows: list[Any], names: list[str], dtype_backend: Any = NO_DEFAULT) -> DataFrame:
     """The rows of a result as a frame, one column at a time."""
     from ._frame import DataFrame, Series
 
@@ -423,7 +424,14 @@ def _framed(rows: list[Any], names: list[str]) -> DataFrame:
         )
     if not rows:
         return DataFrame({name: Series([], dtype=object) for name in names})
-    return DataFrame({name: _column([row[n] for row in rows]) for n, name in enumerate(names)})
+    if dtype_backend is NO_DEFAULT:
+        read = {name: _column([row[n] for row in rows]) for n, name in enumerate(names)}
+    else:
+        read = {
+            name: _backed_column([row[n] for row in rows], dtype_backend)
+            for n, name in enumerate(names)
+        }
+    return DataFrame(read)
 
 
 def _dated(frame: DataFrame, parse_dates: Any) -> DataFrame:
@@ -455,9 +463,14 @@ def _dated(frame: DataFrame, parse_dates: Any) -> DataFrame:
 
 
 def _wrapped(
-    rows: list[Any], names: list[str], index_col: Any, parse_dates: Any, dtype: Any
+    rows: list[Any],
+    names: list[str],
+    index_col: Any,
+    parse_dates: Any,
+    dtype: Any,
+    dtype_backend: Any = NO_DEFAULT,
 ) -> DataFrame:
-    frame = _framed(rows, names)
+    frame = _framed(rows, names, dtype_backend)
     if dtype:
         frame = frame.astype(dtype)
     frame = _dated(frame, parse_dates)
@@ -473,6 +486,7 @@ def _chunks(
     index_col: Any,
     parse_dates: Any,
     dtype: Any,
+    dtype_backend: Any = NO_DEFAULT,
 ) -> Iterator[DataFrame]:
     read = False
     while True:
@@ -484,19 +498,53 @@ def _chunks(
                 yield empty.astype(dtype) if dtype else empty
             return
         read = True
-        yield _wrapped(rows, names, index_col, parse_dates, dtype)
+        yield _wrapped(rows, names, index_col, parse_dates, dtype, dtype_backend)
 
 
 def _checked_backend(dtype_backend: Any) -> None:
     from ._pandas import _backend
 
-    if dtype_backend is NO_DEFAULT:
-        return
-    _backend(dtype_backend)
-    raise NotImplementedError(
-        f"dtype_backend={dtype_backend!r} reads each column into a masked or Arrow type,"
-        " which the SQL reader does not write yet"
-    )
+    if dtype_backend is not NO_DEFAULT:
+        _backend(dtype_backend)
+
+
+def _backed_column(values: list[Any], dtype_backend: str) -> Series:
+    """One column of a result in the type `dtype_backend` names, as pandas reads it.
+
+    The type comes from the Python values sqlite3 hands back, so whole numbers
+    with a gap are still whole. Under `"pyarrow"` text is Arrow's `string`,
+    which is what pyarrow makes of Python text, and a column of nothing but
+    gaps is text too, since pandas reads it as text before it moves it to
+    Arrow. Anything else is read as it is without a backend.
+    """
+    from ._arrowtyped import arrow_series
+
+    present = [value for value in values if value is not None]
+    if not present:
+        if dtype_backend == "numpy_nullable":
+            return _column(values)
+        kind = "str"
+    elif all(isinstance(value, bool) for value in present):
+        kind = "bool"
+    elif all(isinstance(value, int) and not isinstance(value, bool) for value in present):
+        kind = "int64" if all(-(2**63) <= value < 2**63 for value in present) else ""
+    elif all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in present):
+        kind = "float64"
+        values = [None if value is None else float(value) for value in values]
+    elif all(isinstance(value, str) for value in present):
+        kind = "str"
+    else:
+        kind = ""
+    if not kind:
+        return _column(values)
+    if dtype_backend == "numpy_nullable":
+        from ._frame import Series
+
+        nullable = {"bool": "boolean", "int64": "Int64", "float64": "Float64", "str": "string"}
+        return Series(values, dtype=nullable[kind])
+    pa = importlib.import_module("pyarrow")
+    arrow = {"bool": "bool", "int64": "int64", "float64": "double", "str": "string"}
+    return arrow_series(pa.array(values, type=pa.type_for_alias(arrow[kind])))
 
 
 def read_sql_query(
@@ -513,18 +561,19 @@ def read_sql_query(
     """The rows a query answers, as a frame, or as an iterator of frames with `chunksize`.
 
     Each column is typed the way pandas reads the Python values sqlite3 hands
-    back, `dtype` casts after that, `parse_dates` reads columns as instants
-    and `index_col` moves columns into the row labels.
+    back, `dtype_backend` reads them into nullable or Arrow types, `dtype`
+    casts after that, `parse_dates` reads columns as instants and `index_col`
+    moves columns into the row labels.
     """
     _checked_backend(dtype_backend)
     con = _connection(con)
     cursor = _execute(con, sql, params)
     names = [column[0] for column in cursor.description]
     if chunksize is not None:
-        return _chunks(cursor, chunksize, names, index_col, parse_dates, dtype)
+        return _chunks(cursor, chunksize, names, index_col, parse_dates, dtype, dtype_backend)
     rows = cursor.fetchall()
     cursor.close()
-    return _wrapped(rows, names, index_col, parse_dates, dtype)
+    return _wrapped(rows, names, index_col, parse_dates, dtype, dtype_backend)
 
 
 def read_sql(

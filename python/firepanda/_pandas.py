@@ -17414,6 +17414,7 @@ class DataFrameMixin(_Carries):
             or _sparse.sparse_dtype(wanted) is not None
             or _sparse.sparse_of(self[name]) is not None
             or type(wanted).__name__ == "ArrowDtype"
+            or _arrowtyped.arrow_type_of(self[name]) is not None
             or _is_period_type(wanted)
             or (_word(self[name].dtype) == "bool" and _named_dtype(wanted) == "string")
         }
@@ -17454,6 +17455,42 @@ class DataFrameMixin(_Carries):
             if texts is not None:
                 answer = answer.assign(**{name: Series(texts, dtype="str", index=answer.index)})
         return answer
+
+
+def _unarrowed(column: Any) -> Any:
+    """A column backed by Arrow in the type pandas reads its Arrow array into, or as it is.
+
+    A whole number with a gap is a float, text is `str` and a flag with a gap
+    is objects, as `DataFrame.from_arrow` reads a table.
+    """
+    from ._arrowtyped import _array
+    from ._frame import DataFrame
+
+    if _arrowtyped.arrow_type_of(column) is None:
+        return column
+    pa = importlib.import_module("pyarrow")
+    plain = DataFrame.from_arrow(pa.table({"values": _array(column)}))["values"]
+    return plain.set_axis(column.index).rename(column.name)
+
+
+def _unarrowed_cast(column: Any, dtype: Any, copy: Any, errors: Any) -> Any:
+    """A column backed by Arrow cast to a type that is not, the way pandas casts it.
+
+    Objects keep each value with `NA` in a gap, text writes each value with
+    NaN in a gap, and anything else casts what pandas reads the Arrow array
+    into.
+    """
+    from ._arrowtyped import arrow_text, arrow_values
+    from ._frame import Series
+
+    values = arrow_values(column._inner)
+    if _is_object_dtype(dtype):
+        cells = _objects.cells([NA if value is None else value for value in values], "N")
+        return Series(cells, dtype="str", index=column.index, name=column.name)
+    if _named_dtype(dtype) == "string":
+        cells = [math.nan if value is None else arrow_text(value) for value in values]
+        return Series(cells, dtype="str", index=column.index, name=column.name)
+    return _unarrowed(column)._astype(dtype, copy, errors)
 
 
 def _arrow_named(dtype: Any) -> Any:
@@ -20757,6 +20794,8 @@ class SeriesMixin(_Carries):
         masked = _masked.masked_name(dtype)
         if masked is not None:
             return _masked.as_masked(self, masked)
+        if _arrowtyped.arrow_type_of(self) is not None:
+            return _unarrowed_cast(self, dtype, copy, errors)
         if _masked.masked_of(self) and not _is_object_dtype(dtype):
             return _unmasked_cast(self, dtype, copy, errors)
         if _is_object_dtype(dtype):
@@ -35006,6 +35045,9 @@ def to_datetime(
         arg, origin = _moved_to_origin(arg, origin, unit), "unix"
     options = (errors, dayfirst, yearfirst, utc, format, exact, unit, origin)
     if isinstance(arg, SeriesMixin):
+        arg = _unarrowed(arg)
+        if _masked.masked_of(arg) is not None:
+            arg = _masked.plain(arg)
         return _instants(arg, *options)
     if isinstance(arg, str) or not hasattr(arg, "__iter__"):
         return _instants([arg], *options).tolist()[0]

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Read SQL into the dtype_backend types, and cast Arrow columns to plain types
+
+`read_sql`, `read_sql_query` and their chunks now take `dtype_backend` instead of refusing it. Each column is typed from the values sqlite3 hands back, so a whole number with a gap reads as `Int64` or `int64[pyarrow]` as in pandas, before `dtype` and `parse_dates` apply. An ArrowDtype column now casts to a numpy type, to `str` and to objects as pandas casts it, in `Series.astype` and `DataFrame.astype`, and `to_datetime` reads Arrow and nullable text with gaps. These used to fail on firepanda's internal cell text.
+
 ### Added: Read JSON lines a chunk at a time
 
 `read_json(lines=True, chunksize=n)` now hands back a `JsonReader`, as pandas does, instead of refusing. Each chunk is read from its own lines with labels that carry on from the chunk before, `read()` joins the rest, it works as a context manager, and `nrows` is checked before each chunk the way pandas checks it.
