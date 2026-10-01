@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: union_categoricals
+
+`api.types.union_categoricals` now puts categoricals, category columns and category indexes end to end, as pandas does. Matching categories keep the first one's order, different ones come in order of first appearance, `sort_categories` sorts them, `ignore_order` drops the order flag, and ordered categoricals that disagree, mixed category types and parts that are not categorical are refused in pandas' words. It used to refuse every call.
+
 ### Added: the older flat stack, DatetimeIndex bounds by text, and IntervalIndex from an index
 
 `DataFrame.stack(future_stack=False)` now stacks flat columns the older way, leaving out each missing value unless `dropna=False`, where it was refused. `DatetimeIndex.get_slice_bound` now reads a text label such as a day as pandas does on sorted labels. `IntervalIndex(index)` keeps the name and type of the index it is handed and reads only `closed` off the call, as pandas does.

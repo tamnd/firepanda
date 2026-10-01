@@ -579,9 +579,9 @@ def test_the_dtypes_firepanda_has_and_pandas_does_not(firepanda: ModuleType) -> 
     assert kinds.is_object_dtype("binary") is False
 
 
-def test_union_categoricals_refuses_rather_than_pretending(firepanda: ModuleType) -> None:
-    """There is no `Categorical` object for it to take, and it says that."""
-    with pytest.raises(NotImplementedError, match="Categorical"):
+def test_union_categoricals_wants_something_to_union(firepanda: ModuleType) -> None:
+    """An empty list is refused in pandas' words."""
+    with pytest.raises(ValueError, match="No Categoricals to union"):
         firepanda.api.types.union_categoricals([])
 
 

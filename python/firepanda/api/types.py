@@ -63,7 +63,7 @@ from decimal import Decimal
 from typing import Any
 
 from .._period import PeriodDtype
-from ..errors import DTypeError, UnsupportedError
+from ..errors import DTypeError, InvalidArgumentError
 
 __all__ = [
     "CategoricalDtype",
@@ -1263,20 +1263,63 @@ _INFERENCE: tuple[tuple[str, Any], ...] = (
 def union_categoricals(
     to_union: Any, sort_categories: bool = False, ignore_order: bool = False
 ) -> Any:
-    """Puts several categorical columns end to end over the union of their categories.
+    """Puts several categoricals end to end over the union of their categories, as pandas does.
+
+    Categoricals with the same categories keep the first one's order; otherwise
+    the categories are the ones seen, in order of first appearance.
 
     Args:
-        to_union: The columns.
-        sort_categories: Whether the resulting categories come back in order.
-        ignore_order: Whether an ordered column may be unioned with one that
-            orders its categories differently.
+        to_union: Categoricals, or category columns or indexes.
+        sort_categories: Whether the resulting categories come back sorted.
+        ignore_order: Whether ordered categoricals may be unioned however
+            their categories are ordered, giving an unordered result.
 
     Raises:
-        NotImplementedError: Always. firepanda stores a categorical column as an
-            Arrow dictionary and has no `Categorical` object for this to take or
-            hand back, so there is nothing here to union yet.
+        ValueError: For nothing to union, in pandas' words.
+        TypeError: For a part that is not categorical, categories of different
+            types, or ordered categoricals that disagree, in pandas' words.
     """
-    raise UnsupportedError(
-        "union_categoricals is not supported yet, because firepanda has no Categorical"
-        " object to union, only a category dtype on a column"
-    )
+    from .._categorical import Categorical
+
+    parts = [_categorical_part(item, Categorical) for item in to_union]
+    if not parts:
+        raise InvalidArgumentError("No Categoricals to union")
+    first = parts[0]
+    kind = str(first.categories.dtype)
+    if any(str(part.categories.dtype) != kind for part in parts):
+        raise DTypeError("dtype of categories must be the same")
+    values = [value for part in parts for value in part.tolist()]
+    labels = first.categories.tolist()
+    if all(_same_categories(first, part) for part in parts):
+        ordered = first.ordered
+        if sort_categories and not ignore_order and ordered:
+            raise DTypeError("Cannot use sort_categories=True with ordered Categoricals")
+    elif ignore_order or not any(part.ordered for part in parts):
+        ordered = False
+        seen = dict.fromkeys(label for part in parts for label in part.categories.tolist())
+        labels = list(seen)
+    elif all(part.ordered for part in parts):
+        raise DTypeError("to union ordered Categoricals, all categories must be the same")
+    else:
+        raise DTypeError("Categorical.ordered must be the same")
+    if sort_categories:
+        labels = sorted(labels)
+    return Categorical(values, categories=labels, ordered=ordered and not ignore_order)
+
+
+def _categorical_part(item: Any, categorical: type) -> Any:
+    """One part of a union as a `Categorical`, refusing anything that is not one."""
+    if isinstance(item, categorical):
+        return item
+    if str(getattr(item, "dtype", "")) == "category":
+        return categorical(item.tolist(), dtype=item.dtype)
+    raise DTypeError("all components to combine must be Categorical")
+
+
+def _same_categories(first: Any, other: Any) -> bool:
+    """Whether two categoricals' types are equal, with unordered categories in any order."""
+    if first.ordered != other.ordered:
+        return False
+    if first.ordered:
+        return first.categories.tolist() == other.categories.tolist()
+    return set(first.categories.tolist()) == set(other.categories.tolist())
