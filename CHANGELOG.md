@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Read JSON lines a chunk at a time
+
+`read_json(lines=True, chunksize=n)` now hands back a `JsonReader`, as pandas does, instead of refusing. Each chunk is read from its own lines with labels that carry on from the chunk before, `read()` joins the rest, it works as a context manager, and `nrows` is checked before each chunk the way pandas checks it.
+
 ### Fixed: Read into the dtype_backend types in read_parquet and read_feather
 
 `read_parquet`, `read_feather` and `read_orc` with `dtype_backend="numpy_nullable"` now give pandas' nullable types (`Int64`, `Float64`, `boolean`, `string`), and with `"pyarrow"` an `ArrowDtype` of each column's Arrow type, as pandas does. They used to keep Arrow's plain types. `read_parquet` also takes an empty `to_pandas_kwargs`. An index read under `"pyarrow"` still reads as plain types.
