@@ -759,10 +759,12 @@ class _Numbers:
 class _Column:
     """A typed column on its way to Arrow, and what is done to it once it is a column."""
 
-    def __init__(self, fmt: str, values: list[Any], after: Any = None) -> None:
+    def __init__(self, fmt: str, values: list[Any], after: Any = None, whole: bool = False) -> None:
         self.fmt = fmt
         self.values = values
         self.after = after
+        # Integers held as floats for a gap, which `dtype_backend` reads as integers.
+        self.whole = whole
 
 
 def _kind(dtype: Any) -> str:
@@ -848,7 +850,7 @@ def _inferred(
     if not values:
         return _Column("u", [])
     if not present:
-        return _Column("g", values)
+        return _Column("g", values, whole=True)
     try:
         integers = [None if value is None else numbers.to_int(value) for value in values]
     except ValueError:
@@ -859,7 +861,8 @@ def _inferred(
                 None if value is None or float(value) in fna else value for value in integers
             ]
         if any(value is None for value in integers):
-            return _Column("g", [None if value is None else float(value) for value in integers])
+            floats = [None if value is None else float(value) for value in integers]
+            return _Column("g", floats, whole=True)
         if numbers.nonnumeric:
             return _Column("g", [float(value) for value in integers])  # type: ignore[arg-type]
         low, high = min(integers), max(integers)  # type: ignore[type-var]
@@ -1094,6 +1097,9 @@ def _built(layout_rows: list[list[str]], plan: _Plan, o: _Options, start: int) -
     for name, column in zip(plan.names, columns, strict=True):
         if column.after is not None:
             frame[name] = frame[name].astype(column.after)
+    if o.backend:
+        whole = [name for name, column in zip(plan.names, columns, strict=True) if column.whole]
+        frame = _backed(frame, o.dtype_backend, whole)
     for name, converted in dated.items():
         frame[name] = converted
     if plan.index:
@@ -1267,6 +1273,49 @@ def read_csv(source: Any, values: dict[str, Any], separator: Any) -> Any:
         return frame
     o = _checked(values, separator)
     return _finished(_records(_text(source, o), o), o)
+
+
+# The nullable type pandas reads each column into under `dtype_backend="numpy_nullable"`.
+_NULLABLE = {
+    **{f"int{bits}": f"Int{bits}" for bits in (8, 16, 32, 64)},
+    **{f"uint{bits}": f"UInt{bits}" for bits in (8, 16, 32, 64)},
+    "float32": "Float32",
+    "float64": "Float64",
+    "bool": "boolean",
+    "str": "string",
+    "string": "string",
+}
+
+# The Arrow name of each type under `dtype_backend="pyarrow"`, where it is not the numpy one.
+_ARROW_NAMES = {"float32": "float", "float64": "double", "str": "string"}
+
+
+def _backed(frame: Any, backend: str, whole: list[str]) -> Any:
+    """The frame in the nullable or the Arrow types `dtype_backend` names.
+
+    The `whole` columns are integers held as floats for a gap, and come back as
+    integers. A column with every row a gap stays as it is, because a masked or an
+    Arrow column names its type in the values it holds and that one holds none. A
+    column of dates keeps its numpy type under either backend, as it does in pandas.
+    """
+    import pyarrow as pa
+
+    from ._arrowtyped import ArrowDtype
+
+    wanted: dict[str, Any] = {}
+    for name in frame.columns:
+        word = str(frame[name].dtype)
+        if frame[name].isna().all():
+            continue
+        if name in whole:
+            word = "int64"
+        elif word not in _NULLABLE:
+            continue
+        if backend == "numpy_nullable":
+            wanted[name] = _NULLABLE[word]
+        else:
+            wanted[name] = ArrowDtype(pa.type_for_alias(_ARROW_NAMES.get(word, word)))
+    return frame.astype(wanted) if wanted else frame
 
 
 def read_fwf(
