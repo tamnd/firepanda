@@ -2153,10 +2153,10 @@ def test_a_tall_side_against_a_sparse_short_side_pairs_in_one_pass() raises:
     to come out in left row order and in right row order within a left row, as
     the ordinary route gives them.
     """
-    for case in range(2):
-        var short_rows = 1_000 if case == 0 else 20_000
-        var tall_rows = 300_000 if case == 0 else 400_000
-        var apart = 300 if case == 0 else 100
+    for shape in range(2):
+        var short_rows = 1_000 if shape == 0 else 20_000
+        var tall_rows = 300_000 if shape == 0 else 400_000
+        var apart = 300 if shape == 0 else 100
         var small = Array[DType.int64](short_rows)
         for i in range(short_rows):
             small[i] = Int64((i // 3 * 2 + i % 3 % 2) * apart)
