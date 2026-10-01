@@ -21,6 +21,9 @@ A patch release. On the SQL side, `count(*)` counts the rows without building a 
 ### Changed: count(DISTINCT x) counts codes, not strings
 
 A string column held as codes now reaches a reduction as codes when the only thing the reduction does with it is count its distinct values, and stacking pieces of one coded column keeps the codes rather than decoding them. Before, the scan decoded every morsel and the count hashed every string. On ClickBench at 1M rows, `SELECT COUNT(DISTINCT SearchPhrase) FROM hits` went from 43.2 ms to 2.9 ms on a loaded machine.
+### Changed: List a sparse filter's kept rows and prefetch them
+
+A filter morsel that keeps fewer than one row in eight now lists the rows it keeps first and then copies them with a prefetch sixteen rows ahead, where before it copied each kept row as it found it in the mask and waited on a cache miss for nearly every one. A microbenchmark keeping one row in eighty went from 1.40 to 1.43 ms to 0.60 to 0.72 ms. Over three interleaved rounds on a shared six core box, best of fifteen, q14 at scale factor one went from 14.6 to 20.0 ms to 13.2 to 14.6 ms, with the other queries inside the noise.
 
 ### Changed: Pair a tall side against a sparse short side in one pass
 
