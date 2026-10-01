@@ -2278,6 +2278,13 @@ def _dropped(wanted: Any, held: Any, errors: str) -> list[str]:
     return [text for _, text in names if text in there]
 
 
+def _drop_keys(index: Any, rows: Any) -> list[Any]:
+    """The row keys a drop names, where a tuple on a MultiIndex is one key, as in pandas."""
+    if isinstance(rows, tuple) and getattr(index, "nlevels", 1) > 1:
+        return [rows]
+    return _sequence(rows)
+
+
 def _sequence(value: Any) -> list[Any]:
     """One label or a sequence of them, as a list either way.
 
@@ -13357,7 +13364,7 @@ class DataFrameMixin(_Carries):
         else:
             answer = self._reindex(
                 labels=None,
-                index=self.index.drop(_sequence(rows), errors),
+                index=self.index.drop(_drop_keys(self.index, rows), errors=errors),
                 columns=None,
                 axis=None,
                 method=None,
@@ -14543,7 +14550,8 @@ class DataFrameMixin(_Carries):
             return False
         if not _same_values(_raw_labels(self).to_series(), _raw_labels(other).to_series()):
             return False
-        return all(_same_values(self[name], other[name]) for name in _shown_names(self))
+        width = len(_shown_names(self))
+        return all(_same_values(self.iloc[:, at], other.iloc[:, at]) for at in range(width))
 
     def to_pickle(
         self,
@@ -15981,7 +15989,11 @@ class DataFrameMixin(_Carries):
                     kind = ""
                 if kind:
                     left, right = _cast_to(left, kind), _cast_to(right, kind)
-            columns[name] = _combine_cast(func(left, right), kind)
+            combined = func(left, right)
+            if type(combined).__name__ == "ndarray":
+                # A numpy function such as np.minimum hands back an array.
+                combined = type(left)(list(combined), index=left.index, name=left.name)
+            columns[name] = _combine_cast(combined, kind)
         answer = DataFrame(columns) if columns else this.reset_index(drop=True)
         return _with_row_labels(answer, index.tolist()).rename_axis(index.name)
 
@@ -19037,7 +19049,7 @@ class SeriesMixin(_Carries):
         if not self.index.is_unique:
             return _settled(self, _rows_dropped(self, rows, errors), inplace)
         kept = self._reindex(
-            index=self.index.drop(_sequence(rows), errors),
+            index=self.index.drop(_drop_keys(self.index, rows), errors=errors),
             axis=None,
             method=None,
             copy=NO_DEFAULT,
@@ -28882,6 +28894,39 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         The group is named after its key, as pandas names it.
         """
         return self._applied(func, args, kwargs)
+
+    def nlargest(self, n: int = 5, keep: Any = "first") -> Series:
+        """Each group's `n` largest values, on the key and the label, as pandas has them."""
+        return self.apply(lambda group: group.nlargest(n, keep=keep))
+
+    def nsmallest(self, n: int = 5, keep: Any = "first") -> Series:
+        """Each group's `n` smallest values, on the key and the label, as pandas has them."""
+        return self.apply(lambda group: group.nsmallest(n, keep=keep))
+
+    @property
+    def is_monotonic_increasing(self) -> Series:
+        """Whether each group's values never fall, one flag a group."""
+        return self.apply(lambda group: group.is_monotonic_increasing)
+
+    @property
+    def is_monotonic_decreasing(self) -> Series:
+        """Whether each group's values never rise, one flag a group."""
+        return self.apply(lambda group: group.is_monotonic_decreasing)
+
+    def unique(self) -> Series:
+        """Each group's distinct values in order of appearance, one list a group."""
+        from ._frame import Series
+
+        held: list[list[Any]] = []
+
+        def one(group: Series) -> int:
+            held.append(group.unique().tolist())
+            return len(held) - 1
+
+        places = self.apply(one)
+        return Series(
+            [held[place] for place in places.tolist()], index=places.index, name=self._column
+        )
 
     def corr(self, other: Any, method: Any = "pearson", min_periods: Any = None) -> Any:
         """Each group's correlation with `other`, lined up on the labels."""
