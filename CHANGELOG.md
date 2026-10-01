@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.38] - 2026-10-01
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. On the SQL side, `count(*)` counts the rows without building a column, `count(DISTINCT x)` over a coded text column counts codes rather than strings (ClickBench q5 at 1M rows from 43.2 ms to 2.9 ms), joins pair a tall side against a sparse short side in one pass and sieve a sparse direct table, and the statements gain `SET`, `RESET`, `PRAGMA`, `PREPARE` and `EXECUTE`, `PIVOT` without an IN list, and `DataFrame.sql` and `firepanda.sql` over the frames in scope. On the pandas side it fills in much of the long tail: `resample` over periods, zones, weeks to years and with origin and offset, `CategoricalIndex` and `IntervalIndex` as real index classes, MultiIndex lookups, unstacking and arithmetic by level, pivot tables with margins and several keys, group by reductions with skipna, min_count and numeric_only, quantiles and modes across rows, `ewm` with times, the masked `string` type and masked indexes, and pandas' own refusals and warnings where it refuses or warns.
+
 ### Changed: count(DISTINCT x) counts codes, not strings
 
 A string column held as codes now reaches a reduction as codes when the only thing the reduction does with it is count its distinct values, and stacking pieces of one coded column keeps the codes rather than decoding them. Before, the scan decoded every morsel and the count hashed every string. On ClickBench at 1M rows, `SELECT COUNT(DISTINCT SearchPhrase) FROM hits` went from 43.2 ms to 2.9 ms on a loaded machine.
