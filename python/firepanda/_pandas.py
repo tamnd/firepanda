@@ -7754,6 +7754,9 @@ def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
         return ("gather", _row_positions(index, key))
     if isinstance(key, IndexMixin):
         return ("gather", _row_positions(index, key._inner.to_list()))
+    if isinstance(key, SeriesMixin):
+        # A column that is not a mask is read for its values, which are labels.
+        return ("gather", _row_positions(index, key.tolist()))
     if isinstance(key, tuple) and any(_level_pick(part) for part in key):
         # A key with a slice or a list for some level is pandas' `get_locs`,
         # which picks level by level rather than looking up one label.
@@ -15626,6 +15629,15 @@ class DataFrameMixin(_Carries):
                 # Two frames align on both axes, and the rows read the other
                 # frame's by one level, a missing label standing as a gap.
                 other = _spread_on_level(other, self.index, level)
+            elif (
+                isinstance(other, DataFrameMixin)
+                and _is_multi(other.index)
+                and not _is_multi(self.index)
+            ):
+                # The same read the other way round: these rows spread onto the
+                # other frame's, and the two then align as frames do.
+                spread = _spread_on_level(self, other.index, level)
+                return spread._named(other, op, axis, None, fill_value, flip)
             elif isinstance(other, (DataFrameMixin, SeriesMixin)):
                 _no_level(level)
         other = _listed_frame_operand(self, other, number)
@@ -17371,6 +17383,21 @@ class DataFrameMixin(_Carries):
                 columns = labels
 
         value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
+
+        numbers = _SIGNED | _UNSIGNED | _FLOATING
+        if (
+            isinstance(value, str)
+            and index is not None
+            and columns is None
+            and level is None
+            and method is None
+            and self.columns.is_unique
+            and any(_word(kind) in numbers for kind in self.dtypes.tolist())
+        ):
+            # Text put beside numbers makes an object column, which a column answers.
+            return DataFrame(
+                {name: self[name].reindex(index, fill_value=value) for name in self.columns}
+            )
 
         inner = self._inner
         try:
@@ -21264,6 +21291,14 @@ class SeriesMixin(_Carries):
         index = _written_index(index, _is_multi(self.index))
         if _reindex_here(self, index, method):
             return _reindex_by_position(self, index, method, value, limit, tolerance, asked)
+        if isinstance(value, str) and _word(self.dtype) in _SIGNED | _UNSIGNED | _FLOATING:
+            # Text put beside numbers makes an object column in pandas.
+            plain = self._reindex(asked, None, None, copy, None, None, None, None)
+            new = [at < 0 for at in self.index.get_indexer(plain.index)]
+            whole = int if _word(self.dtype) in _SIGNED | _UNSIGNED else float
+            # The gaps widened whole numbers to floats on the way, and they go back.
+            cells = [value if gap else whole(cell) for gap, cell in zip(new, plain, strict=True)]
+            return Series(cells, index=plain.index, name=self.name, dtype="object")
         try:
             inner = self._inner.reindex(_core_labels(index, self.index), value, True)
             if isinstance(index, IndexMixin):
@@ -21500,6 +21535,8 @@ class DatetimeMixin:
         """
         from ._frame import Series
 
+        if kind == "strftime":
+            arg = _c_composites(arg)
         try:
             return Series._wrap(_gap_part(self._series._inner.temporal_part(kind, arg)))
         except Exception as error:
@@ -27795,7 +27832,8 @@ class GroupByMixin[Answer]:
                 taken = taken.mask(gone, float("nan"))
             else:
                 taken = taken.mask(gone)
-            out = out.assign(**{name: taken})
+            # Set rather than assigned, since a column name need not be text.
+            out[name] = taken
         if backward:
             out = out.iloc[::-1]
         out = out.set_index(label).rename_axis(self._frame.index.name)
@@ -33092,6 +33130,26 @@ def _concat_categories(frames: list[DataFrame], name: str) -> bool:
     return True
 
 
+# The C library's composite directives, which pandas hands to strftime and the
+# kernel does not read, written out in the pieces the kernel does read. These
+# are the C locale's spellings, which is the locale pandas formats in.
+_C_COMPOSITES: dict[str, str] = {
+    "r": "%I:%M:%S %p",
+    "c": "%a %b %e %H:%M:%S %Y",
+    "x": "%m/%d/%y",
+    "X": "%H:%M:%S",
+}
+
+
+def _c_composites(date_format: Any) -> Any:
+    """A strftime format with the C library's composite directives written out."""
+    if not isinstance(date_format, str) or "%" not in date_format:
+        return date_format
+    return re.sub(
+        r"%([%rcxX])", lambda m: _C_COMPOSITES.get(m[1], "%%"), date_format
+    )
+
+
 def _unit_of(printed: str) -> str:
     """The unit of an instant or span type, or empty text for any other type."""
     if not printed.startswith(("datetime64[", "timedelta64[")):
@@ -35472,6 +35530,9 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     if column is not None and _word(column.dtype).startswith("timedelta"):
         return column
     values = column.tolist() if column is not None else list(arg)
+    if _is_numpy(arg) and arg.dtype.kind in "iuf":
+        # An array of numbers hands out numpy scalars, and a count is a Python number.
+        values = arg.tolist()
     spans = [read(value, False) for value in values]
     present = [value for value in values if not _missing(value)]
     texts = any(isinstance(value, str) for value in present)
