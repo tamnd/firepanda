@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: zoned rounding policies, MultiIndex fill limits and drops by level
+
+`Timestamp.round`, `floor` and `ceil` on a zoned moment now step the wall clock and put the zone back through `tz_localize`, as pandas does, so `ambiguous` and `nonexistent` settle a step onto a repeated or missing hour and the default raises there. `MultiIndex.get_indexer` takes `limit` with a pad or backfill, `Series.reindex` fills along a MultiIndex, and `Series.drop` and `DataFrame.drop` take `level`, with pandas' errors for a label the level lacks and for flat labels.
+
 ### Added: column picks on a window over groups
 
 A rolling, expanding or exponentially weighted window over groups now takes a column or a list of columns, by subscript or by attribute, as pandas does. A picked column of a rolling window ordered by `on` is labelled by the group and the `on` instants, as in pandas, and `win_type` on `GroupBy.rolling` is taken and left unused, since pandas never weights a window over groups.

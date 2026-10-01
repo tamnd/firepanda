@@ -1208,15 +1208,12 @@ class MultiIndex:
             raise NotImplementedError(
                 "method='nearest' not implemented yet for MultiIndex; see GitHub issue 9365"
             )
-        if limit is not None:
-            raise NotImplementedError(
-                "limit= is not supported yet on a MultiIndex, because it counts the rows"
-                " filled across"
-            )
         if not self.is_unique:
             raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
         if method in ("ffill", "pad", "bfill", "backfill"):
-            return self._filled_indexer(target, method in ("bfill", "backfill"))
+            backward = method in ("bfill", "backfill")
+            found = self._filled_indexer(target, backward)
+            return found if limit is None else self._limited(target, found, method, limit)
         if method is not None:
             raise InvalidArgumentError(
                 f"Invalid fill method. Expecting pad (ffill), backfill (bfill) or nearest."
@@ -1249,6 +1246,44 @@ class MultiIndex:
             else:
                 found.append(bisect.bisect_right(rows, row) - 1)
         return _array(found, "int64")
+
+    def _limited(self, target: Any, found: Any, method: str, limit: int) -> Any:
+        """A fill indexer with at most `limit` inexact rows filled from each row of this index.
+
+        pandas walks the target in order and counts the rows that took a row of
+        this index without matching it, from the left for a pad and from the right
+        for a backfill, so the target has to be in order for the count to mean
+        anything.
+
+        Raises:
+            ValueError: For a target out of order, or a limit below one, in pandas' words.
+        """
+        wanted = target.tolist() if isinstance(target, MultiIndex) else _list(target)
+        if any(later < earlier for earlier, later in itertools.pairwise(wanted)):
+            raise InvalidArgumentError(
+                f"limit argument for {method!r} method only well-defined if index and"
+                " target are monotonic"
+            )
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            raise InvalidArgumentError("Limit must be an integer")
+        if limit < 1:
+            raise InvalidArgumentError("Limit must be greater than 0")
+        rows = self.tolist()
+        places = list(found)
+        order = (
+            range(len(places) - 1, -1, -1)
+            if method in ("bfill", "backfill")
+            else range(len(places))
+        )
+        filled: dict[int, int] = {}
+        for at in order:
+            row = int(places[at])
+            if row < 0 or rows[row] == wanted[at]:
+                continue
+            filled[row] = filled.get(row, 0) + 1
+            if filled[row] > limit:
+                places[at] = -1
+        return _array(places, "int64")
 
     def get_indexer_for(self, target: Any) -> Any:
         """The position of every target row, taking every match when this index repeats."""
@@ -1452,8 +1487,10 @@ class MultiIndex:
         if level is not None:
             number = self._level_number(level)
             gone_codes = {self._code_of(number, key) for key in keys} - {None}
-            if not gone_codes and errors == "raise":
-                raise KeyError(f"labels {keys} not found in level")
+            missing = [key for key in keys if self._code_of(number, key) is None and key == key]
+            if missing and errors == "raise":
+                # pandas names every label its level lacks, even when another one is found.
+                raise KeyError(f"labels {missing} not found in level")
             return self._taken(
                 [at for at, c in enumerate(self._codes[number]) if c not in gone_codes]
             )

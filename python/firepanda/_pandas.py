@@ -2167,6 +2167,30 @@ def _axis_name(owner: Any, value: Any) -> str | None:
     return _one_name(value)
 
 
+def _level_kept(axis: Any, labels: Any, level: Any, errors: str) -> list[int]:
+    """The positions a drop by one level of a MultiIndex keeps, as pandas' `_drop_axis` finds them.
+
+    Labels unique as a whole go through `MultiIndex.drop`, which raises when no
+    row holds any of the labels, and repeated labels are matched on the level's
+    values, which raises in pandas' other words.
+
+    Raises:
+        AssertionError: For an axis that is not a MultiIndex, in pandas' words.
+        KeyError: For labels no row holds on the level, unless errors is ignore.
+    """
+    from ._multi import MultiIndex
+
+    if not isinstance(axis, MultiIndex):
+        raise AssertionError("axis must be a MultiIndex")
+    wanted = _sequence(labels)
+    if axis.is_unique:
+        return [int(at) for at in axis.get_indexer(axis.drop(wanted, level=level, errors=errors))]
+    found = list(axis.get_level_values(level).isin(wanted))
+    if errors == "raise" and not any(found):
+        raise KeyError(f"{wanted} not found in axis")
+    return [at for at, hit in enumerate(found) if not hit]
+
+
 def _dropping(labels: Any, axis: Any, index: Any, columns: Any, owner: str) -> tuple[Any, Any]:
     """Works out which axis a drop was aimed at, the way pandas works it out.
 
@@ -2521,7 +2545,13 @@ def _reindex_target(owner: Any, target: Any) -> Any:
 
 
 def _reindex_by_position(
-    owner: Any, target: Any, method: str | None, value: Any, limit: Any, tolerance: Any
+    owner: Any,
+    target: Any,
+    method: str | None,
+    value: Any,
+    limit: Any,
+    tolerance: Any,
+    asked: Any = None,
 ) -> Any:
     """The owner on new row labels, found by position here rather than by the core.
 
@@ -2530,14 +2560,22 @@ def _reindex_by_position(
     neighbour and can match instants, and then hands the core a count from zero
     to reindex on, with the one past the end standing for a label not found. The
     core still decides what a missing row holds and how a column widens for it.
+    `asked` is the target as the caller gave it, before a `MultiIndex` was written
+    as text, which is what a fill along a `MultiIndex` reads.
     """
     from ._frame import DataFrame, Series
+    from ._multi import MultiIndex
 
     labels = _reindex_target(owner, target)
     own = owner.index.tolist()
-    places = _reindex_positions(
-        own, labels.tolist(), method, limit, tolerance, _word(owner.index.dtype)
-    )
+    if isinstance(owner.index, MultiIndex) and method is not None:
+        # Rows of a MultiIndex are filled in tuple order, which the index answers itself.
+        rows = target if asked is None else asked
+        places = [int(at) for at in owner.index.get_indexer(rows, method, limit, tolerance)]
+    else:
+        places = _reindex_positions(
+            own, labels.tolist(), method, limit, tolerance, _word(owner.index.dtype)
+        )
     count = len(own)
     counted = owner.reset_index(drop=True)._inner
     wanted = [place if place >= 0 else count for place in places]
@@ -13266,9 +13304,15 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame
 
         inplace = _flag("inplace", inplace)
-        _no_level(level)
         _ignore_or_raise(errors)
         rows, names = _dropping(labels, axis, index, columns, "DataFrame")
+        if level is not None:
+            answer = self
+            if rows is not None:
+                answer = answer.iloc[_level_kept(self.index, rows, level, errors)]
+            if names is not None:
+                answer = answer.iloc[:, _level_kept(self.columns, names, level, errors)]
+            return _settled(self, answer.copy(), inplace)
         if rows is None:
             answer = self.copy()
         elif not self.index.is_unique:
@@ -17096,10 +17140,11 @@ class DataFrameMixin(_Carries):
                 levelled = _reindex_level(DataFrame._wrap(inner), index, level, method, value)
                 if levelled is not None:
                     return levelled
+            asked = index
             index = _written_index(index, _is_multi(self.index))
             if index is not None and _reindex_here(self, index, method):
                 return _reindex_by_position(
-                    DataFrame._wrap(inner), index, method, value, limit, tolerance
+                    DataFrame._wrap(inner), index, method, value, limit, tolerance, asked
                 )
             if index is not None:
                 inner = inner.reindex(_core_labels(index, self.index), value)
@@ -18945,11 +18990,13 @@ class SeriesMixin(_Carries):
         `axis=1` is a different matter and raises, with pandas' own sentence.
         """
         inplace = _flag("inplace", inplace)
-        _no_level(level)
         _ignore_or_raise(errors)
         rows, _ = _dropping(labels, axis, index, columns, "Series")
         if rows is None:
             return _settled(self, self.copy(), inplace)
+        if level is not None:
+            kept = self.iloc[_level_kept(self.index, rows, level, errors)]
+            return _settled(self, kept.copy(), inplace)
         if not self.index.is_unique:
             return _settled(self, _rows_dropped(self, rows, errors), inplace)
         kept = self._reindex(
@@ -20909,9 +20956,10 @@ class SeriesMixin(_Carries):
             levelled = _reindex_level(self, index, level, method, value)
             if levelled is not None:
                 return levelled
+        asked = index
         index = _written_index(index, _is_multi(self.index))
         if _reindex_here(self, index, method):
-            return _reindex_by_position(self, index, method, value, limit, tolerance)
+            return _reindex_by_position(self, index, method, value, limit, tolerance, asked)
         try:
             inner = self._inner.reindex(_core_labels(index, self.index), value, True)
             if isinstance(index, IndexMixin):

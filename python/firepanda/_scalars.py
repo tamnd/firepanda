@@ -393,56 +393,6 @@ def _zone_words(ambiguous: Any, nonexistent: Any) -> None:
         raise InvalidArgumentError(_NONEXISTENT_REFUSAL)
 
 
-def _zone_policies(ambiguous: Any, nonexistent: Any, live: bool) -> None:
-    """Refuses the two daylight saving policies, telling a typo from a gap.
-
-    Both of them need the zone's transition table, which is firepanda#349, so
-    nothing but the default is answered here either way. Which class the refusal
-    carries still matters, because the two ways of being wrong send a reader to
-    two different places. A value pandas takes and firepanda has not written is a
-    schedule, and it comes back `NotImplementedError` pointing at the issue. A
-    value pandas does not take either is a typo, and pandas answers that with a
-    `ValueError` naming the words that would have worked, so this does too.
-    Telling somebody who misspelled `shift_forward` that firepanda has not got
-    round to their spelling sends them to the changelog instead of to their own
-    line.
-
-    `live` is whether pandas looks at these arguments at all on this call, and it
-    is measured rather than reasoned about. `tz_localize` always looks, even when
-    it is handed None and even when the moment already carries a zone, so it
-    checks the words with `_zone_words` on every call and then answers the
-    policies itself. The rounding family only looks when the moment is already zoned,
-    and hands a naive one straight back with a misspelling in its arguments
-    unread, so it passes whether there is a zone. Checking anyway would be
-    firepanda refusing input pandas accepts, which is the direction of difference
-    this library does not get to have.
-
-    The scalar checks `ambiguous` and the column version in `_pandas.py`
-    deliberately does not, because that is what the two of them do. pandas
-    validates the word on `Timestamp` and does not validate it on `.dt` at all,
-    where three and a misspelling both come back with an answer.
-
-    Args:
-        ambiguous: The fold policy.
-        nonexistent: The gap policy.
-        live: Whether pandas reads these arguments on this call.
-
-    Raises:
-        InvalidArgumentError: If either is not in its vocabulary.
-        UnsupportedError: If either is anything but `raise`.
-    """
-    if not live:
-        return
-    _zone_words(ambiguous, nonexistent)
-    for name, given in (("ambiguous", ambiguous), ("nonexistent", nonexistent)):
-        if given != "raise":
-            raise UnsupportedError(
-                f"{name}= is not supported yet, because choosing a side of a"
-                " daylight saving change needs the zone transition table,"
-                " which is firepanda#349"
-            )
-
-
 def _period(freq: Any) -> int:
     """Turns a pandas frequency string into a length in nanoseconds.
 
@@ -1147,23 +1097,25 @@ class Timestamp(_datetime.datetime):
         """Rounds against the local clock rather than against the instant.
 
         A zoned moment rounds on the wall clock, which is what makes midnight in
-        Paris the floor of a Paris afternoon rather than an hour before it, so the
-        offset comes off before the step and goes back on afterwards.
+        Paris the floor of a Paris afternoon rather than an hour before it. As in
+        pandas, the zone comes off, the wall clock is stepped, and the zone goes
+        back on through `tz_localize`, so a step onto a repeated or a missing wall
+        time is settled by `ambiguous` and `nonexistent`.
 
         Returns:
             The moment, moved.
 
         Raises:
-            NotImplementedError: If either of the zone policies is asked for,
-                since both of them need the zone database the kernel does not
-                have.
+            InvalidArgumentError: If either zone policy is not a word pandas takes,
+                or if a step lands on a repeated or missing wall time under `raise`.
         """
-        _zone_policies(ambiguous, nonexistent, self.tzinfo is not None)
         period = _period(freq)
-        offset = self.utcoffset()
-        shift = 0 if offset is None else int(offset.total_seconds() * 1_000_000_000)
-        moved = _stepped(self._total + shift, period, mode) - shift
-        return type(self)._from_nanos(moved, self.unit, self.tzinfo)
+        if self.tzinfo is None:
+            return type(self)._from_nanos(_stepped(self._total, period, mode), self.unit, None)
+        _zone_words(ambiguous, nonexistent)
+        wall = self.tz_localize(None)
+        stepped = type(self)._from_nanos(_stepped(wall._total, period, mode), self.unit, None)
+        return stepped.tz_localize(self.tzinfo, ambiguous=ambiguous, nonexistent=nonexistent)
 
     # Deliberately not the signature `datetime.replace` has. pandas takes None
     # here to mean leave the field alone, where the standard library takes a
