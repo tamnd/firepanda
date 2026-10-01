@@ -11,6 +11,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Changed: Pair a tall side against a hashed sparse short side in one pass
 
 The one pass pairing of a tall side against a short one now also covers a short side whose keys are too spread for a direct table and land in a hashed one with a sieve. A left row that passes the sieve looks its key up in the hash table and skips the row when it is not there. Before, such a join fell back to writing an ordinal for every left row and reading that list twice more. Over three interleaved rounds on a shared six core box, best of fifteen, q12 at scale factor one went from 26.1 to 32.8 ms to 18.3 to 32.2 ms, q3 from 51.3 to 62.7 ms to 43.2 to 72.2 ms and q10 from 51.0 to 95.6 ms to 42.3 to 68.7 ms, on a box loaded enough that the spread is wide and the best runs say more than the worst.
+
 ### Changed: List a sparse filter's kept rows and prefetch them
 
 A filter morsel that keeps fewer than one row in eight now lists the rows it keeps first and then copies them with a prefetch sixteen rows ahead, where before it copied each kept row as it found it in the mask and waited on a cache miss for nearly every one. A microbenchmark keeping one row in eighty went from 1.40 to 1.43 ms to 0.60 to 0.72 ms. Over three interleaved rounds on a shared six core box, best of fifteen, q14 at scale factor one went from 14.6 to 20.0 ms to 13.2 to 14.6 ms, with the other queries inside the noise.
