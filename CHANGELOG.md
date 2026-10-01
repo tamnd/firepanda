@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: read_xml refuses storage_options with a handle
+
+`read_xml` given a buffer and `storage_options` now raises pandas' ValueError, as it already did for a local path, instead of ignoring the options.
+
 ### Fixed: pyarrow type names in constructors, and the string type in read_csv
 
 `Series`, `DataFrame` and `pd.array` now take a `dtype` such as `"int64[pyarrow]"` or `"double[pyarrow]"`. Before, they raised "data type not understood", while `astype` already took these names. `read_csv` and `read_xml` with `dtype="string"` or `StringDtype()` now read pandas' masked string type, not plain `str`. A frame's repr pads the header of a `double[pyarrow]` column the way pandas pads any number column.
