@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: An index sorted with a NaN, searchsorted, numpy instants, tight mappings, record arrays and isna on arrays
+
+An index sorted with a NaN keeps the NaN where it used to answer a null. `searchsorted` with several values answers a numpy array like pandas. A list of numpy `datetime64` values builds a series or index of instants. Dropping a row level on the columns keeps the column axis name. `from_dict(orient="tight")` honours `index_names` and `column_names` and builds levels from tuple labels, and `from_records` on a numpy record array takes its column names and types from the fields, reading every row whatever `nrows` says. `isna` and `notna` on a list or a numpy array answer a numpy array of flags, and the second entry of `DataFrame.axes` is the column labels as an index.
+
 ### Fixed: NaN in a float sort key, a fill value against a single operand, and intervals beside a gap
 
 A NaN in a float column is now missing to `sort_values` on a series, a frame and an index, and to `sort_index`, so it sits last whichever way the sort runs and moves to the front when `na_position="first"` asks. The core orders a NaN as the largest number, so a float key holding one is sorted with its NaN held as a gap. The flexible operators (`add`, `mul`, `lt` and the rest) on a series or frame now fill its missing values with `fill_value` before meeting a single value, as pandas does, and meet the fill instead when that value is itself missing. A categorical of whole number intervals with a gap among its values lists them as floats, as pandas does.
