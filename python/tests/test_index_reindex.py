@@ -34,13 +34,13 @@ def test_the_labels_asked_for_come_back_with_where_they_sit(firepanda):
     got, where = made(firepanda).reindex([30, 10])
     want, theirs_where = theirs().reindex([30, 10])
     assert list(got) == list(want)
-    assert where == list(theirs_where)
+    assert where.tolist() == list(theirs_where)
 
 
 def test_a_label_the_index_does_not_have_sits_nowhere(firepanda):
     got, where = made(firepanda).reindex([10, 99])
     assert list(got) == [10, 99]
-    assert where == [0, -1]
+    assert where.tolist() == [0, -1]
 
 
 def test_an_index_asked_for_itself_has_nothing_to_move(firepanda):
@@ -58,7 +58,7 @@ def test_asking_for_no_labels_answers_a_lookup_of_no_positions(firepanda):
     # by listing no positions rather than by leaving the list out.
     got, where = made(firepanda).reindex([])
     assert len(got) == 0
-    assert where == []
+    assert where.tolist() == []
     _, theirs_where = theirs().reindex([])
     assert list(theirs_where) == []
 
@@ -79,7 +79,7 @@ def test_an_index_handed_in_keeps_its_own_name(firepanda):
 def test_a_label_asked_for_twice_is_looked_up_twice(firepanda):
     got, where = made(firepanda).reindex([20, 20])
     assert list(got) == [20, 20]
-    assert where == [1, 1]
+    assert where.tolist() == [1, 1]
 
 
 def test_a_repeated_label_in_the_index_is_refused(firepanda):

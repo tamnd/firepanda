@@ -44,15 +44,17 @@ def test_an_unnamed_index_names_its_column_zero(firepanda):
     assert list(got.columns) == list(pd.Index([1, 2]).to_frame().columns) == [0]
 
 
-def test_duplicated_answers_a_list_of_bools(firepanda):
+def test_duplicated_answers_numpy_bools(firepanda):
     got = repeats(firepanda).duplicated()
     want = repeats(pd).duplicated()
-    assert got == list(want) == [False, False, True, False, True, False]
+    assert got.tolist() == list(want) == [False, False, True, False, True, False]
 
 
 @pytest.mark.parametrize("keep", ["first", "last", False])
 def test_duplicated_settles_the_ties_the_way_it_is_told_to(firepanda, keep):
-    assert repeats(firepanda).duplicated(keep=keep) == list(repeats(pd).duplicated(keep=keep))
+    assert repeats(firepanda).duplicated(keep=keep).tolist() == list(
+        repeats(pd).duplicated(keep=keep)
+    )
 
 
 @pytest.mark.parametrize("keep", ["first", "last", False])

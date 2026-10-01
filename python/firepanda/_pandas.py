@@ -30088,6 +30088,41 @@ def _temporal_insert(index: Any, loc: int, item: Any) -> Any:
     return index[:at].append([one, index[at:]])
 
 
+def _numpy_out(values: Any, kind: str) -> Any:
+    """A list of flags or positions as the numpy array pandas answers, anything else as it is."""
+    if not isinstance(values, list):
+        return values
+    numpy = _numpy()
+    return numpy.array(values, dtype=bool if kind == "flags" else numpy.intp)
+
+
+def _answers(*kinds: str) -> Any:
+    """Turns what a method answers into numpy arrays, one kind per part of the answer.
+
+    pandas answers flags and positions on an index as numpy arrays, so the
+    method is written over lists and the numpy array is made on the way out. A
+    single kind is the whole answer, and several kinds are the parts of a tuple,
+    with "" for a part left as it is.
+    """
+
+    def wrap(method: Any) -> Any:
+        @functools.wraps(method)
+        def answered(*args: Any, **kwargs: Any) -> Any:
+            answer = method(*args, **kwargs)
+            if len(kinds) == 1:
+                return _numpy_out(answer, kinds[0])
+            if not isinstance(answer, tuple):
+                return answer
+            return tuple(
+                _numpy_out(part, kind) if kind else part
+                for part, kind in zip(answer, kinds, strict=True)
+            )
+
+        return answered
+
+    return wrap
+
+
 class IndexMixin:
     """The hand written half of `Index`."""
 
@@ -30251,6 +30286,8 @@ class IndexMixin:
         from ._frame import Index
 
         made: Any = type(self) if self._temporal else Index
+        # A numpy array of positions or flags, or a numpy number, reads as what it holds.
+        key = key.tolist() if _is_numpy(key) else _plain(key)
         try:
             if isinstance(key, bool):
                 raise TypeError("cannot index an index with a bool; pass a list of them")
@@ -30696,6 +30733,7 @@ class IndexMixin:
             return slice(found[0], found[-1] + 1, None)
         return hits
 
+    @_answers("positions")
     def get_indexer(
         self,
         target: Any,
@@ -30735,6 +30773,7 @@ class IndexMixin:
         except Exception as error:
             raise translate(error) from None
 
+    @_answers("positions")
     def get_indexer_for(self, target: Any) -> list[int]:
         """Where each of a set of labels sits, on any index.
 
@@ -30746,6 +30785,7 @@ class IndexMixin:
             return self.get_indexer(target)
         return self.get_indexer_non_unique(target)[0]
 
+    @_answers("positions", "positions")
     def get_indexer_non_unique(self, target: Any) -> tuple[list[int], list[int]]:
         """Every position of each label asked for, and which labels were not there.
 
@@ -30777,6 +30817,7 @@ class IndexMixin:
                 absent.append(at)
         return found, absent
 
+    @_answers("", "positions", "positions")
     def join(
         self,
         other: Any,
@@ -31045,6 +31086,7 @@ class IndexMixin:
                 return Timedelta(value)
         return value
 
+    @_answers("positions")
     def asof_locs(self, where: Any, mask: Any) -> list[int]:
         """For each label of `where`, the position of the last label at or before it.
 
@@ -31164,7 +31206,8 @@ class IndexMixin:
         made, positions = answer
         if picked is not None and positions is not None:
             positions = self.get_indexer(target, picked, limit, tolerance)
-        return Index._wrap(made), None if positions is None else list(positions)
+        listed = None if positions is None else list(positions)
+        return Index._wrap(made), _numpy_out(listed, "positions")
 
     def to_numpy(
         self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT, **kwargs: Any
@@ -31336,12 +31379,11 @@ class IndexMixin:
             return _temporal_searched(self, value, side, sorter)
         return _searched(self._inner, value, side, sorter)
 
+    @_answers("flags")
     def isin(self, values: Any, level: Any = None) -> Any:
         """Whether each label is one of a set of values.
 
-        pandas gives back a numpy array of bools and this gives back a list of
-        them, which is the divergence `values` and `__eq__` already have and
-        which document 21 records once for all three.
+        The answer is a numpy array of bools, as pandas answers it.
 
         A set the column's type cannot hold falls back to comparing in Python,
         and that is not a shortcut. pandas compares by value rather than by type,
@@ -31448,9 +31490,9 @@ class IndexMixin:
         if self._temporal:
             # The core looks up counts, so instants and spans are found by position here.
             found, missing = self.get_indexer_non_unique(list(wanted))
-            if missing and errors == "raise":
+            if len(missing) and errors == "raise":
                 raise KeyError(f"{[wanted[at] for at in missing]} not found in axis")
-            return self.delete([at for at in found if at != -1])
+            return self.delete([int(at) for at in found if at != -1])
         wanted = [self._number_as_labels(label) for label in wanted]
         try:
             return Index._wrap(self._inner.drop(wanted, errors))
@@ -31637,12 +31679,11 @@ class IndexMixin:
             hold_freq(made, self._freq)
         return made
 
+    @_answers("flags")
     def isna(self) -> Any:
         """Whether each label is missing.
 
-        pandas gives back a numpy array of bools and this gives back a list of
-        them, which is the divergence `values`, `__eq__` and `isin` already have
-        and which document 21 records once for all of them.
+        The answer is a numpy array of bools, as pandas answers it.
 
         Most indexes answer a list of `False`, because a range has no missing
         label and neither has an index read from a list with nothing missing in
@@ -31654,6 +31695,7 @@ class IndexMixin:
         """Whether each label is missing. The older spelling of `isna`."""
         return self.isna()
 
+    @_answers("flags")
     def notna(self) -> Any:
         """Whether each label is present, which is `isna` turned over."""
         return self.to_series().notna().tolist()
@@ -31743,6 +31785,7 @@ class IndexMixin:
         made = self.to_series().to_frame(wanted)
         return made if index else _answered(made.reset_index(drop=True))
 
+    @_answers("flags")
     def duplicated(self, keep: Any = "first") -> Any:
         """Which labels repeat one that an earlier label already carries."""
         return self.to_series().duplicated(keep=keep).tolist()
@@ -31751,6 +31794,7 @@ class IndexMixin:
         """The labels with the repeated ones removed, by a chosen rule."""
         return self._like(self.to_series().drop_duplicates(keep=keep))
 
+    @_answers("", "positions")
     def sort_values(
         self,
         *,
@@ -31765,9 +31809,7 @@ class IndexMixin:
         invention here: `return_indexer` decides whether the caller gets the
         sorted index or a pair of it and the permutation that made it.
 
-        The permutation is a list of numbers where pandas gives a numpy array,
-        which is the shape `duplicated` and the `isna` family already answer in
-        and is document 41 section 5's note rather than a new one.
+        The permutation is a numpy array of positions, as pandas answers it.
         """
         from ._frame import Series
 
@@ -31805,6 +31847,7 @@ class IndexMixin:
             raise translate(error) from None
         return self._like(ordered), found.tolist()
 
+    @_answers("positions")
     def argsort(self, *args: Any, **kwargs: Any) -> Any:
         """The positions that would put the labels in order.
 

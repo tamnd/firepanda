@@ -70,24 +70,24 @@ def test_labels_of_the_wrong_length_are_refused(firepanda):
 
 def test_isna_finds_the_missing_label(firepanda):
     got = gappy(firepanda).isna()
-    assert got == list(gappy(pd).isna()) == [False, False, True, False]
-    assert gappy(firepanda).isnull() == got
+    assert got.tolist() == list(gappy(pd).isna()) == [False, False, True, False]
+    assert gappy(firepanda).isnull().tolist() == got.tolist()
 
 
 def test_notna_is_isna_turned_over(firepanda):
     got = gappy(firepanda).notna()
-    assert got == list(gappy(pd).notna()) == [True, True, False, True]
-    assert gappy(firepanda).notnull() == got
+    assert got.tolist() == list(gappy(pd).notna()) == [True, True, False, True]
+    assert gappy(firepanda).notnull().tolist() == got.tolist()
 
 
 def test_an_index_with_nothing_missing_says_so(firepanda):
-    assert whole(firepanda).isna() == [False] * 4
-    assert whole(firepanda).notna() == [True] * 4
+    assert whole(firepanda).isna().tolist() == [False] * 4
+    assert whole(firepanda).notna().tolist() == [True] * 4
 
 
 def test_a_range_has_no_missing_label(firepanda):
     frame = firepanda.DataFrame({"a": [1, 2, 3]})
-    assert frame.index.isna() == [False, False, False]
+    assert frame.index.isna().tolist() == [False, False, False]
 
 
 def test_dropna_takes_the_missing_label_out(firepanda):
@@ -182,4 +182,4 @@ def test_the_door_is_open_on_a_datetime_index_too(firepanda):
     assert index.to_series().dtype == index.dtype == "datetime64[us]"
     assert index.to_series().tolist() == index.tolist()
     assert index.nunique() == theirs.nunique() == 2
-    assert index.isna() == [False, False]
+    assert index.isna().tolist() == [False, False]

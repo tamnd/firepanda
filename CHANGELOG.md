@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Flags and positions on an index are numpy arrays
+
+`Index.isin`, `isna`, `notna`, `isnull`, `notnull`, `duplicated`, `argsort`, `get_indexer`, `get_indexer_for`, `get_indexer_non_unique` and `asof_locs`, and the positions `sort_values(return_indexer=True)`, `join(return_indexers=True)` and `reindex` answer beside an index, are numpy arrays of bools or positions where they were lists, as pandas answers them. An index also takes a numpy array or a numpy number as a key.
+
 ### Fixed: Replacing in objects, axes named by an index key, and frames beside numpy grids
 
 `replace` on a column of python objects matches value by value, a None put in by a mapping turns the column into objects that keep the None as pandas does, and a numpy scalar to replace is read as the value it holds. `loc` and `reindex` name the labels they answer after an index key, and `loc` takes an index, a series or an array of column names. A frame meets a two dimensional numpy array cell by cell, refusing a shape that does not match in pandas' words, and numpy reads a frame as its grid through `__array__`.

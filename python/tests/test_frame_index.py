@@ -225,8 +225,8 @@ def test_isin_answers_one_bool_per_label(firepanda: ModuleType) -> None:
 
     mine = firepanda.Index([10, 20, 30])
     them = pd.Index([10, 20, 30])
-    assert mine.isin([30, 10]) == list(them.isin([30, 10]))
-    assert mine.isin([]) == list(them.isin([]))
+    assert mine.isin([30, 10]).tolist() == list(them.isin([30, 10]))
+    assert mine.isin([]).tolist() == list(them.isin([]))
 
 
 @needs_pandas
@@ -236,7 +236,7 @@ def test_isin_is_not_bothered_by_a_value_it_could_never_hold(firepanda: ModuleTy
 
     mine = firepanda.Index([10, 20])
     them = pd.Index([10, 20])
-    assert mine.isin(["a", 20]) == list(them.isin(["a", 20]))
+    assert mine.isin(["a", 20]).tolist() == list(them.isin(["a", 20]))
 
 
 def test_verify_integrity_checks_the_new_labels(firepanda: ModuleType) -> None:
