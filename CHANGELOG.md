@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: read_csv and read_json read into the dtype_backend types
+
+`read_csv(dtype_backend="numpy_nullable")` now reads integers, floats, booleans and text into `Int64`, `Float64`, `boolean` and `string`, and `dtype_backend="pyarrow"` reads them into `int64[pyarrow]`, `double[pyarrow]`, `bool[pyarrow]` and `string[pyarrow]`, as pandas does. An integer column with a gap stays whole under either backend instead of turning into floats, and dates keep their numpy type. `read_json` takes `dtype_backend` too, running `convert_dtypes` over what it read as pandas does. `astype` also accepts an Arrow name such as `int64[pyarrow]` as well as an `ArrowDtype`.
+
 ### Fixed: Read mapping columns by key and keep the pandas step after a clock change
 
 A frame built from a mapping whose columns are mappings now reads each one as row label to value, the rows being every key in the order first seen and a missing key a gap, as pandas does. With rows named the mappings are read by those labels, and a mapping beside a list is refused in pandas' words. tz_convert and tz_localize on a frame or a series give the moved labels the step the index method gives them, so a day moved to another clock no longer shows the old frequency. reindex with level= on an inner level of a MultiIndex keeps the rows in the order they stand, as pandas does.

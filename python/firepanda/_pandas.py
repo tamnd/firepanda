@@ -17397,9 +17397,9 @@ class DataFrameMixin(_Carries):
                         "Only a column name can be used for the key in a dtype"
                         f" mappings argument. '{one}' not found in columns."
                     )
-            asked = {_names.held(one): wanted for one, wanted in dtype.items()}
+            asked = {_names.held(one): _arrow_named(wanted) for one, wanted in dtype.items()}
         else:
-            asked = dict.fromkeys(self._inner.names(), dtype)
+            asked = dict.fromkeys(self._inner.names(), _arrow_named(dtype))
         decided = {
             name: wanted
             for name, wanted in asked.items()
@@ -17453,6 +17453,26 @@ class DataFrameMixin(_Carries):
             if texts is not None:
                 answer = answer.assign(**{name: Series(texts, dtype="str", index=answer.index)})
         return answer
+
+
+def _arrow_named(dtype: Any) -> Any:
+    """A name such as `int64[pyarrow]` as the `ArrowDtype` it names, and anything else as it is.
+
+    `string[pyarrow]` stays a name, because it is pandas' string type kept in Arrow and
+    not an `ArrowDtype`.
+    """
+    if not isinstance(dtype, str) or type(dtype).__name__ == "ArrowDtype":
+        return dtype
+    if not dtype.endswith("[pyarrow]") or dtype == "string[pyarrow]":
+        return dtype
+    import pyarrow as pa
+
+    from ._arrowtyped import ArrowDtype
+
+    try:
+        return ArrowDtype(pa.type_for_alias(dtype[: -len("[pyarrow]")]))
+    except (KeyError, ValueError):
+        return dtype
 
 
 def _arrow_dtype(dtype: Any) -> Any:
@@ -20723,6 +20743,7 @@ class SeriesMixin(_Carries):
         from ._frame import Series
 
         strictly = _cast_keywords(copy, errors)
+        dtype = _arrow_named(dtype)
         if type(dtype).__name__ == "ArrowDtype":
             from ._arrowtyped import as_arrow
 
@@ -37355,8 +37376,7 @@ def read_json(
     Raises:
         ValueError: For the combinations pandas refuses, with its words.
         NotImplementedError: For `orient="table"`, `chunksize`, the pyarrow
-            engine, `dtype_backend` and remote files, and for columns pandas
-            would hold as objects.
+            engine and remote files, and for columns pandas would hold as objects.
     """
     import json
 
@@ -37378,11 +37398,15 @@ def read_json(
     for given, name in (
         (chunksize, "chunksize"),
         (storage_options, "storage_options"),
-        (None if dtype_backend is NO_DEFAULT else dtype_backend, "dtype_backend"),
         (None if engine == "ujson" else engine, "engine"),
     ):
         if given is not None:
             raise NotImplementedError(f"read_json: {name} is not supported yet")
+    if dtype_backend is not NO_DEFAULT and dtype_backend not in ("numpy_nullable", "pyarrow"):
+        raise InvalidArgumentError(
+            f"dtype_backend {dtype_backend} is invalid, only 'numpy_nullable' and"
+            " 'pyarrow' are allowed."
+        )
     if date_unit is not None:
         date_unit = date_unit.lower()
         if date_unit not in _JSON_UNITS:
@@ -37416,7 +37440,8 @@ def read_json(
         else:
             values = decoded
         data, kind, _ = _json_inferred(values, "data", options, dates=bool(convert_dates))
-        return _json_labelled(_json_series_of(data, kind, name), labels, options)
+        column = _json_labelled(_json_series_of(data, kind, name), labels, options)
+        return _json_backed(column, dtype_backend)
     if typ != "frame":
         raise ValueError(f"typ={typ!r} must be 'frame' or 'series'.")
     if not decoded:
@@ -37438,7 +37463,19 @@ def read_json(
         )
         data, kind, _ = _json_inferred(values, name, options, dates=dated)
         built[name] = _json_series_of(data, kind, name)
-    return _json_labelled(_json_named(DataFrame(built), names, options), labels, options)
+    frame = _json_labelled(_json_named(DataFrame(built), names, options), labels, options)
+    return _json_backed(frame, dtype_backend)
+
+
+def _json_backed(read: Any, dtype_backend: Any) -> Any:
+    """What `read_json` read, in the types `dtype_backend` names.
+
+    pandas runs `convert_dtypes` over what it read, so whole floats become
+    integers and dates become Arrow timestamps under `pyarrow`, and so does this.
+    """
+    if dtype_backend is NO_DEFAULT:
+        return read
+    return read.convert_dtypes(dtype_backend=dtype_backend)
 
 
 def _json_named(frame: DataFrame, names: list[Any], options: dict[str, Any]) -> DataFrame:
@@ -37562,7 +37599,8 @@ def read_csv(
         float_precision: None, `high`, `legacy` or `round_trip`, which all read a
             float the same way here.
         storage_options: Headers for a URL.
-        dtype_backend: Keep Arrow's types, through `firepanda.from_arrow`.
+        dtype_backend: Read into the nullable types, `numpy_nullable`, or into Arrow's,
+            `pyarrow`.
 
     Returns:
         The frame, or a `TextFileReader` for `iterator` or `chunksize`.
