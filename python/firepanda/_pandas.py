@@ -15900,7 +15900,7 @@ class DataFrameMixin(_Carries):
             return _folded_as_objects(read, kind, skipna)
         if kind == "count" and not names:
             # No columns still counts in whole numbers.
-            answer = answer.astype("int64")
+            answer = _over_no_columns(answer.astype("int64"), read)
         return read._voided(answer, skipna, min_count)
 
     def _whole(self, kind: str, param: float, skipna: bool, numeric_only: bool) -> Any:
@@ -16077,7 +16077,7 @@ class DataFrameMixin(_Carries):
         else:
             made = frame._per_column(kind, 0.0)
             if not frame._inner.names():
-                made = made.astype("bool")
+                made = _over_no_columns(made.astype("bool"), frame)
         if not folding:
             return made
         return made._truth(kind, 0, False, True)
@@ -35006,6 +35006,11 @@ def crosstab(
             rows = [*down, *[row for row in rows if row not in down]]
         if across is not None:
             names = _pivot_names([*across, *[n for n in names if n not in across]], "crosstab")
+    elif not several:
+        # pandas sorts the rows it keeps by the order of the categories.
+        down = _crosstab_categories(downs[0])
+        if down is not None:
+            rows = sorted(rows, key=lambda row: down.index(row) if row in down else len(down))
     table = {
         name: [
             _crosstab_cell(cells[row, name], printed, aggfunc)
@@ -35059,7 +35064,40 @@ def crosstab(
         labels = Index(rows, name=row_names[0])
     made = DataFrame({name: _readable(got) for name, got in table.items()}, index=labels)
     _hold_columns(made, column_names)
+    if not several and not margins:
+        _crosstab_category_axes(made, downs[0], acrosses[0])
     return made
+
+
+def _crosstab_category_axes(made: Any, down: Any, across: Any) -> None:
+    """Labels a crosstab's rows by a category key as categories, which is what pandas gives.
+
+    pandas labels the columns by a category key as categories too, and a frame
+    here names its columns rather than holding them as a column of their own,
+    so the column axis keeps the plain labels.
+    """
+    from ._category_index import CategoricalIndex
+
+    rows = _crosstab_categories(down)
+    if rows is not None:
+        made.index = CategoricalIndex(
+            made.index.tolist(), categories=rows, ordered=down.dtype.ordered, name=made.index.name
+        )
+
+
+def _over_no_columns(answer: Any, frame: Any) -> Any:
+    """A reduction of a frame with no columns, labelled by the frame's empty column axis.
+
+    pandas labels the answer with the columns it reduced, so a frame made from
+    nothing answers over an empty `RangeIndex` and its labels are whole numbers.
+    """
+    from ._range_index import RangeIndex
+
+    if not isinstance(frame.columns, RangeIndex):
+        return answer
+    from ._frame import Series
+
+    return Series([], dtype=answer.dtype, index=RangeIndex(0))
 
 
 def _crosstab_categories(piece: Any) -> list[Any] | None:

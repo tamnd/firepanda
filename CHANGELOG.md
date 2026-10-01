@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Reductions of an empty frame and crosstab rows by categories
+
+`any`, `all` and `count` on a frame made from nothing now answer over an empty `RangeIndex`, as pandas does, rather than over an empty index of text. `crosstab` with a category key on the rows labels them with a `CategoricalIndex` that keeps every category, and the rows it keeps follow the order of the categories. The column axis keeps plain labels, since a frame names its columns rather than holding them as categories.
+
 ### Fixed: mask alignment, regex replace by column, empty reductions, clip widening and crosstab categories
 
 `mask` turns a labelled condition over before lining it up, so rows and columns the condition does not name are replaced as in pandas. `replace` with a pattern and a text under the same column name and `regex=True` now replaces. `any`, `all` and `count` on a frame with no columns answer bool and int64. Clipping whole numbers by a run of bounds holding a gap or a fraction makes floats once a row is replaced. `crosstab(dropna=False)` on categorical keys shows every category. A column resampler's `agg` takes a mapping of names to reductions, `GroupBy.apply` leaves out the groups that answer None beside frames, and `union`, `difference` and `symmetric_difference` between an index of text and one of numbers answer objects in pandas' order.
