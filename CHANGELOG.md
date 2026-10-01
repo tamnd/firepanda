@@ -10,7 +10,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Changed: Let an inner join skip putting an exchanged pairing back in left row order
 
-`join` and `join_on` take `ordered=False`, which lets an inner join against a much taller right side come out in right row order, as a Polars join does by default. The join builds on the short left side either way, and putting the pairs back in left row order meant gathering every right column one cache miss a row. On TPC-H q2 at scale factor one, the join of 2,000 suppliers with 800,000 part supplies went from about 35 ms to about 26 ms on a shared six core box. The default stays the pandas order.
+`join` and `join_on` take `ordered=False`, which lets an inner join against a much taller right side come out in right row order, as a Polars join does by default. The join builds on the short left side either way, and putting the pairs back in left row order meant gathering every right column one cache miss a row. On TPC-H q2 at scale factor one, which joins 2,000 suppliers with 800,000 part supplies, the query went from about 35 ms to about 26 ms on a shared six core box, best of fifteen. The default stays the pandas order.
 
 ### Fixed: Group every category in pivot_table and keep names in a mixed concat
 
