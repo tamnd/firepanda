@@ -571,7 +571,9 @@ def _series_to_frame(column: object, name: object) -> DataFrame:
     """A column, as a frame of one column under a chosen name."""
     ...
 
-def _sql(query: str, names: list[str], frames: list[object]) -> DataFrame:
+def _sql(
+    query: str, names: list[str], frames: list[object], parameters: list[str], row: object
+) -> DataFrame:
     """Runs one SQL statement over the frames named for it."""
     ...
 

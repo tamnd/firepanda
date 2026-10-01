@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: parameters on firepanda.sql and DataFrame.sql
+
+`firepanda.sql("SELECT * FROM t WHERE a = ?", [2])` and `firepanda.sql("... WHERE a = $k", k=2)` take values for a statement's parameters in the three forms DuckDB has: `?` and `$1` from a list or a tuple, and `$name` from a dict or a keyword. A value is never written into the statement. The values go across as one row of a frame of their own, and each parameter reads its column, so a string passed for one comes back as the same string whatever it holds. A parameter with no value, a value with no parameter and a parameter in a call that passed no values are each refused with DuckDB's message. `DataFrame.sql` takes values the same way.
+
 ### Added: abs, minus and plus over columns of objects, and quantile of numbers beside moments
 
 `abs`, `-` and `+` now run over a column of objects value by value, so the sizes of complex numbers come back as float64, as pandas' complex128 gives, and other objects stay objects. `DataFrame.quantile` with `numeric_only=False` over numbers beside datetimes answers a column of objects holding each column's quantile, rather than refusing.
