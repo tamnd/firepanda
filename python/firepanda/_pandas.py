@@ -11915,6 +11915,13 @@ class DataFrameMixin(_Carries):
                 if levelled is None:
                     raise translate(error) from None
                 return levelled
+        if isinstance(key, slice):
+            # A slice picks rows, as in pandas: by position when it holds whole numbers,
+            # whatever the labels are, and by label otherwise.
+            ends = (key.start, key.stop, key.step)
+            if all(end is None or _whole_places(end) for end in ends):
+                return self.iloc[key]
+            return self.loc[key]
         try:
             if isinstance(key, (list, tuple)) and all(isinstance(k, str) for k in key):
                 return DataFrame._wrap(self._inner.select(list(key)))
@@ -30836,8 +30843,8 @@ class IndexMixin:
                 first, last = self._inner.slice_locs(start, end)
                 return (first, last)
             height = self._inner.length()
-            first = 0 if end is None else self._inner.get_slice_bound(end, "left")
-            last = height if start is None else self._inner.get_slice_bound(start, "right")
+            first = 0 if end is None else int(self.get_slice_bound(end, "left"))
+            last = height if start is None else int(self.get_slice_bound(start, "right"))
         except Exception as error:
             raise translate(error) from None
         first, last = last - 1, first - 1
@@ -31237,6 +31244,9 @@ class IndexMixin:
         period it names, so `df.loc["2020-01":"2020-02"]` runs from the first
         of January through the end of February.
         """
+        if step is not None and int(step) < 0:
+            # Read backwards, the labels come in walking order, which slice_locs answers.
+            return slice(*self.slice_locs(start, end, step), step)
         if self._temporal and self.is_monotonic_increasing:
             values = self.to_series()
             ends = [None if b is None else _temporal_bounds(values, b, True) for b in (start, end)]
