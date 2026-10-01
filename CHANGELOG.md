@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Pair a tall side against a sparse short side in one pass
+
+An inner join on one integer key, with no nulls, where the left side is at least sixteen times taller than the right and the right side's keys get a direct table with a sieve, now asks the table and emits its pairs in one walk of the left. The ordinary route wrote an ordinal for every left row and read that list twice more to count and emit the pairs, which on TPC-H q8 is three passes over 24 MB to keep about forty thousand pairs out of six million lines. The pairs come out in the same order as before. Over three interleaved rounds on a shared six core box, best of fifteen, q8 at scale factor one went from 21.3 to 28.8 ms to 18.8 to 21.7 ms, q17 from 7.5 to 7.7 ms to 5.5 to 6.3 ms and q9 from 119 to 129 ms to 106 to 115 ms.
+
 ### Changed: Gather a short join output's columns side by side
 
 A join whose output is a million rows or fewer now gathers its columns one per worker, where before each column was gathered across every worker in turn and the workers met at a barrier fourteen times on a q2 shaped join. A text column gathered into at least as many rows as it holds now shares its payload without first counting the bytes the gathered rows carry, since that count could only say to share it. TPC-H q2 at scale factor one, whose joined suppliers carry their names and comments eighty times over, went from 26.6 to 29.6 ms to 15.1 to 17.6 ms over three interleaved rounds on a shared six core box, best of fifteen, with the other joins unmoved.
