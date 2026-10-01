@@ -166,6 +166,14 @@ def _frequency(freq: Any) -> tuple[int, bool, str]:
             "date_range: freq is read from text or a timedelta for now, because an offset"
             " object is pandas' offsets namespace, which firepanda does not have"
         )
+    pieces = re.findall(r"(\d+)([A-Za-z]+)", freq)
+    joined = "".join(count + unit for count, unit in pieces)
+    fixed = all(unit in _NANOS and unit not in _CALENDAR for _, unit in pieces)
+    if len(pieces) > 1 and joined == freq.strip() and fixed:
+        # A step written in several units, as "1D20min", is their sum, a fixed length.
+        fine = min((unit for _, unit in pieces), key=_NANOS.__getitem__)
+        total = sum(int(count) * _NANOS[unit] for count, unit in pieces)
+        freq = f"{total // _NANOS[fine]}{fine}"
     found = re.fullmatch(r"\s*(-?\d+(?:\.\d*)?)?\s*([A-Za-z]+)(-[A-Za-z]+)?\s*", freq)
     unit = found.group(2) if found else ""
     if unit in _CALENDAR:

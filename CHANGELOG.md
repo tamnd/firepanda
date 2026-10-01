@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: dict operands, lists of arrays as a MultiIndex, compound steps and numpy ufuncs
+
+The flex operators such as `DataFrame.mul` take a dict, read by its keys along the columns or the rows. A list of lists or arrays given as `index=` or `columns=`, or assigned to `columns`, is a MultiIndex as pandas reads it. `date_range` takes a step written in several units, such as `1D20min`, and `DatetimeIndex` takes the `M8[ns]` spelling of its type. A numpy ufunc over a Series answers a Series on the same labels, which also lets `Series.transform` take numpy functions, and writing `pd.NA` into a column is writing a gap, as it is in pandas.
+
 ### Added: pandas.api.indexers, named aggregation, numpy arrays in factorize and unique
 
 `api.indexers` gives BaseIndexer, FixedForwardWindowIndexer, VariableOffsetWindowIndexer and check_array_indexer, and `rolling` takes an indexer and reduces each window it bounds. DataFrame.agg and Series.agg take named aggregations, factorize and unique take a numpy array and answer numpy arrays, set_option takes a dict, and a Timestamp reads month/day/year and year/month/day dates written with slashes.

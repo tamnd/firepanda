@@ -45,8 +45,13 @@ def _set_axis(owner: Any, labels: Any, axis: int) -> None:
     Raises:
         ValueError: For labels of another length than the axis.
     """
+    from ._pandas import _list_of_arrays
+
     if not hasattr(labels, "__len__"):
         labels = list(labels)
+    if _list_of_arrays(labels):
+        # pandas reads a list of arrays as the levels of a MultiIndex.
+        labels = MultiIndex.from_arrays([list(array) for array in labels])
     expected, given = _width(owner, axis), len(labels)
     if expected != given:
         raise ValueError(

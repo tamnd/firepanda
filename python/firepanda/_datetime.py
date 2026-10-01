@@ -81,7 +81,7 @@ def _asked_type(dtype: Any, tz: Any) -> tuple[str | None, Any]:
     """
     if dtype is None:
         return None, tz
-    found = re.fullmatch(r"datetime64\[(s|ms|us|ns)(?:, (.+))?\]", str(dtype))
+    found = re.fullmatch(r"(?:datetime64|M8|<M8)\[(s|ms|us|ns)(?:, (.+))?\]", str(dtype))
     if found is None:
         raise InvalidArgumentError(
             f"Unexpected value for 'dtype': '{dtype}'. Must be 'datetime64[s]', "
