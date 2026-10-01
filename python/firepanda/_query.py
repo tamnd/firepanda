@@ -400,7 +400,24 @@ def evaluate(
     resolvers: list[Mapping[str, Any]] | None,
     level: int,
 ) -> Any:
-    """The value of `expr`, or the frame with a column assigned for `c = ...`."""
+    """The value of `expr`, or the frame with a column assigned for `c = ...`.
+
+    Several lines are assignments read in turn, each seeing the columns the
+    lines before it made, as pandas reads them.
+    """
+    lines = [line.strip() for line in expr.splitlines()] if isinstance(expr, str) else []
+    lines = [line for line in lines if line]
+    if len(lines) > 1:
+        for line in lines:
+            answer, target = _evaluate(
+                frame, line, parser, engine, local_dict, global_dict, resolvers, level
+            )
+            if target is None:
+                raise InvalidArgumentError(
+                    "Multi-line expressions are only valid if all expressions contain an assignment"
+                )
+            frame = frame.assign(**{target: answer})
+        return frame
     answer, target = _evaluate(
         frame, expr, parser, engine, local_dict, global_dict, resolvers, level
     )

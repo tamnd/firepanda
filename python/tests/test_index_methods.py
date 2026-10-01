@@ -29,7 +29,7 @@ def agrees(got: Any, want: Any) -> None:
     """The same answer, an index or a column by labels, values, type and name."""
     if getattr(want, "ndim", 0) == 0:
         assert got == want
-        assert type(got) is type(want.item() if hasattr(want, "item") else want)
+        assert type(got) is type(want)
         return
     assert plain(got.tolist()) == plain(want.tolist())
     assert str(got.dtype).replace("string", "str") == str(want.dtype)

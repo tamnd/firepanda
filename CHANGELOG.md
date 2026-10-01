@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: statistics, positions and object conversions read as pandas
+
+`Series.corr`, `cov` and `autocorr` answer numpy's float64, `searchsorted` of one value answers numpy's int64, and `Index.all`, `any`, `argmax` and `argmin` of a numeric index answer numpy scalars, as pandas does. `convert_dtypes` now reads a column of objects by the kind pandas infers, so whole numbers become `Int64`, floats `Float64` or `Int64`, and text `string`, or `str` without `convert_string`. `DataFrame.eval` reads several assignment lines in turn, each seeing the columns the lines before it made.
+
 ### Changed: reductions and cells answer numpy scalars
 
 A reduction of a numeric or boolean Series, `any` and `all`, `argmax` and `argmin`, `count`, `kurt` and a cell read by `iloc`, `loc`, `at` or `iat` now answer numpy scalars of the column's type, as pandas does, so `type(s.sum())` is `numpy.int64` and `s.max()` of an int32 column is `numpy.int32`. `nunique`, text answers and `item` stay Python values. Operators, writes and pivot margins read numpy scalars back as plain numbers.
