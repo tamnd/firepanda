@@ -727,14 +727,19 @@ struct Pipeline(Movable):
         itself the work worth spreading: every chunk becomes a one row partial
         and the partials merge in order afterwards. Before, a line like this
         ran one chunk at a time on the calling thread, and a chunk no taller
-        than a morsel gave the kernel nothing to spread either, so ClickBench
-        q2, two sums and a count over a table read in row groups, ran on one
-        core.
+        than a morsel gave the kernel nothing to spread either. The reduction
+        decides, because only one that reads its values more than once gains
+        from having them in cache.
 
         Returns:
-            True if the first operator is a `Reduce`.
+            True if the first operator is a `Reduce` that says folding it
+            morsel by morsel pays.
         """
-        return len(self.operators) > 0 and self.operators[0].isa[Reduce]()
+        return (
+            len(self.operators) > 0
+            and self.operators[0].isa[Reduce]()
+            and self.operators[0][Reduce].folds_by_morsel()
+        )
 
     def _fold_at(self, lead: Int) -> Int:
         """Returns where a reduction the prefix can fold into sits, or -1.
