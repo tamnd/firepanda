@@ -260,11 +260,11 @@ def test_a_drop_takes_the_name_away() raises:
 def test_what_a_frame_cannot_hold_is_refused_by_name() raises:
     var dialect = Dialect()
     var catalog = Catalog()
-    with assert_raises(contains="PRIMARY KEY"):
-        _ = execute(dialect, "CREATE TABLE p(a INTEGER PRIMARY KEY)", catalog)
-    with assert_raises(contains="a table constraint"):
+    with assert_raises(contains="CHECK"):
+        _ = execute(dialect, "CREATE TABLE p(a INTEGER CHECK (a > 0))", catalog)
+    with assert_raises(contains="a CHECK or a FOREIGN KEY on a table"):
         _ = execute(
-            dialect, "CREATE TABLE p(a INTEGER, PRIMARY KEY (a))", catalog
+            dialect, "CREATE TABLE p(a INTEGER, CHECK (a > 0))", catalog
         )
     with assert_raises(contains="DEFAULT"):
         _ = execute(dialect, "CREATE TABLE p(a INTEGER DEFAULT 1)", catalog)

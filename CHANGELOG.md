@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: BEGIN, COMMIT and ROLLBACK
+
+`BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK` and `ABORT` now run over the catalog as DuckDB runs them. A rollback undoes every table, row and view the transaction changed. A statement that fails to parse or bind leaves the transaction going, and one that fails as it runs aborts it, after which every statement is refused until a `ROLLBACK`, and a `COMMIT` rolls back without a word. A `BEGIN` inside a transaction, an end with none, and a write in a `READ ONLY` transaction are refused with DuckDB's messages.
+
+### Added: PRIMARY KEY and UNIQUE
+
+`CREATE TABLE` now keeps a `PRIMARY KEY` or a `UNIQUE` on one column or on several, written on the column or on the table, and an `INSERT` that would repeat a key is refused with DuckDB's message: a clash with a row already there first, in the order the keys were declared, and then a clash between two new rows. A primary key's columns are `NOT NULL`, a `UNIQUE` key lets any number of rows through with a null in it, and a rollback keeps the keys with the table. A key on a column the table does not have, two primary keys and a column named twice in one key are refused as DuckDB refuses them. `CHECK` and `FOREIGN KEY` are still refused by name.
+
 ### Added: parameters on firepanda.sql and DataFrame.sql
 
 `firepanda.sql("SELECT * FROM t WHERE a = ?", [2])` and `firepanda.sql("... WHERE a = $k", k=2)` take values for a statement's parameters in the three forms DuckDB has: `?` and `$1` from a list or a tuple, and `$name` from a dict or a keyword. A value is never written into the statement. The values go across as one row of a frame of their own, and each parameter reads its column, so a string passed for one comes back as the same string whatever it holds. A parameter with no value, a value with no parameter and a parameter in a call that passed no values are each refused with DuckDB's message. `DataFrame.sql` takes values the same way.
