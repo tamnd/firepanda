@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: convert_dtypes keeps whole objects int64 without convert_integer
+
+A column of whole number objects with no gaps converted with `convert_integer=False` is now `int64`, since pandas infers the objects before converting, rather than `Float64`.
+
 ### Changed: statistics, positions and object conversions read as pandas
 
 `Series.corr`, `cov` and `autocorr` answer numpy's float64, `searchsorted` of one value answers numpy's int64, and `Index.all`, `any`, `argmax` and `argmin` of a numeric index answer numpy scalars, as pandas does. `convert_dtypes` now reads a column of objects by the kind pandas infers, so whole numbers become `Int64`, floats `Float64` or `Int64`, and text `string`, or `str` without `convert_string`. `DataFrame.eval` reads several assignment lines in turn, each seeing the columns the lines before it made.

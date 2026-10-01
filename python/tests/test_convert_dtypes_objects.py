@@ -10,6 +10,7 @@ import firepanda as fp
     [
         ([1, None], {}, "Int64"),
         ([1, None], {"convert_integer": False}, "Float64"),
+        ([1, 2], {"convert_integer": False}, "int64"),
         (["x", None], {}, "string"),
         (["x", None], {"convert_string": False}, "str"),
         (["x", 1], {}, "object"),
