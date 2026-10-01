@@ -145,7 +145,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 @pytest.mark.parametrize(
     "build",
     [
-        lambda m: m.to_numeric(m.Series(["1"]), dtype_backend="pyarrow"),
         lambda m: m.to_numeric(m.Series(["9223372036854775808"])),
         lambda m: m.to_numeric(m.Series(["18446744073709551616"])),
     ],

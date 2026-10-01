@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_numeric dtype_backend, align fill against a column, and concat levels
+
+`to_numeric` takes `dtype_backend="numpy_nullable"` and `"pyarrow"` and answers the nullable or arrow column of the kind it read, keeping whole numbers given as text and flags given in an object column as pandas does, and a nullable or arrow column now keeps its own family. `DataFrame.align` against a column fills every gap with `fill_value` and widens a moved whole number side as pandas does, `concat` takes `levels` beside `keys` and refuses a key its level lacks in pandas' words, `infer_dtype` names whole numbers beside NaN `integer-na` with `skipna=False`, and `Timestamp.to_numpy` and `Timedelta.to_numpy` refuse `copy=True` with pandas' messages.
+
 ### Added: zoned rounding policies, MultiIndex fill limits and drops by level
 
 `Timestamp.round`, `floor` and `ceil` on a zoned moment now step the wall clock and put the zone back through `tz_localize`, as pandas does, so `ambiguous` and `nonexistent` settle a step onto a repeated or missing hour and the default raises there. `MultiIndex.get_indexer` takes `limit` with a pad or backfill, `Series.reindex` fills along a MultiIndex, and `Series.drop` and `DataFrame.drop` take `level`, with pandas' errors for a label the level lacks and for flat labels.

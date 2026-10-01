@@ -1219,6 +1219,9 @@ def infer_dtype(value: object, skipna: bool = True) -> str:
             return name
     numeric = [item for item in values if is_integer(item) or is_float(item)]
     if len(numeric) == len(values):
+        # Whole numbers and NaN alone, kept with `skipna=False`, are pandas' integer-na.
+        if all(is_integer(item) or item != item for item in values):
+            return "integer-na"
         return "mixed-integer-float"
     if any(is_integer(item) for item in values):
         return "mixed-integer"

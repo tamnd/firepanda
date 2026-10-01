@@ -10418,18 +10418,20 @@ def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value
             _moved_to(this, rows, columns, fill_value),
             _moved_to(other, rows, columns, fill_value),
         )
+    if isinstance(other, DataFrame):
+        rows = _aligned_labels(this.index, other.index, join)
+        return _moved_to(this, rows, None, fill_value), _moved_to(other, rows, None, fill_value)
+    # Against a column pandas moves both sides with gaps and then fills every gap, so a
+    # gap either side already had is filled too and a moved whole number column widens.
     if mine_frame and number == 1:
         joined = _aligned_labels(_column_labels(this), other.index, join)
         columns = None if joined is None else joined.tolist()
-        return (
-            _moved_to(this, None, columns, fill_value),
-            _moved_to(other, joined, None, fill_value),
-        )
-    rows = _aligned_labels(this.index, other.index, join)
-    pair = _moved_to(this, rows, None, fill_value), _moved_to(other, rows, None, fill_value)
-    if mine_frame or isinstance(other, DataFrame) or fill_value is None:
+        pair = _moved_to(this, None, columns, None), _moved_to(other, joined, None, None)
+    else:
+        rows = _aligned_labels(this.index, other.index, join)
+        pair = _moved_to(this, rows, None, None), _moved_to(other, rows, None, None)
+    if fill_value is None:
         return pair
-    # Two columns are filled everywhere, so a gap each side already had goes too.
     return pair[0].fillna(fill_value), pair[1].fillna(fill_value)
 
 
@@ -33312,9 +33314,9 @@ def concat(
     first appear.
 
     `keys` put each part's key in front of its rows' labels as a MultiIndex
-    down the rows, and `names` names those levels. Keys across the columns and
-    `levels` are refused by name, as is anything whose answer is pandas' object
-    column. `copy` is accepted and does nothing, as in pandas 3.
+    down the rows, and `names` names those levels. `levels` gives the values and
+    order of the outer levels the keys fill. Anything whose answer is pandas'
+    object column is refused by name. `copy` is accepted and does nothing, as in pandas 3.
 
     Raises:
         InvalidArgumentError: For no parts, a `join` or `axis` pandas does not
@@ -33325,11 +33327,25 @@ def concat(
     from ._frame import DataFrame, Series
 
     parts, keys = _concat_parts(objs, keys)
-    if levels is not None or (names is not None and keys is None):
+    if keys is None and (levels is not None or names is not None):
         raise UnsupportedError(
             "concat(levels=) and concat(names=) without keys are not supported yet, because"
             " the levels are read from the keys"
         )
+    if levels is not None:
+        made = concat(
+            parts,
+            axis=axis,
+            join=join,
+            ignore_index=ignore_index,
+            keys=keys,
+            names=names,
+            verify_integrity=verify_integrity,
+            sort=sort,
+        )
+        across = CONCAT_AXES.get(axis) == 1
+        held = _with_levels(made.columns if across else made.index, levels)
+        return made.set_axis(held, axis=1 if across else 0)
     if keys is not None:
         if ignore_index:
             raise InvalidArgumentError(
@@ -33418,6 +33434,31 @@ def _parsed_number(value: Any, position: int, coerce: bool) -> int | float:
     if coerce:
         return math.nan
     raise ValueError(f'Unable to parse string "{text}" at position {position}')
+
+
+def _with_levels(held: Any, levels: Any) -> Any:
+    """The labels `concat` built from its keys, with the outer levels `levels` names.
+
+    The labels stay as they are, and each given level is the set and order their
+    codes point into, so a value the keys never used still sits in the level.
+
+    Raises:
+        InvalidArgumentError: For a key its given level does not hold, in pandas' words.
+    """
+    from ._frame import Index
+    from ._multi import MultiIndex
+
+    built_levels = list(held.levels)
+    built_codes = [list(codes) for codes in held.codes]
+    for number, given in enumerate(levels):
+        given = list(given)
+        values = held.get_level_values(number).tolist()
+        missing = [value for value in dict.fromkeys(values) if value not in given]
+        if missing:
+            raise InvalidArgumentError(f"Values not found in passed level: {Index(missing)!r}")
+        built_levels[number] = given
+        built_codes[number] = [given.index(value) for value in values]
+    return MultiIndex(levels=built_levels, codes=built_codes, names=held.names)
 
 
 def _numbers_array(values: list[Any], coerce: bool) -> Any:
@@ -35049,12 +35090,13 @@ def to_numeric(
             as NaN.
         downcast: `integer`, `signed`, `unsigned` or `float`, to answer the
             smallest type of that kind that holds every value.
-        dtype_backend: Refused, because firepanda has one kind of column.
+        dtype_backend: `numpy_nullable` or `pyarrow`, to answer the nullable or
+            arrow column of the kind read, with gaps as missing values.
 
     Raises:
         ValueError: For text that is not a number, or an unknown `errors`,
             `downcast` or `dtype_backend`, with pandas' words.
-        NotImplementedError: For a `dtype_backend`, and for whole numbers only
+        NotImplementedError: For whole numbers only
             an object column holds.
     """
     from ._frame import Index, Series
@@ -35063,20 +35105,26 @@ def to_numeric(
         raise ValueError("invalid error value specified")
     if downcast not in (None, "integer", "signed", "unsigned", "float"):
         raise ValueError("invalid downcasting method provided")
-    if dtype_backend is not NO_DEFAULT:
-        if dtype_backend not in ("numpy_nullable", "pyarrow"):
-            raise ValueError(
-                f"dtype_backend {dtype_backend} is invalid, only 'numpy_nullable' and"
-                " 'pyarrow' are allowed."
-            )
-        raise NotImplementedError(
-            f"to_numeric: dtype_backend={dtype_backend!r} answers pandas' nullable or arrow"
-            " types, and firepanda has one kind of column"
+    if dtype_backend is not NO_DEFAULT and dtype_backend not in ("numpy_nullable", "pyarrow"):
+        raise InvalidArgumentError(
+            f"dtype_backend {dtype_backend} is invalid, only 'numpy_nullable' and"
+            " 'pyarrow' are allowed."
         )
     numpy = _numpy()
     coerce = errors == "coerce"
     if isinstance(arg, Series | Index):
         printed = _word(arg.dtype)
+        if printed[0].isupper() or printed == "boolean" or printed.endswith("[pyarrow]"):
+            # A nullable or arrow column answers its own family unless another is asked for.
+            family = "pyarrow" if printed.endswith("[pyarrow]") else "numpy_nullable"
+            truth = printed in ("boolean", "bool[pyarrow]")
+            gapped = arg.astype("object" if truth else "float64")
+            values = _numbers_array(gapped.tolist(), coerce) if truth else gapped.to_numpy()
+            if downcast is not None:
+                values = _downcast(values, downcast)
+            kind = "object" if values.dtype.kind == "f" else printed
+            backend = family if dtype_backend is NO_DEFAULT else dtype_backend
+            return _numeric_backend(arg, values, backend, kind)
         if printed.startswith(("datetime", "timedelta")):
             values = arg.astype("int64").to_numpy()
         elif _numeric_kind(printed) is not None or printed == "bool":
@@ -35090,6 +35138,8 @@ def to_numeric(
                 "to_numeric: pandas answers uint64 for whole numbers past int64, and a"
                 " firepanda column cannot be built from them yet"
             )
+        if dtype_backend is not NO_DEFAULT:
+            return _numeric_backend(arg, values, dtype_backend, printed)
         column = Series(values.tolist(), dtype=_word(values.dtype))
         if isinstance(arg, Index):
             return Index(column, name=arg.name)
@@ -35098,13 +35148,68 @@ def to_numeric(
         values = numpy.asarray(arg)
         if values.dtype.kind not in "biuf":
             values = _numbers_array(values.tolist(), coerce)
-        return _downcast(values, downcast) if downcast is not None else values
+        values = _downcast(values, downcast) if downcast is not None else values
+        if dtype_backend is not NO_DEFAULT:
+            from ._array import array
+
+            made = _numeric_backend(Series(list(arg)), values, dtype_backend, "object")
+            return array(made.tolist(), dtype=made.dtype)
+        return values
     if isinstance(arg, bool | int | float | numpy.number | numpy.bool_):
         return arg
     number = _numbers_array([arg], coerce)
     if downcast is not None:
         number = _downcast(number, downcast)
     return number[0]
+
+
+def _numeric_backend(arg: Any, values: Any, backend: str, printed: str) -> Any:
+    """Numbers read by `to_numeric` as pandas' nullable or arrow column of their kind.
+
+    A gap is a missing value of the new kind. Whole numbers given as numbers or
+    as text, and true and false given in an object column, keep that kind as
+    pandas does, where the plain column had to widen them to floats for the gaps.
+    """
+    from ._frame import Index, Series
+
+    numpy = _numpy()
+    word = _word(values.dtype)
+    if values.dtype.kind == "f" and _numeric_kind(printed) is None and printed != "bool":
+        gaps = numpy.isnan(values).tolist()
+        given = [cell for cell, gap in zip(arg.tolist(), gaps, strict=True) if not gap]
+        if given and all(isinstance(cell, bool) for cell in given):
+            word = "bool"
+        elif given and all(_whole_given(cell) for cell in given):
+            word = "int64"
+    if backend == "pyarrow":
+        target = {"float64": "double", "float32": "float"}.get(word, word) + "[pyarrow]"
+    elif word == "bool":
+        target = "boolean"
+    elif word.startswith("u"):
+        target = "U" + word[1:].capitalize()
+    else:
+        target = word.capitalize()
+    if word == "bool" and values.dtype.kind == "f":
+        # Flags held as floats beside gaps go back to flags before the cast.
+        flags = [None if cell != cell else bool(cell) for cell in values.tolist()]
+        column = Series(flags, dtype="object").astype(target)
+    else:
+        column = Series(values.tolist(), dtype=_word(values.dtype)).astype(target)
+    if isinstance(arg, Index):
+        return Index(column, name=arg.name)
+    return column.set_axis(arg.index).rename(arg.name)
+
+
+def _whole_given(cell: Any) -> bool:
+    """Says whether one value `to_numeric` read was a whole number, as a number or as text."""
+    if isinstance(cell, str):
+        return re.fullmatch(r"\s*[+-]?\d+\s*", cell) is not None
+    return isinstance(cell, int) and not isinstance(cell, bool)
+
+
+def _missing_cell(cell: Any) -> bool:
+    """Says whether one value handed to `to_numeric` is a gap: None, NaN, NA or NaT."""
+    return cell is None or cell is NA or cell is NaT or (isinstance(cell, float) and cell != cell)
 
 
 def to_datetime(
