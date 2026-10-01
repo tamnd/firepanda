@@ -37382,12 +37382,13 @@ def read_json(
     `precise_float` asks for that.
 
     Returns:
-        A frame, or a column when `typ="series"`.
+        A frame, or a column when `typ="series"`, or a `JsonReader` of them
+        for a `chunksize`.
 
     Raises:
         ValueError: For the combinations pandas refuses, with its words.
-        NotImplementedError: For `orient="table"`, `chunksize`, the pyarrow
-            engine and remote files, and for columns pandas would hold as objects.
+        NotImplementedError: For `orient="table"`, the pyarrow engine and
+            remote files, and for columns pandas would hold as objects.
     """
     import json
 
@@ -37406,8 +37407,13 @@ def read_json(
         raise ValueError("nrows can only be passed if lines=True")
     if engine == "pyarrow" and not lines:
         raise ValueError("currently pyarrow engine only supports the line-delimited JSON format")
+    if chunksize is not None:
+        if not isinstance(chunksize, numbers.Real) or isinstance(chunksize, bool):
+            raise InvalidArgumentError("'chunksize' must be an integer >=1")
+        if int(chunksize) != chunksize or chunksize < 1:
+            raise InvalidArgumentError("'chunksize' must be an integer >=1")
+        chunksize = int(chunksize)
     for given, name in (
-        (chunksize, "chunksize"),
         (storage_options, "storage_options"),
         (None if engine == "ujson" else engine, "engine"),
     ):
@@ -37432,6 +37438,19 @@ def read_json(
     if lines:
         rows = [row.strip() for row in text.split("\n")]
         rows = [row for row in rows if row]
+        if chunksize is not None:
+            given = {
+                "orient": orient,
+                "typ": typ,
+                "dtype": dtype,
+                "convert_axes": convert_axes,
+                "convert_dates": convert_dates,
+                "keep_default_dates": keep_default_dates,
+                "precise_float": precise_float,
+                "date_unit": date_unit,
+                "dtype_backend": dtype_backend,
+            }
+            return JsonReader(rows, chunksize, nrows, given)
         text = "[" + ",".join(rows if nrows is None else rows[:nrows]) + "]"
     decoded = json.loads(
         text,
@@ -37476,6 +37495,58 @@ def read_json(
         built[name] = _json_series_of(data, kind, name)
     frame = _json_labelled(_json_named(DataFrame(built), names, options), labels, options)
     return _json_backed(frame, dtype_backend)
+
+
+class JsonReader:
+    """What `read_json` hands back for a `chunksize`, as pandas does.
+
+    Each chunk is read from its own lines, so its types are picked from them,
+    and its row labels carry on from the chunk before. Like pandas, `nrows` is
+    looked at before each chunk, so the last chunk is read whole even when it
+    runs past `nrows`.
+    """
+
+    def __init__(
+        self, rows: list[str], chunksize: int, nrows: Any, given: dict[str, Any]
+    ) -> None:
+        self._rows = rows
+        self._given = given
+        self._at = 0
+        self.chunksize = chunksize
+        self.nrows = nrows
+
+    def __iter__(self) -> JsonReader:
+        return self
+
+    def __next__(self) -> Any:
+        if self._at >= len(self._rows) or (self.nrows and self._at >= self.nrows):
+            raise StopIteration
+        stop = min(len(self._rows), self._at + self.chunksize)
+        read = self._read(self._rows[self._at : stop])
+        self._at = stop
+        return read
+
+    def _read(self, rows: list[str]) -> Any:
+        import io
+
+        from ._range_index import RangeIndex
+
+        read = read_json(io.StringIO("\n".join(rows)), lines=True, **self._given)
+        return read.set_axis(RangeIndex(self._at, self._at + len(read)))
+
+    def read(self) -> Any:
+        """Every chunk left, joined into one."""
+        return concat(list(self))
+
+    def close(self) -> None:
+        """Nothing is held open, so this only ends the reading."""
+        self._at = len(self._rows)
+
+    def __enter__(self) -> JsonReader:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
 
 def _json_backed(read: Any, dtype_backend: Any) -> Any:
