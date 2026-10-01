@@ -1489,7 +1489,13 @@ class MultiIndex:
         return self._sorted_or_not(self._taken(rows).drop_duplicates(), sort)
 
     def symmetric_difference(self, other: Any, result_name: Any = None, sort: Any = None) -> Any:
-        """The rows of exactly one of the two indexes, each once."""
+        """The rows of exactly one of the two indexes, each once.
+
+        Raises:
+            TypeError: For a `result_name` that is not a list of names, in pandas' words.
+        """
+        if result_name is not None and not _list_like(result_name):
+            raise TypeError("Must pass list-like as `names`.")
         other = self._other(other)
         mine = set(map(_hashed, self.tolist()))
         theirs = set(map(_hashed, other.tolist()))
@@ -1508,11 +1514,25 @@ class MultiIndex:
         return_indexers: bool = False,
         sort: bool = False,
     ) -> Any:
-        """The rows two indexes are joined on, the way `Index.join` picks them."""
-        if level is not None or return_indexers:
-            raise NotImplementedError(
-                "level= and return_indexers= are not supported yet on a MultiIndex join"
-            )
+        """The rows two indexes are joined on, the way `Index.join` picks them.
+
+        With `level=` the other index is flat and is matched against that level:
+        every row is kept for a left or outer join, and only the rows whose value
+        the other holds for an inner or right one, as pandas keeps them. With
+        `return_indexers` each side's positions come along, None for the side the
+        answer is unchanged from.
+
+        Raises:
+            TypeError: For `level=` with another MultiIndex, in pandas' words.
+        """
+        if how not in ("left", "right", "inner", "outer"):
+            raise InvalidArgumentError(f"do not recognize join method {how}")
+        flat = isinstance(other, Index) and not isinstance(other, MultiIndex)
+        if level is None and flat and other.name is not None and other.name in self._names:
+            # A flat index joins on the level named as it is, as in pandas.
+            level = other.name
+        if level is not None:
+            return self._level_join(other, how, level, return_indexers)
         other = self._other(other)
         chosen = {
             "left": lambda: self,
@@ -1520,10 +1540,31 @@ class MultiIndex:
             "inner": lambda: self.intersection(other, sort=False),
             "outer": lambda: self.union(other),
         }
-        if how not in chosen:
-            raise InvalidArgumentError(f"do not recognize join method {how}")
         joined = chosen[how]()
-        return joined.sort_values() if sort else joined
+        joined = joined.sort_values() if sort else joined
+        if not return_indexers:
+            return joined
+        mine = None if how == "left" and not sort else self.get_indexer(joined)
+        theirs = None if how == "right" and not sort else other.get_indexer(joined)
+        return joined, mine, theirs
+
+    def _level_join(self, other: Any, how: str, level: Any, return_indexers: bool) -> Any:
+        """The join of a flat index on one level, pandas' `join(level=)`."""
+        if isinstance(other, MultiIndex):
+            raise TypeError("Join on level between two MultiIndex objects is ambiguous")
+        flat = other if isinstance(other, Index) else Index(other)
+        number = self._level_number(level)
+        found = _list(flat.get_indexer(self.get_level_values(number)))
+        rows = list(range(len(self)))
+        if how in ("inner", "right"):
+            rows = [at for at in rows if found[at] != -1]
+        joined = self if len(rows) == len(self) else self._taken(rows)
+        if not return_indexers:
+            return joined
+        # pandas leaves this side out when joining the level's own values changes nothing.
+        _, kept, _ = Index(self._levels[number]).join(flat, how=how, return_indexers=True)
+        mine = None if kept is None else _array(rows, "int64")
+        return joined, mine, _array([found[at] for at in rows], "int64")
 
     def reindex(
         self,
@@ -1661,7 +1702,11 @@ class MultiIndex:
         if bins is not None:
             raise NotImplementedError("bins= cannot cut the rows of a MultiIndex")
         frame = self.to_frame(index=False, name=list(range(self.nlevels)))
-        out = frame.value_counts(normalize=normalize, sort=sort, ascending=ascending, dropna=dropna)
+        out = frame.value_counts(normalize=normalize, sort=False, dropna=dropna)
+        # pandas groups the rows in sorted order, gaps last, before a stable sort by count.
+        out = out.sort_index(na_position="last", kind="stable")
+        if sort:
+            out = out.sort_values(ascending=ascending, kind="stable")
         return out.rename_axis(list(self._names))
 
     # Reductions and arithmetic, which a row of tuples mostly does not have.

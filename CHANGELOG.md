@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: datetime index searches, MultiIndex joins on a level, and value_counts order
+
+`DatetimeIndex.searchsorted` and `TimedeltaIndex.searchsorted` take a Timestamp, a Timedelta, text or a list of them, with `sorter`. Before, they raised a DTypeError. `DatetimeIndex.slice_locs` reads text bounds as the period they name, as `.loc` slicing does. `DatetimeIndex.std` and `mean` answer NaT, not None, when there is nothing to measure. `to_numpy(dtype=object)` on instants or spans gives Timestamp and Timedelta with NaT gaps, where it gave numpy's datetime objects. `MultiIndex.join` takes `level=` and `return_indexers=`, and a flat index joins a MultiIndex on the shared level name in either direction, with pandas' indexers. `MultiIndex.value_counts` groups rows in sorted label order, gaps last, before ranking by count. `MultiIndex.symmetric_difference` refuses a scalar `result_name` as pandas does.
+
 ### Fixed: read_xml refuses storage_options with a handle
 
 `read_xml` given a buffer and `storage_options` now raises pandas' ValueError, as it already did for a local path, instead of ignoring the options.

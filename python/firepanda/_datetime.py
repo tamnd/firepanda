@@ -764,13 +764,13 @@ class DatetimeIndex(HeldFreq, Index):
         return self.to_series().dt.isocalendar().set_axis(self)
 
     def mean(self, *, skipna: bool = True, axis: Any = 0) -> Any:
-        """The average instant, or None when there is none."""
+        """The average instant, or NaT when there is none."""
         if axis not in (0, -1, None):
             raise IndexError("tuple index out of range")
         stamps = self.asi8
         present = [value for value in stamps if value is not None]
         if not present or (not skipna and len(present) < len(stamps)):
-            return None
+            return NaT
         return self._instant(int(sum(float(value) for value in present) / len(present)))
 
     def std(
@@ -782,14 +782,14 @@ class DatetimeIndex(HeldFreq, Index):
         keepdims: bool = False,
         skipna: bool = True,
     ) -> Any:
-        """The spread of the instants as a span, or None when there are too few."""
+        """The spread of the instants as a span, or NaT when there are too few."""
         from ._scalars import Timedelta
 
         stamps = self.asi8
         present = [float(value) for value in stamps if value is not None]
         count = len(present)
         if count - ddof <= 0 or (not skipna and count < len(stamps)):
-            return None
+            return NaT
         average = sum(present) / count
         spread = math.sqrt(sum((average - value) ** 2 for value in present) / (count - ddof))
         return Timedelta(int(spread), unit=self.unit)
