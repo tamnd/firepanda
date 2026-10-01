@@ -5639,6 +5639,28 @@ def _is_frame(value: Any) -> bool:
     return _is_object(value) and hasattr(value, "columns")
 
 
+def _turned_first(cond: Any, flip: bool) -> tuple[Any, bool]:
+    """A labelled condition for `mask`, turned over before it is lined up.
+
+    pandas turns the condition over and then lines it up, so a row or a column
+    the condition does not name reads as a false after the turn and is
+    replaced. Turning after the line up would keep it.
+
+    Args:
+        cond: What the caller passed.
+        flip: Whether the condition picks out what to replace.
+
+    Returns:
+        The condition and the flip left to apply.
+    """
+    if not flip or not _is_object(cond):
+        return cond, flip
+    kinds = cond.dtypes.tolist() if _is_frame(cond) else [cond.dtype]
+    if kinds and all(str(kind) in ("bool", "boolean") for kind in kinds):
+        return ~cond, False
+    return cond, flip
+
+
 _SAME_SHAPE = "Array conditional must be same shape as self"
 """What pandas says when a condition with no labels is the wrong length."""
 
@@ -6851,6 +6873,40 @@ def _keeping(flags: Any, column: Any, aligned: Any, covered: Any) -> Any:
     return kept
 
 
+def _clip_widens(column: Any, bounds: Any, printed: str, labels: list[Any]) -> bool:
+    """Whether clipping a column of whole numbers turns it into floats.
+
+    pandas hands the whole run of bounds to `where`, which keeps the integer
+    type only when every bound is a whole number, so a run with a gap or a
+    fraction in it makes floats of the column once a single row is replaced.
+
+    Args:
+        column: The column being clipped, as it arrived.
+        bounds: The floor and the ceiling, as `(bound, op)` pairs.
+        printed: The column's type as `dtype` spells it.
+        labels: The labels of the rows, in order.
+
+    Returns:
+        Whether the column has to be widened to float64 first.
+    """
+    if not printed.startswith(("int", "uint")):
+        return False
+    for bound, op in bounds:
+        if bound is None or bound is NO_DEFAULT or _single(bound):
+            continue
+        values = bound.tolist() if hasattr(bound, "tolist") else list(bound)
+        lossy = any(isinstance(v, float) and (v != v or not v.is_integer()) for v in values)
+        if not lossy:
+            continue
+        try:
+            if _clipping(column, bound, op, printed, labels) is not None:
+                return True
+        except FirepandaError:
+            # The column could not hold a bound it would take, so a row is replaced.
+            return True
+    return False
+
+
 def _clipping(column: Any, bound: Any, op: str, printed: str, labels: list[Any]) -> Any:
     """One bound against one column, as the pair `pick` takes.
 
@@ -7045,6 +7101,13 @@ def _frame_regex_pairs(
             return {str(key): _regex_pairs(to_replace[key], None, True) for key in held}
         if value is not None and value is not NO_DEFAULT and not isinstance(value, dict):
             return {str(key): _regex_pairs(to_replace[key], value, True) for key in held}
+        if isinstance(value, dict) and not nested:
+            # A pattern and a text under the same column name.
+            return {
+                str(key): _regex_pairs(to_replace[key], value[key], True)
+                for key in held
+                if key in value
+            }
     pairs = _regex_pairs(to_replace, value, regex)
     return dict.fromkeys(names, pairs)
 
@@ -13826,7 +13889,7 @@ class DataFrameMixin(_Carries):
         inplace = _flag("inplace", inplace)
         _no_level(level)
         along = _axis_number(axis, "DataFrame", 0, (0, 1))
-        cond = applied(cond, self)
+        cond, flip = _turned_first(applied(cond, self), flip)
         other = applied(other, self)
         names = _held_names(self)
         labels = self._inner.labels().to_list()
@@ -13938,7 +14001,12 @@ class DataFrameMixin(_Carries):
             # thousand, and the two bounds cannot see each other's work, which
             # is what pandas does.
             column = Series._wrap(self._inner.column(name))
-            for bound, op in ((floors[name], "ge"), (ceilings[name], "le")):
+            pairs = ((floors[name], "ge"), (ceilings[name], "le"))
+            if _clip_widens(column, pairs, types[name], labels):
+                column = column.astype("float64")
+                types[name] = "float64"
+                answer[name] = column
+            for bound, op in pairs:
                 if bound is None:
                     continue
                 sides = _clipping(column, bound, op, types[name], labels)
@@ -15830,6 +15898,9 @@ class DataFrameMixin(_Carries):
             if kind not in ("max", "min"):
                 raise
             return _folded_as_objects(read, kind, skipna)
+        if kind == "count" and not names:
+            # No columns still counts in whole numbers.
+            answer = answer.astype("int64")
         return read._voided(answer, skipna, min_count)
 
     def _whole(self, kind: str, param: float, skipna: bool, numeric_only: bool) -> Any:
@@ -16005,6 +16076,8 @@ class DataFrameMixin(_Carries):
             made = Series(answers, index=list(names), dtype=None if answers else "bool")
         else:
             made = frame._per_column(kind, 0.0)
+            if not frame._inner.names():
+                made = made.astype("bool")
         if not folding:
             return made
         return made._truth(kind, 0, False, True)
@@ -19512,7 +19585,7 @@ class SeriesMixin(_Carries):
         inplace = _flag("inplace", inplace)
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
-        cond = applied(cond, self)
+        cond, flip = _turned_first(applied(cond, self), flip)
         other = applied(other, self)
         labels = self._inner.labels().to_list()
         flags = _condition(cond, labels, len(labels))
@@ -19599,6 +19672,8 @@ class SeriesMixin(_Carries):
             )
         labels = self._inner.labels().to_list()
         printed = self._inner.dtype()
+        if _clip_widens(self, ((low, "ge"), (high, "le")), printed, labels):
+            return _kept(self, self.astype("float64").clip(low, high), inplace)
         answer = self._inner
         for bound, op in ((low, "ge"), (high, "le")):
             if bound is None:
@@ -28040,6 +28115,13 @@ class GroupByMixin[Answer]:
             groups.append(group)
             answers.append(func(group, *args, **kwargs))
         framed = [isinstance(answer, (Series, DataFrame)) for answer in answers]
+        if any(framed) and all(f or a is None for f, a in zip(framed, answers, strict=True)):
+            # pandas concatenates the answers, and a None among them is left out.
+            kept = [i for i, answer in enumerate(answers) if answer is not None]
+            members = [members[i] for i in kept]
+            groups = [groups[i] for i in kept]
+            answers = [answers[i] for i in kept]
+            framed = [True] * len(kept)
         if not any(framed):
             return self._one_a_group(answers)
         if not all(framed):
@@ -31668,6 +31750,8 @@ class IndexMixin:
         pandas default for `intersection`. The three way argument is turned into
         a bool on this side so that the core takes a bool and means it.
         """
+        if _text_beside_numbers(self, other):
+            return _mixed_set_operation(self, other, "union", sort)
         return self._set_operation("union", other, True if sort is None else bool(sort))
 
     def intersection(self, other: Any, sort: bool = False) -> Index:
@@ -31676,10 +31760,14 @@ class IndexMixin:
         Defaults to not sorting, which keeps this index's order, because an
         intersection is a filter of the left side and has an order to inherit.
         """
+        if _text_beside_numbers(self, other):
+            return _mixed_set_operation(self, other, "intersection", sort)
         return self._set_operation("intersection", other, False if sort is None else bool(sort))
 
     def difference(self, other: Any, sort: bool | None = None) -> Index:
         """Every label this index has and the other does not."""
+        if _text_beside_numbers(self, other):
+            return _mixed_set_operation(self, other, "difference", sort)
         return self._set_operation("difference", other, True if sort is None else bool(sort))
 
     def symmetric_difference(
@@ -31692,6 +31780,8 @@ class IndexMixin:
         """
         from ._frame import Index
 
+        if _text_beside_numbers(self, other):
+            return _mixed_set_operation(self, other, "symmetric_difference", sort, result_name)
         try:
             return Index._wrap(
                 self._inner.symmetric_difference(
@@ -31731,6 +31821,69 @@ class IndexMixin:
 
     str = Namespace(IndexStrings)
     """The string accessor, which answers indexes where the column one answers columns."""
+
+
+def _text_beside_numbers(left: Any, right: Any) -> bool:
+    """Whether a set operation meets an index of text with one of numbers."""
+    if not isinstance(right, IndexMixin):
+        return False
+    kinds = {_word(left.dtype), _word(right.dtype)}
+    numbers = {"int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"}
+    numbers |= {"float32", "float64"}
+    return bool(kinds & {"str", "string"}) and bool(kinds & numbers) and len(kinds) == 2
+
+
+def _mixed_sorted(values: list[Any], sort: Any) -> list[Any]:
+    """pandas' safe sort of whole numbers beside text, numbers first, or the values as they came."""
+    if sort is False:
+        return values
+    numbers = [v for v in values if not isinstance(v, str)]
+    if not all(type(v) is int for v in numbers):
+        return values
+    return sorted(numbers) + sorted(v for v in values if isinstance(v, str))
+
+
+def _mixed_set_operation(
+    left: Any, right: Any, which: str, sort: Any, result_name: Any = None
+) -> Any:
+    """A set operation between text and numbers, which pandas answers as objects.
+
+    The two sides cannot be compared, so pandas' ordered union falls back to
+    this side then the other side's new labels when both are already in order,
+    and otherwise sorts the numbers ahead of the text.
+    """
+    from ._frame import Index
+
+    name = left.name if left.name == right.name else None
+    mine, theirs = left.tolist(), right.tolist()
+    if which == "difference":
+        out = left.unique()
+        out = out.sort_values() if sort is not False else out
+        return out.rename(name)
+    if which == "intersection":
+        return Index([], dtype="object", name=name)
+    if which == "symmetric_difference":
+        values = list(dict.fromkeys(mine)) + list(dict.fromkeys(theirs))
+        name = result_name if result_name is not None else name
+        return Index(_mixed_sorted(values, sort), dtype="object", name=name)
+    unique = len(set(mine)) == len(mine) or len(set(theirs)) == len(theirs)
+    ordered = left.is_monotonic_increasing and right.is_monotonic_increasing
+    if sort is not False and unique and ordered:
+        seen = set(mine)
+        values = mine + [v for v in theirs if v not in seen]
+    elif len(set(theirs)) != len(theirs):
+        counts = {}
+        for side in (mine, theirs):
+            for value, many in collections.Counter(side).items():
+                counts[value] = max(counts.get(value, 0), many)
+        values = [v for v in dict.fromkeys(mine + theirs) for _ in range(counts[v])]
+        values = _mixed_sorted(values, sort)
+    else:
+        seen = set(mine)
+        values = mine + [v for v in theirs if v not in seen]
+        if not ordered:
+            values = _mixed_sorted(values, sort)
+    return Index(values, dtype="object", name=name)
 
 
 def _nan_text(data: Any) -> Any:
@@ -34846,6 +34999,13 @@ def crosstab(
         names = sorted(heads)
     else:
         names = _pivot_names(sorted(heads), "crosstab")
+    if not dropna and not several:
+        # Every category is a row or a column, the ones nobody holds as well.
+        down, across = _crosstab_categories(downs[0]), _crosstab_categories(acrosses[0])
+        if down is not None:
+            rows = [*down, *[row for row in rows if row not in down]]
+        if across is not None:
+            names = _pivot_names([*across, *[n for n in names if n not in across]], "crosstab")
     table = {
         name: [
             _crosstab_cell(cells[row, name], printed, aggfunc)
@@ -34900,6 +35060,14 @@ def crosstab(
     made = DataFrame({name: _readable(got) for name, got in table.items()}, index=labels)
     _hold_columns(made, column_names)
     return made
+
+
+def _crosstab_categories(piece: Any) -> list[Any] | None:
+    """The categories a crosstab key carries, in their order, or None for a plain key."""
+    if _word(getattr(piece, "dtype", None)) != "category":
+        return None
+    held = piece.cat.categories if hasattr(piece, "cat") else piece.categories
+    return list(held)
 
 
 def from_dummies(data: Any, sep: Any = None, default_category: Any = None) -> Any:

@@ -45,7 +45,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from .errors import InvalidArgumentError
+from .errors import InvalidArgumentError, SpecificationError
 
 if TYPE_CHECKING:
     from ._frame import DataFrame, Index, Series
@@ -790,6 +790,11 @@ class Resampler:
             parts = {
                 (name, _label_of(how)): self[name]._one(how) for name in self._obj for how in func
             }
+        elif isinstance(func, dict) and func and not isinstance(self._obj, DataFrame):
+            # Over a column the keys name the answer's columns.
+            if any(isinstance(how, list | dict) for how in func.values()):
+                raise SpecificationError("nested renamer is not supported")
+            parts = {name: self._one(how) for name, how in func.items()}
         elif isinstance(func, dict) and isinstance(self._obj, DataFrame):
             if all(not isinstance(how, list) for how in func.values()):
                 parts = {name: self[name].aggregate(how) for name, how in func.items()}
