@@ -3694,7 +3694,7 @@ class Series(SeriesMixin):
     def count(self) -> int:
         """The number of values that are not missing."""
         try:
-            return self._inner.length() - self._inner.null_count()
+            return self._non_missing()
         except Exception as error:
             raise translate(error) from None
 

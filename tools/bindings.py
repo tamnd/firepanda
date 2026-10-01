@@ -3938,7 +3938,7 @@ SERIES = Exposed(
         Member(
             name="count",
             kind="method",
-            body="self._inner.length() - self._inner.null_count()",
+            body="self._non_missing()",
             doc="The number of values that are not missing.",
             returns="int",
         ),

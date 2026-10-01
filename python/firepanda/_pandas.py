@@ -985,7 +985,65 @@ def _cell_of(inner: Any, row: int, column: int | None = None) -> Any:
         return _objects.value(raw)
     if raw is None and _objects.is_object(held):
         return _objects.gap_of(held)
-    return _gapped([_outward_one(raw, held.dtype())], held.dtype())[0]
+    word = held.dtype()
+    return _numpy_cell(_gapped([_outward_one(raw, word)], word)[0], word)
+
+
+def _numpy_cell(value: Any, word: str) -> Any:
+    """A number read out of a numpy typed column as numpy's scalar of that type.
+
+    pandas holds such a column as a numpy array, so one value out of it is an
+    `int64`, a `float32` or a `bool` of numpy's, NaN included.
+    """
+    if type(value) not in (bool, int, float):
+        return value
+    if word not in _SIGNED and word not in _UNSIGNED and word not in _FLOATING and word != "bool":
+        return value
+    import numpy
+
+    try:
+        return numpy.dtype(word).type(value)
+    except (OverflowError, TypeError, ValueError):
+        return value
+
+
+def _numpy_kurtosis(answer: Any) -> Any:
+    """A kurtosis as pandas answers it, numpy's float, or a plain NaN for too few values."""
+    if type(answer) is not float or answer != answer:
+        return answer
+    import numpy
+
+    return numpy.float64(answer)
+
+
+def _numpy_answer(answer: Any, kind: str, dtype: Any) -> Any:
+    """A column's reduced number as the numpy scalar pandas hands back for it.
+
+    pandas reduces through numpy, so a sum of whole numbers is an `int64`, the
+    smallest of `int32` is an `int32`, a flag is numpy's and a float32 column
+    keeps float32 for everything but its quantiles. Anything that is not a
+    plain number, a moment, text or `NA`, goes out as it came.
+    """
+    word = _word(dtype).lower()
+    numeric = word in _SIGNED | _UNSIGNED | _FLOATING or word in ("bool", "boolean")
+    if type(answer) not in (bool, int, float) or kind == "nunique" or not numeric:
+        return answer
+    import numpy
+
+    if isinstance(answer, bool):
+        return numpy.bool_(answer)
+    try:
+        if isinstance(answer, int):
+            if kind in ("min", "max") and word in _SIGNED | _UNSIGNED:
+                return numpy.dtype(word).type(answer)
+            if kind in ("sum", "prod") and word in _UNSIGNED:
+                return numpy.uint64(answer)
+            return numpy.int64(answer)
+    except OverflowError:
+        return answer
+    if word == "float32" and kind != "quantile":
+        return numpy.float32(answer)
+    return numpy.float64(answer)
 
 
 def _reduced_outward(answer: Any, kind: str, dtype: str) -> Any:
@@ -6353,6 +6411,16 @@ def _positional(value: Any) -> bool:
     return hasattr(value, "__len__") or hasattr(value, "__array__")
 
 
+def _number_unboxed(value: Any) -> Any:
+    """A numpy number as the Python number it holds, which is what the core reads.
+
+    A reduction answers numpy's scalars, as pandas' does, so `s == s.max()`
+    hands an operator an `int64` it must read as a whole number.
+    """
+    numpy_number = type(value).__module__ == "numpy" and getattr(value, "ndim", None) == 0
+    return value.item() if numpy_number and value.dtype.kind in "biuf" else value
+
+
 def _plain(value: Any) -> Any:
     """A value that came out of an array as the Python value it stands for.
 
@@ -8966,6 +9034,7 @@ def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool 
     """
     from ._frame import DataFrame, Series
 
+    value = _number_unboxed(value)
     printed = _word(column.dtype)
     marks = _write_marks(column, where)
     kept = marks.unary("invert")
@@ -11029,7 +11098,7 @@ def _readable(answers: list[Any]) -> list[Any]:
     made floats and NaN first. An answer with nothing in it is NaN too, which
     is what pandas gives when no call answered anything.
     """
-    held = [None if _missing(answer) else answer for answer in answers]
+    held = [None if _missing(answer) else _number_unboxed(answer) for answer in answers]
     if None not in held:
         return held
     found = [answer for answer in held if answer is not None]
@@ -15449,6 +15518,7 @@ class DataFrameMixin(_Carries):
         has no true or false answer, and only the named form has a `fill_value` to
         say one with.
         """
+        other = _number_unboxed(other)
         from ._frame import DataFrame
 
         other = _listed_frame_operand(self, other, 1)
@@ -15492,6 +15562,7 @@ class DataFrameMixin(_Carries):
         Against a constant it is accepted and ignored, since a constant is never
         the missing side. Against a series it raises.
         """
+        other = _number_unboxed(other)
         from ._frame import DataFrame
 
         number = _axis_number(axis, "DataFrame", 1, (0, 1))
@@ -19741,6 +19812,10 @@ class SeriesMixin(_Carries):
         self.drop(item, inplace=True)
         return value
 
+    def _non_missing(self) -> Any:
+        """How many values are not missing, as numpy's whole number, which pandas counts in."""
+        return _numpy_answer(self._inner.length() - self._inner.null_count(), "count", "int64")
+
     def item(self) -> Any:
         """The one value of a column of length one.
 
@@ -19749,7 +19824,7 @@ class SeriesMixin(_Carries):
         """
         if len(self) != 1:
             raise InvalidArgumentError("can only convert an array of size 1 to a Python scalar")
-        return self.iloc[0]
+        return _number_unboxed(self.iloc[0])
 
     def to_list(self) -> list[Any]:
         """The values as a Python list, the same as `tolist`."""
@@ -20179,6 +20254,7 @@ class SeriesMixin(_Carries):
         `strict` is the difference between `==` and `eq`, for the reason
         `DataFrameMixin._operator` gives.
         """
+        other = _number_unboxed(other)
         from ._frame import Series
 
         if isinstance(other, DataFrameMixin):
@@ -20235,6 +20311,7 @@ class SeriesMixin(_Carries):
         constant, which are two of the three behaviours the frame has. The third
         does not arise, because a series has nothing to broadcast against.
         """
+        other = _number_unboxed(other)
         from ._frame import Series
 
         _axis_number(axis, "Series", 0, (0,))
@@ -20419,6 +20496,11 @@ class SeriesMixin(_Carries):
         return above & below
 
     def _extreme_at(self, kind: str, axis: Any, skipna: bool, label: bool) -> Any:
+        """The first extreme's label, or its position as numpy's whole number."""
+        answer = self._plain_extreme_at(kind, axis, skipna, label)
+        return answer if label else _numpy_answer(answer, "position", "int64")
+
+    def _plain_extreme_at(self, kind: str, axis: Any, skipna: bool, label: bool) -> Any:
         """Where the first largest or smallest value is, as a label or a position.
 
         The extreme comes from the reduction and the first row equal to it from
@@ -20446,7 +20528,11 @@ class SeriesMixin(_Carries):
             raise InvalidArgumentError("Encountered an NA value with skipna=False")
         if gaps == rows:
             raise InvalidArgumentError("Encountered all NA values")
-        mask = _filled_with_false((self == getattr(self, kind)())._inner)
+        equal = self == getattr(self, kind)()
+        if _masked.masked_of(equal) is not None:
+            # A masked column compares to masked flags, which the filter reads as plain ones.
+            equal = equal.fillna(False).astype("bool")
+        mask = _filled_with_false(equal._inner)
         column = self if label else self.reset_index(drop=True)
         first = Series._wrap(column._inner.filter_rows(mask).head(1))
         return first.index.to_list()[0]
@@ -20489,7 +20575,11 @@ class SeriesMixin(_Carries):
         except Exception as error:
             raise translate(error) from None
 
-    def _reduce(
+    def _reduce(self, kind: str, param: float, *rest: Any) -> Any:
+        """A reduction over the column, its number the numpy scalar pandas hands back."""
+        return _numpy_answer(self._plain_reduce(kind, param, *rest), kind, self.dtype)
+
+    def _plain_reduce(
         self,
         kind: str,
         param: float,
@@ -20582,8 +20672,8 @@ class SeriesMixin(_Carries):
             floats = self if _word(self.dtype) in _FLOATING else self.astype("float64")
             answer = _kurtosis_in_numpy_order(floats)
             if answer is not None:
-                return answer
-        return _kurtosis(self.dropna().astype("float64"))
+                return _numpy_kurtosis(answer)
+        return _numpy_kurtosis(_kurtosis(self.dropna().astype("float64")))
 
     kurtosis = kurt
 
@@ -20668,6 +20758,10 @@ class SeriesMixin(_Carries):
         return Series(cells, index=["count", "unique", "top", "freq"], name=self.name, dtype="str")
 
     def _truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
+        """`any` or `all` over the column, a flag answered as numpy's."""
+        return _numpy_answer(self._plain_truth(kind, axis, bool_only, skipna), kind, "bool")
+
+    def _plain_truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
         """Runs `any` or `all` over the whole column.
 
         A column has one axis, so there is no folding to do and no `axis=None`
@@ -28168,7 +28262,9 @@ class GroupByMixin[Answer]:
         """
         with contextlib.suppress(AttributeError):
             answer = answer.squeeze()
-        flag = isinstance(answer, bool) or type(answer).__name__ == "bool_"
+        flag = isinstance(answer, bool) or (
+            type(answer).__module__ == "numpy" and type(answer).__name__ in ("bool", "bool_")
+        )
         missing = answer is None or (isinstance(answer, float) and answer != answer)
         if not (flag or missing):
             raise TypeError(
@@ -29137,7 +29233,8 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
             if not answer.index.equals(group.index):
                 answer = answer.reindex(group.index)
             return answer.reset_index(drop=True).rename(self._column)
-        if isinstance(answer, (list, tuple, range)) or hasattr(answer, "__array__"):
+        listed = hasattr(answer, "__array__") and getattr(answer, "ndim", 1) != 0
+        if isinstance(answer, (list, tuple, range)) or listed:
             values = list(answer)
             if len(values) != len(group):
                 raise InvalidArgumentError(
