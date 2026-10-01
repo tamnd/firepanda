@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Build a read_stata index_col of narrow integers as int64
+
+`read_stata(index_col=...)` now gives an int64 index when the column is stored as a narrow integer such as int8 or int32, as pandas does, instead of keeping the stored width.
+
 ### Fixed: Read SQL into the dtype_backend types, and cast Arrow columns to plain types
 
 `read_sql`, `read_sql_query` and their chunks now take `dtype_backend` instead of refusing it. Each column is typed from the values sqlite3 hands back, so a whole number with a gap reads as `Int64` or `int64[pyarrow]` as in pandas, before `dtype` and `parse_dates` apply. An ArrowDtype column now casts to a numpy type, to `str` and to objects as pandas casts it, in `Series.astype` and `DataFrame.astype`, and `to_datetime` reads Arrow and nullable text with gaps. These used to fail on firepanda's internal cell text.

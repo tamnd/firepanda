@@ -632,6 +632,9 @@ the string values returned are correct."""
             frame = frame.set_axis(RangeIndex(start, self._lines_read))
         else:
             frame = frame.set_index(index_col)
+            # pandas builds the labels from the column's values, so a narrow integer is int64.
+            if str(frame.index.dtype) in ("int8", "int16", "int32"):
+                frame.index = frame.index.astype("int64")
         return frame
 
     def _kind(self, typ: Any) -> str:
