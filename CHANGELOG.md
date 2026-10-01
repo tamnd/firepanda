@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: reductions and cells answer numpy scalars
+
+A reduction of a numeric or boolean Series, `any` and `all`, `argmax` and `argmin`, `count`, `kurt` and a cell read by `iloc`, `loc`, `at` or `iat` now answer numpy scalars of the column's type, as pandas does, so `type(s.sum())` is `numpy.int64` and `s.max()` of an int32 column is `numpy.int32`. `nunique`, text answers and `item` stay Python values. Operators, writes and pivot margins read numpy scalars back as plain numbers.
+
 ### Fixed: a gap written into a float column is a NaN
 
 Writing None, `pd.NA` or NaN into a float column, or into whole numbers that it widens to float64, through `iloc`, `loc` or `at` now stores a NaN, as numpy holds a gap in pandas, rather than a null that an Arrow export or a comparison that keeps nulls and NaN apart could tell from one.

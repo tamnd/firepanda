@@ -124,8 +124,8 @@ def test_bool_only_is_accepted_on_a_series_and_does_nothing(firepanda: ModuleTyp
     library stricter than the one it is copying, which is a divergence in the
     direction nobody asks for.
     """
-    assert firepanda.Series([1.0, 0.0, 3.0]).any(bool_only=True) is True
-    assert firepanda.Series([1.0, 0.0, 3.0]).all(bool_only=True) is False
+    assert firepanda.Series([1.0, 0.0, 3.0]).any(bool_only=True)
+    assert not firepanda.Series([1.0, 0.0, 3.0]).all(bool_only=True)
 
 
 @needs_pandas
@@ -232,4 +232,4 @@ def test_the_three_pandas_itself_refuses_are_refused_with_its_words(
 def test_a_series_still_takes_none_as_its_only_axis(firepanda: ModuleType) -> None:
     """A column has one axis, so folding it and reducing it are the same thing."""
     assert firepanda.Series(VALUES).prod(axis=None) == firepanda.Series(VALUES).prod()
-    assert firepanda.Series(VALUES).any(axis="index") is True
+    assert firepanda.Series(VALUES).any(axis="index")

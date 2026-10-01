@@ -159,7 +159,7 @@ def test_the_match_is_looked_for_anywhere_rather_than_at_the_front(firepanda: Mo
     rows = ["xxa1"]
     assert mine_rows(made(firepanda, rows).str.extract(r"([a-z])(\d)")) == [["a", "1"]]
     assert their_rows(theirs(rows).str.extract(r"([a-z])(\d)")) == [["a", "1"]]
-    assert made(firepanda, rows).str.match(r"([a-z])(\d)")[0] is False
+    assert not made(firepanda, rows).str.match(r"([a-z])(\d)")[0]
 
 
 @needs_pandas
