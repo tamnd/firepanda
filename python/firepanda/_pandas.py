@@ -3230,10 +3230,32 @@ def _keyed_order(columns: list[Any], key: Any, ascending: Any, na_position: str)
             )
         work[f"k{at}"] = keyed.reset_index(drop=True)
     work["row"] = Series(range(len(columns[0])), dtype="int64")
-    ordered = DataFrame(work).sort_values(
-        [f"k{at}" for at in range(len(columns))], ascending=ascending, na_position=na_position
-    )
-    return ordered["row"].tolist()
+    # The keyed columns go straight to the core, since a NaN a key answered is
+    # what sends a sort here in the first place.
+    keys = [f"k{at}" for at in range(len(columns))]
+    front = [_na_first(na_position)] * len(keys)
+    try:
+        inner = DataFrame(work)._inner.sort_values(keys, _directions(ascending, len(keys)), front)
+    except Exception as error:
+        raise translate(error) from None
+    return DataFrame._wrap(inner)["row"].tolist()
+
+
+def _nan_as_missing(column: Any) -> Any:
+    """A float column with each NaN held as a null, so the core sort places it as missing.
+
+    The core orders a NaN value as the largest number rather than as a gap, and
+    pandas places it where `na_position` says. A column that is not floats, or
+    has no missing value at all, comes back as it was.
+    """
+    if _word(column.dtype) not in ("float64", "float32") or not column._inner.null_count():
+        return column
+    return column.replace(float("nan"), None)
+
+
+def _nan_sort_keys(columns: list[Any]) -> bool:
+    """Whether any of these sort keys is a float column with a missing value."""
+    return any(_nan_as_missing(column) is not column for column in columns)
 
 
 def _label_order(
@@ -5807,6 +5829,25 @@ def _labels_differ(left: Any, right: Any, axis: int) -> bool:
     if isinstance(left, DataFrameMixin) and axis == 1:
         return _shown_names(left) != [str(label) for label in right.index.to_list()]
     return not left.index.equals(right.index)
+
+
+def _scalar_fill(this: Any, other: Any, fill_value: Any) -> tuple[Any, Any] | None:
+    """The two operands of an operation with one value, with `fill_value` in place.
+
+    pandas fills the missing values of the series or frame before it meets a
+    single value, and when that value is itself missing it is the fill that
+    meets the series instead.
+
+    Returns:
+        The operands to use, or None when there is no fill or `other` is not one value.
+    """
+    if fill_value is None or _missing(fill_value):
+        return None
+    if isinstance(other, SeriesMixin | DataFrameMixin) or _list_like(other):
+        return None
+    if _missing(other):
+        return this, fill_value
+    return this.fillna(fill_value), other
 
 
 def _one_side_filled(left: Any, right: Any, fill_value: Any) -> tuple[Any, Any] | None:
@@ -15709,6 +15750,9 @@ class DataFrameMixin(_Carries):
             elif isinstance(other, (DataFrameMixin, SeriesMixin)):
                 _no_level(level)
         other = _listed_frame_operand(self, other, number)
+        filled = _scalar_fill(self, other, fill_value)
+        if filled is not None:
+            return filled[0]._named(filled[1], op, axis, None, None, flip)
         if isinstance(other, DataFrameMixin) and fill_value is not None:
             sides = _one_side_filled(self, other, fill_value)
             if sides is not None:
@@ -16784,6 +16828,7 @@ class DataFrameMixin(_Carries):
             or na_position != "last"
             or not sort_remaining
             or isinstance(ascending, (list, tuple))
+            or (not isinstance(self.index, MultiIndex) and _nan_sort_keys([self.index.to_series()]))
         ):
             first = _na_first(na_position)
             order = _label_order(self.index, level, ascending, first, sort_remaining, key)
@@ -16992,6 +17037,8 @@ class DataFrameMixin(_Carries):
         _axis_number(axis, "DataFrame", 0, (0,))
         inplace = _flag("inplace", inplace)
         keys = _names.held_all(_as_keys(by))
+        if key is None and _nan_sort_keys([self[name] for name in keys]):
+            key = _nan_as_missing
         if key is not None:
             order = _keyed_order([self[name] for name in keys], key, ascending, na_position)
             ordered = self.iloc[order]
@@ -19168,6 +19215,8 @@ class SeriesMixin(_Carries):
 
         _axis_number(axis, "Series", 0, (0,))
         inplace = _flag("inplace", inplace)
+        if key is None and _nan_sort_keys([self]):
+            key = _nan_as_missing
         if key is not None:
             ordered = self.iloc[_keyed_order([self], key, ascending, na_position)]
             ordered = _answered(ordered.reset_index(drop=True)) if ignore_index else ordered
@@ -20484,6 +20533,9 @@ class SeriesMixin(_Carries):
             else:
                 _no_level(level)
         level = None
+        filled = _scalar_fill(self, other, fill_value)
+        if filled is not None:
+            return filled[0]._named(filled[1], op, axis, None, None, flip)
         if _sparse_side(self, other):
             return _sparse.operated(
                 self,
@@ -31595,7 +31647,7 @@ class IndexMixin:
             )
             made = self.take(order)
             return (made, order) if return_indexer else made
-        column = self.to_series()
+        column = _nan_as_missing(self.to_series())
         front = _na_first(na_position)
         down = _directions(ascending, 1)[0]
         try:

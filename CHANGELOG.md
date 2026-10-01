@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: NaN in a float sort key, a fill value against a single operand, and intervals beside a gap
+
+A NaN in a float column is now missing to `sort_values` on a series, a frame and an index, and to `sort_index`, so it sits last whichever way the sort runs and moves to the front when `na_position="first"` asks. The core orders a NaN as the largest number, so a float key holding one is sorted with its NaN held as a gap. The flexible operators (`add`, `mul`, `lt` and the rest) on a series or frame now fill its missing values with `fill_value` before meeting a single value, as pandas does, and meet the fill instead when that value is itself missing. A categorical of whole number intervals with a gap among its values lists them as floats, as pandas does.
+
 ### Fixed: Reductions of an empty frame and crosstab rows by categories
 
 `any`, `all` and `count` on a frame made from nothing now answer over an empty `RangeIndex`, as pandas does, rather than over an empty index of text. `crosstab` with a category key on the rows labels them with a `CategoricalIndex` that keeps every category, and the rows it keeps follow the order of the categories. The column axis keeps plain labels, since a frame names its columns rather than holding them as categories.

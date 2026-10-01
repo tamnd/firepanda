@@ -414,10 +414,16 @@ class Categorical(FirepandaArray):
             values = [names[code] if code >= 0 else None for code in codes]
 
         spans = _kind_of(self.categories).startswith("interval")
+        # pandas lists whole number intervals beside a gap as floats, since the
+        # gap is a NaN their endpoints widen to hold.
+        widened = _kind_of(self.categories).startswith(("interval[int", "interval[uint"))
+        widened = widened and _holds_gap(values)
 
         def one(value: Any) -> str:
             if value is None or value != value:
                 return "NaT" if timed else "NaN"
+            if widened:
+                value = type(value)(float(value.left), float(value.right), value.closed)
             return value if timed else str(value) if spans else repr(value)
 
         if len(values) > 10:
@@ -438,3 +444,8 @@ class Categorical(FirepandaArray):
 
             return f"[{shown}]{tail}\n{_text_categories(self._column)}"
         return f"[{shown}]{tail}\nCategories ({len(held)}, {kind}): [{levels}]"
+
+
+def _holds_gap(values: list[Any]) -> bool:
+    """Whether any of these values read out of a column is missing."""
+    return any(value is None or value != value for value in values)
