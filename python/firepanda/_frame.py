@@ -44,6 +44,7 @@ from ._pandas import (
     _grouped,
     _index_text,
     _index_values,
+    _label_inserted,
     _Labelled,
     _Point,
     _Positional,
@@ -4731,7 +4732,7 @@ class Index(IndexMixin):
     def insert(self, loc: int, item: object) -> Index:
         """The index with one label put in at a position."""
         try:
-            return Index._wrap(self._inner.insert(loc, item))
+            return Index._wrap(_label_inserted(self, loc, item))
         except Exception as error:
             raise translate(error) from None
 
