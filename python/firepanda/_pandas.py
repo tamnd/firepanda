@@ -1807,7 +1807,7 @@ def _put_labels(frame: Any, labels: list[Any], level: Any) -> Any:
         key += "_"
     made = DataFrame({key: labels})._inner.stack_columns([frame])
     out = DataFrame._wrap(made).set_index(key)._inner
-    return out.renamed_axis(None if level is None else str(level))
+    return out.renamed_axis(_held_label(level))
 
 
 def _series_to_frame_inner(column: Any, name: str) -> Any:
@@ -2208,8 +2208,8 @@ def _shown_label(label: str | None) -> Any:
 
 
 def _held_label(name: Any) -> str | None:
-    """A level name as the extension holds it, a tuple written as its text as before."""
-    return str(name) if isinstance(name, tuple) else _names.held(name)
+    """A level name as the extension holds it, a tuple read back as the tuple it was."""
+    return _names.held(name)
 
 
 def _one_name(value: Any) -> str | None:
@@ -9748,7 +9748,7 @@ def _time_rows(owner: Any, axis: Any, pick: Callable[[Any], list[int]]) -> Any:
     labels = owner.index if number == 0 else Index(_shown_names(owner))
     if not _word(labels.dtype).startswith("datetime64"):
         raise TypeError("Index must be DatetimeIndex")
-    return owner.take(pick(DatetimeIndex._wrap(labels._inner)), axis=number)
+    return owner.take(list(pick(DatetimeIndex._wrap(labels._inner))), axis=number)
 
 
 def _index_of(values: list[Any]) -> Any:
@@ -9807,7 +9807,7 @@ def _asof(owner: Any, where: Any, subset: Any) -> Any:
             values = owner.tolist()
             while at > 0 and nulls[at]:
                 at -= 1
-            return math.nan if values[at] is None else values[at]
+            return math.nan if values[at] is None else _numpy_answer(values[at], "min", owner.dtype)
     else:
         names = _shown_names(owner) if subset is None else subset
         names = [names] if isinstance(names, str) else list(names)
@@ -10755,11 +10755,8 @@ def _names_index(names: list[Any], name: Any) -> Any:
 
     kinds = {type(one) for one in names}
     if len(kinds) > 1 and not kinds <= {int, float}:
-        raise NotImplementedError(
-            "names that mix text and other values are not supported yet as an index,"
-            " because pandas holds them in an index of objects and firepanda has no"
-            " object index"
-        )
+        # pandas holds names of mixed kinds, such as 7 beside "a", in an index of objects.
+        return Index(names, name=name, dtype="object")
     ranged = _name_range(names)
     return Index(names, name=name) if ranged is None else ranged
 
@@ -17707,7 +17704,7 @@ class DataFrameMixin(_Carries):
             if index is not None:
                 inner = inner.reindex(_core_labels(index, self.index), value)
                 if isinstance(index, IndexMixin):
-                    inner = inner.renamed_axis(None if index.name is None else str(index.name))
+                    inner = inner.renamed_axis(index._inner.label())
             return _categories_kept(DataFrame._wrap(inner), index)
         except Exception as error:
             raise translate(error) from None
@@ -19469,8 +19466,8 @@ class SeriesMixin(_Carries):
             return _settled(self, numbered, inplace)
         if inplace:
             raise TypeError(_RESET_INDEX_INPLACE)
-        wanted = self._inner.label() if name is NO_DEFAULT else name
-        made = self._framed("0" if wanted is None else str(wanted))
+        wanted = self._inner.label() if name is NO_DEFAULT else _held_label(name)
+        made = self._framed(_held_label(0) if wanted is None else wanted)
         return made.reset_index(level, drop=False, allow_duplicates=allow_duplicates)
 
     def _framed(self, name: str | None) -> DataFrame:
@@ -21610,7 +21607,7 @@ class SeriesMixin(_Carries):
         try:
             inner = self._inner.reindex(_core_labels(index, self.index), value, True)
             if isinstance(index, IndexMixin):
-                inner = inner.renamed_axis(None if index.name is None else str(index.name))
+                inner = inner.renamed_axis(index._inner.label())
             return _categories_kept(Series._wrap(inner), index)
         except Exception as error:
             raise translate(error) from None
@@ -30277,7 +30274,7 @@ class IndexMixin:
         if type(data).__name__ == "Categorical":
             # pandas answers a Categorical with a CategoricalIndex, categories kept.
             data = data._column
-        label = _label_of(data) if name is None else str(name)
+        label = _label_of(data) if name is None else _held_label(name)
         if dtype is not None:
             self._typed(data, dtype, label)
             return

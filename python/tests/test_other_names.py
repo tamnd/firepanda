@@ -93,13 +93,13 @@ def test_the_answer_is_pandas_answer(call: Callable[[ModuleType], Any]) -> None:
     assert outcome(call, fp) == outcome(call, pd)
 
 
-def test_names_of_mixed_kinds_have_no_index_yet() -> None:
-    """pandas holds names of mixed kinds in an index of objects, which firepanda lacks."""
+def test_names_of_mixed_kinds_are_an_index_of_objects() -> None:
+    """pandas holds names of mixed kinds in an index of objects, and so does firepanda."""
     frame = fp.DataFrame({0: [1], "a": [2]})
     assert frame["a"].tolist() == [2]
     assert repr(frame) == repr(pd.DataFrame({0: [1], "a": [2]}))
-    with pytest.raises(NotImplementedError, match="object index"):
-        _ = frame.columns
+    assert frame.columns.tolist() == [0, "a"]
+    assert str(frame.columns.dtype) == "object"
 
 
 def test_text_names_are_held_as_they_are() -> None:

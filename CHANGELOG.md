@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Changed: Place a dense filter's rows eight at a time
 
 A filter that keeps more than one row in eight used to copy a row and move its cursor by the mask byte, so every store waited on the add before it. It now reads eight mask bytes as one word, and one multiply turns that word into the place each of the eight rows goes, so the eight stores no longer wait on each other. Six million doubles keeping one row in two filtered 2.2 to 2.6 times faster, side by side in one process, and a plain copy of the same bytes was faster still, which is what says the old loop was not waiting on memory. Over six interleaved rounds on a shared eight core box, best of fifteen, q3 at scale factor one went from 49.8 to 44.3 ms, q12 from 24.9 to 21.9 ms and q10 from 46.4 to 43.7 ms, with q7 and q20 unmoved.
+### Changed: typed level names, mixed column names and numpy time positions
+
+An index name that is a number or a tuple stays that value, through `Index(name=...)`, `rename`, a series or frame built on the index and a reindex, and `reset_index` names its columns by those values, with 0 for a series with no name. Column names of mixed kinds, such as 7 beside "a", are an index of objects rather than an error. `indexer_at_time` and `indexer_between_time` give numpy positions, `DatetimeIndex.values` and `TimedeltaIndex.values` are numpy datetime64 and timedelta64, `MultiIndex.dtypes` names an unnamed level `level_N`, `dt.isocalendar` is pandas' UInt32 and a single `asof` gives a numpy number.
 
 ### Changed: datetime index fields, inferred objects and categorical arrays follow pandas
 

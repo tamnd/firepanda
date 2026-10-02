@@ -109,8 +109,8 @@ def test_the_answer_is_pandas_answer(call: Callable[[ModuleType], Any]) -> None:
     assert outcome(call, fp) == outcome(call, pd)
 
 
-def test_a_tuple_level_name_is_still_its_text() -> None:
-    assert fp.Index([1, 2]).rename(("a", 1)).name == "('a', 1)"
+def test_a_tuple_level_name_stays_a_tuple() -> None:
+    assert fp.Index([1, 2]).rename(("a", 1)).name == ("a", 1)
 
 
 def test_extractall_needs_a_group() -> None:
