@@ -245,7 +245,7 @@ class Categorical(FirepandaArray):
             ValueError: For a code past the categories, or for no categories at all,
                 in pandas' words.
         """
-        from ._frame import Series
+        from ._pandas import _coded_categories
 
         if isinstance(dtype, CategoricalDtype):
             if categories is not None or ordered is not None:
@@ -262,9 +262,7 @@ class Categorical(FirepandaArray):
         positions = [int(code) for code in (codes.tolist() if hasattr(codes, "tolist") else codes)]
         if validate and any(code < -1 or code >= len(held) for code in positions):
             raise InvalidArgumentError("codes need to be between -1 and len(categories)-1")
-        text = Series([None if code == -1 else held[code] for code in positions], dtype="str")
-        column = text.astype("category").cat.set_categories(held, ordered=bool(ordered))
-        return cls._held_by(column)
+        return cls._held_by(_coded_categories(positions, list(held), bool(ordered)))
 
     @property
     def dtype(self) -> CategoricalDtype:

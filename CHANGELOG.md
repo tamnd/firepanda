@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: number categories on a column of text categories
+
+`rename_categories`, `set_categories` and `Categorical.from_codes` take numbers, floats, instants and other values that are not text as categories, and `Series.map` on a category column maps the categories and keeps the column a category when the new ones are distinct, as pandas does. A `CategoricalDtype` of numbers given to `astype` matches the values by equality, so a float column with a gap lands in its integer categories instead of becoming all gaps.
+
 ### Changed: Place a dense filter's rows eight at a time
 
 A filter that keeps more than one row in eight used to copy a row and move its cursor by the mask byte, so every store waited on the add before it. It now reads eight mask bytes as one word, and one multiply turns that word into the place each of the eight rows goes, so the eight stores no longer wait on each other. Six million doubles keeping one row in two filtered 2.2 to 2.6 times faster, side by side in one process, and a plain copy of the same bytes was faster still, which is what says the old loop was not waiting on memory. Over six interleaved rounds on a shared eight core box, best of fifteen, q3 at scale factor one went from 49.8 to 44.3 ms, q12 from 24.9 to 21.9 ms and q10 from 46.4 to 43.7 ms, with q7 and q20 unmoved.
