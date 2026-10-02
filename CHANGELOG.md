@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: RangeIndex methods keep a RangeIndex
+
+Slicing, taking, sorting, deleting, inserting, appending, the set operations, arithmetic by an integer and the other RangeIndex methods now answer with a RangeIndex whenever the labels still step evenly, as pandas does, and fall back to a plain Index otherwise. Two ranges intersect with pandas' own range arithmetic, so the stop matches, `min` and `max` give Python ints, and `repeat` gives a plain Index. Labels that are not a range are no longer typed as a RangeIndex.
+
 ### Fixed: Logical operators against constants and lists
 
 A boolean column against a whole number constant, and a whole number column against True or False, now work bit by bit and answer flags, as pandas does, where both used to be refused. A list or tuple on the right raises pandas' `TypeError` asking for a Series, Index or array instead.

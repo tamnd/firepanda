@@ -31047,6 +31047,12 @@ class IndexMixin:
         becomes one, and labels the core holds as a range become a RangeIndex.
         Any other class stays as asked.
         """
+        if cls.__name__ == "RangeIndex" and not inner.is_range():
+            # A range's answer whose labels are written out is an index of them, and
+            # the range methods make it a range again when they are an even step.
+            from ._frame import Index
+
+            cls = Index
         if cls.__name__ != "Index":
             return cls
         if inner.is_range():
