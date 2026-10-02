@@ -37639,11 +37639,14 @@ def _text_labels(
     return header + texts
 
 
-def _text_heads(frame: Any, labels: list[Any]) -> list[str]:
+def _text_heads(frame: Any, labels: list[Any], kept: list[int] | None = None) -> list[str]:
     """The column names as the header prints them.
 
     Names that are instants or spans print as their index prints them, so a
-    run of midnights prints as dates, as pandas does after a transpose.
+    run of midnights prints as dates, as pandas does after a transpose. Whole
+    and decimal numbers print as their index does too, flush left to one width
+    and to one precision, over only the `kept` columns that print, as pandas
+    formats the columns left after its cut.
     """
     if all(isinstance(label, str) for label in labels):
         return [_text_plain(label) for label in labels]
@@ -37654,8 +37657,16 @@ def _text_heads(frame: Any, labels: list[Any]) -> list[str]:
         index = frame.columns
     except NotImplementedError:
         return [_text_head(label) for label in labels]
-    if _word(index.dtype).startswith(("datetime", "timedelta")):
+    kind = _word(index.dtype)
+    if kind.startswith(("datetime", "timedelta")):
         return [text.strip() for text in _text_labels(index, False, None)]
+    if kind.startswith(("int", "uint", "float")) and len(index) == len(labels):
+        kept = list(range(len(labels))) if kept is None else kept
+        written = [""] * len(labels)
+        shown = _text_labels(index.take(kept), False, None) if kept else []
+        for position, text in zip(kept, shown, strict=True):
+            written[position] = text
+        return written
     return [_text_head(label) for label in labels]
 
 
@@ -37918,7 +37929,8 @@ def _text_table(
 
     def picked(position: int, label: str) -> Any:
         if isinstance(formatters, dict):
-            return formatters.get(label)
+            # pandas looks a position up as a name first when a column has it as its name.
+            return formatters.get(position if position in labels else label)
         return formatters[position]
 
     named = bool(index and kw["index_names"] and _text_named(frame.index))
@@ -37937,7 +37949,7 @@ def _text_table(
         for position, head in zip(kept_cols, kept_heads, strict=True):
             heads[position] = head
     elif header:
-        written = _text_heads(frame, labels)
+        written = _text_heads(frame, labels, kept_cols)
         heads = [
             [
                 (
