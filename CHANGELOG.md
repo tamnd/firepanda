@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Counting row labels are a RangeIndex
+
+Row labels that count up from zero, which is what a frame or a column gets by default, now come back as a `RangeIndex` with its `start`, `stop` and `step`, as they do in pandas. A reduction such as `sum` or `dtypes` over whole-number columns the user named keeps a plain `Index`, and over default columns gives a `RangeIndex`.
+
 ### Fixed: Whole number columns a caller hands over stay a plain index
 
 A frame now remembers when its whole number columns are a plain `Index` rather than a `RangeIndex`, as pandas does: columns written out with `columns=`, put on with `set_axis` or assignment, renamed, or transposed from a row index that is not a range keep a plain index even when the labels step evenly, while columns pandas makes itself stay a range. The mark is carried through methods that keep the columns, row-wise `concat` and pickle. `transpose` now puts the row index itself on as the columns, so its type and name come along. `first_valid_index` and `last_valid_index` answer the label taken out of the index by position, numpy's scalar for a number index and a plain int for a range.

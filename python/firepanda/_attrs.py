@@ -299,7 +299,10 @@ def _carry_columns(result: Any, source: Any, name: str) -> None:
     """
     if result is source or name in _COLUMNS_DROPS:
         return
-    if getattr(source, "_plain_columns", False) and type(result) is type(source):
+    if getattr(source, "_plain_columns", False) and (
+        type(result) is type(source) or type(result) in _SLOTS
+    ):
+        # A column whose labels are the frame's columns, as a reduction answers, keeps them too.
         with contextlib.suppress(AttributeError):
             result._plain_columns = True
     held = column_names(source)
