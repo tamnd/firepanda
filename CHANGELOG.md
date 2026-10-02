@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: numeric uniques, label values and label masks are numpy arrays
+
+`Series.unique` and `pd.unique` on a column of numbers or flags give a numpy array, as pandas does, and so do `Index.values` for labels of numbers or flags and the mask `Index.get_loc` gives for a label repeated out of order. `Index.equals` now compares numbers by value across widths, signs and objects, so int64 labels equal the same uint64, float64 or object labels, while text never equals numbers.
+
 ### Added: `firepanda`, the SQL shell
 
 `firepanda -c "SELECT ..."`, statements piped in, or an interactive prompt when run

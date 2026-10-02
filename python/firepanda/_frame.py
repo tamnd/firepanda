@@ -43,6 +43,7 @@ from ._pandas import (
     _expanding,
     _grouped,
     _index_text,
+    _index_values,
     _Labelled,
     _Point,
     _Positional,
@@ -4674,10 +4675,10 @@ class Index(IndexMixin):
             raise translate(error) from None
 
     @property
-    def values(self) -> list[object]:
-        """The labels as a Python list, where pandas hands back a numpy array."""
+    def values(self) -> Any:
+        """The labels as a numpy array for numbers and flags, a Python list otherwise."""
         try:
-            return _values_of(self._inner)
+            return _index_values(self._inner)
         except Exception as error:
             raise translate(error) from None
 

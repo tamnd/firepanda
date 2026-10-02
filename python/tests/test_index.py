@@ -194,7 +194,7 @@ def test_get_loc_returns_an_int_a_slice_or_a_mask(firepanda: ModuleType) -> None
     """
     assert firepanda.Index(["a", "b", "c"]).get_loc("b") == 1
     assert firepanda.Index(["a", "b", "b", "c"]).get_loc("b") == slice(1, 3, None)
-    assert firepanda.Index(["c", "b", "b", "a"]).get_loc("b") == [False, True, True, False]
+    assert firepanda.Index(["c", "b", "b", "a"]).get_loc("b").tolist() == [False, True, True, False]
     with pytest.raises(KeyError):
         firepanda.Index(["a"]).get_loc("z")
 
