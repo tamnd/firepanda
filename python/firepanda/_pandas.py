@@ -30530,7 +30530,7 @@ class IndexMixin:
         """One label, or an index of several.
 
         Three keys wearing one name, which is why this is here rather than in
-        the table. An integer takes a label out and gives back a Python value, a
+        the table. An integer takes a label out and gives back numpy's scalar for a number, a
         slice and a list both give back an index, and a list is read as
         positions or as a mask depending on what is in it. Several labels out
         of an index of instants or spans are still one, as they are in pandas.
@@ -30555,7 +30555,11 @@ class IndexMixin:
                 return Index._wrap(self._inner.slice_rows(at, at + 1)).tolist()[0]
             if isinstance(key, int):
                 found = self._inner.at(key)
-                return _objects.value(found) if _objects.is_cell(found) else found
+                if _objects.is_cell(found):
+                    return _objects.value(found)
+                # A label out of a numpy typed index is numpy's scalar, a range's a plain int.
+                ranged = isinstance(getattr(self, "_range", None), range) or self._inner.is_range()
+                return found if ranged else _numpy_cell(found, _word(self.dtype))
             if isinstance(key, slice):
                 start, stop, step = key.indices(self._inner.length())
                 if step == 1:
@@ -31323,14 +31327,14 @@ class IndexMixin:
         if at < len(values) and values[at] == label:
             while up and at + 1 < len(values) and values[at + 1] == label:
                 at += 1
-            return values[at]
+            return _numpy_cell(values[at], _word(self.dtype))
         if not self.is_unique:
             from .errors import InvalidIndexError
 
             raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
         if at == 0:
             return None if _word(self.dtype).startswith(("datetime64", "timedelta64")) else math.nan
-        return values[at - 1]
+        return _numpy_cell(values[at - 1], _word(self.dtype))
 
     def _as_label(self, value: Any) -> Any:
         """A label written as text read as the instant or span this index holds."""
@@ -31499,7 +31503,7 @@ class IndexMixin:
         """The one label, which is an error when there is not exactly one."""
         if len(self) != 1:
             raise InvalidArgumentError("can only convert an array of size 1 to a Python scalar")
-        return self[0]
+        return _plain(self[0])
 
     def fillna(self, value: Any) -> Index:
         """The labels with each missing one replaced by `value`."""
@@ -31787,10 +31791,19 @@ class IndexMixin:
             replacement = value.tolist() if hasattr(value, "tolist") else list(value)
         else:
             replacement = [value]
+        flags = [bool(m) for m in mask]
         try:
-            return Index._wrap(self._inner.putmask([bool(m) for m in mask], list(replacement)))
+            return Index._wrap(self._inner.putmask(flags, list(replacement)))
         except Exception as error:
-            raise translate(error) from None
+            if not replacement or len(flags) != self._inner.length():
+                raise translate(error) from None
+        # A label of another kind: the labels are read again together, as numpy
+        # repeats the replacements by position, so floats or objects come out.
+        labels = _values_of(self._inner)
+        for at, flag in enumerate(flags):
+            if flag:
+                labels[at] = replacement[at % len(replacement)]
+        return Index(labels, name=self.name)
 
     def slice_locs(self, start: Any = None, end: Any = None, step: Any = None) -> tuple[int, int]:
         """The half open row range a pair of labels describes, both ends inclusive.
@@ -32263,7 +32276,11 @@ class IndexMixin:
         """
         if _text_beside_numbers(self, other):
             return _mixed_set_operation(self, other, "intersection", sort)
-        return self._set_operation("intersection", other, False if sort is None else bool(sort))
+        if sort is None:
+            # pandas sorts unless the other side is the same labels in the same order.
+            same = isinstance(other, IndexMixin) and self.equals(other)
+            sort = not same and not (isinstance(other, list) and self.tolist() == other)
+        return self._set_operation("intersection", other, bool(sort))
 
     def difference(self, other: Any, sort: bool | None = None) -> Index:
         """Every label this index has and the other does not."""
@@ -32284,7 +32301,7 @@ class IndexMixin:
         if _text_beside_numbers(self, other):
             return _mixed_set_operation(self, other, "symmetric_difference", sort, result_name)
         try:
-            return Index._wrap(
+            answer = Index._wrap(
                 self._inner.symmetric_difference(
                     _unwrap(other, "other"),
                     True if sort is None else bool(sort),
@@ -32293,6 +32310,7 @@ class IndexMixin:
             )
         except Exception as error:
             raise translate(error) from None
+        return answer if result_name is not None else _named_by_self(answer, self, other)
 
     def _set_operation(self, which: str, other: Any, sort: bool) -> Index:
         """Runs one of the three set operations that share a signature.
@@ -32318,10 +32336,23 @@ class IndexMixin:
         except Exception as error:
             raise translate(error) from None
         # A difference is a filter of this side, and keeps its type.
-        return answer.astype(self.dtype) if which == "difference" and left is not self else answer
+        if which == "difference" and left is not self:
+            answer = answer.astype(self.dtype)
+        return _named_by_self(answer, self, other)
 
     str = Namespace(IndexStrings)
     """The string accessor, which answers indexes where the column one answers columns."""
+
+
+def _named_by_self(answer: Any, index: Any, other: Any) -> Any:
+    """A set operation's answer named for this side when the other is not an index.
+
+    pandas reads a list, a column or an array as an index carrying this side's
+    name, so only another index's own name can take the name away.
+    """
+    if isinstance(other, IndexMixin) or answer.name == index.name:
+        return answer
+    return answer.rename(index.name)
 
 
 def _text_beside_numbers(left: Any, right: Any) -> bool:
@@ -32448,6 +32479,11 @@ def _unwrap(value: Any, name: str) -> Any:
         return value._inner
     if isinstance(value, (list, tuple)):
         return _firepanda.Index(list(value), None)
+    if type(value).__name__ == "Series" or _is_numpy(value):
+        # A column or an array is read as the index of its values, as pandas reads it.
+        from ._frame import Index
+
+        return Index(value.tolist())._inner
     raise TypeError(f"{name} must be an Index or a list of labels, not a {type(value).__name__}")
 
 
