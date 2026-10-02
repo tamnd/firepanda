@@ -7820,6 +7820,11 @@ def _column_positions(names: list[str], key: Any) -> list[int]:
     raise InvalidArgumentError(f"cannot select columns with a {type(key).__name__}")
 
 
+def _whole_position(key: Any) -> bool:
+    """Whether a key is one whole number used as a position, rather than a list or a flag."""
+    return isinstance(key, int) and not isinstance(key, bool)
+
+
 def _named_at(names: list[str], positions: list[int]) -> list[str]:
     """Turns column positions into column names, counting from the end.
 
@@ -8143,7 +8148,15 @@ class _Selection:
 
         inner = self._owner._inner
         names = inner.names()
-        picked = self._columns(columns, names)
+        try:
+            picked = self._columns(columns, names)
+        except OutOfBoundsError:
+            if _whole_position(rows) and _whole_position(columns):
+                # One cell off the right end is numpy's wording in pandas, not pandas' own.
+                raise OutOfBoundsError(
+                    f"index {columns} is out of bounds for axis 0 with size {len(names)}"
+                ) from None
+            raise
         where = self._rows(rows, inner.length())
         try:
             if isinstance(picked, str):
@@ -8762,9 +8775,15 @@ class _Positional(_Selection):
         """Reads a column key as positions."""
         if key is EVERY:
             return EVERY
+        # pandas words a column off the end the way it words a row off the end.
         if isinstance(key, int) and not isinstance(key, bool):
+            if not -len(names) <= key < len(names):
+                raise OutOfBoundsError("single positional indexer is out-of-bounds")
             return _named_at(names, [int(key)])[0]
-        return _named_at(names, _column_positions(names, key))
+        try:
+            return _named_at(names, _column_positions(names, key))
+        except OutOfBoundsError:
+            raise OutOfBoundsError("positional indexers are out-of-bounds") from None
 
 
 class _Labelled(_Selection):
@@ -14016,7 +14035,7 @@ class DataFrameMixin(_Carries):
 
     def fillna(
         self,
-        value: Any = None,
+        value: Any,
         *,
         axis: Any = None,
         inplace: bool = False,
@@ -17450,8 +17469,13 @@ class DataFrameMixin(_Carries):
                 names = self._inner.names()
                 return DataFrame._wrap(self._inner.select(_named_at(names, wanted)))
             return DataFrame._wrap(self._inner.take(wanted))
+        except OutOfBoundsError:
+            raise OutOfBoundsError("indices are out-of-bounds") from None
         except Exception as error:
-            raise translate(error) from None
+            translated = translate(error)
+            if isinstance(translated, OutOfBoundsError):
+                raise OutOfBoundsError("indices are out-of-bounds") from None
+            raise translated from None
 
     def _filter(self, items: Any, like: str | None, regex: str | None, axis: Any) -> DataFrame:
         """Keeps the labels one of three rules names, on either axis.
@@ -19814,7 +19838,7 @@ class SeriesMixin(_Carries):
 
     def fillna(
         self,
-        value: Any = None,
+        value: Any,
         *,
         axis: Any = None,
         inplace: bool = False,
@@ -29240,9 +29264,17 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         one = isinstance(key, (str, int, float))
         asked = [key] if one else list(key)
         held = self._frame._inner.names()
-        for name in asked:
-            if not isinstance(name, (str, int, float)) or _names.held(name) not in held:
-                raise KeyError(name)
+        missing = [
+            name
+            for name in asked
+            if not isinstance(name, (str, int, float)) or _names.held(name) not in held
+        ]
+        if missing and one:
+            raise KeyError(f"Column not found: {key}")
+        if missing:
+            with contextlib.suppress(TypeError):
+                missing = sorted(missing)
+            raise KeyError(f"Columns not found: {str(missing)[1:-1]}")
         names = _names.held_all(asked)
         if any(name in self._by for name in names):
             return self._key_selected(key, names)

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import abc as abc
 import ctypes as ctypes
+import re as _re
 from typing import Any
 
 from . import cow as cow
@@ -486,6 +487,24 @@ BY_BUILTIN_NAME: dict[str, type[BaseException]] = {
 }
 
 
+# The core says more about a position off the end than pandas does. Each pattern
+# is the core's wording and the replacement is pandas' wording of the same failure.
+_PANDAS_WORDS = (
+    (_re.compile(r"^(positional indexers are out-of-bounds); .*$", _re.S), r"\1"),
+    (
+        _re.compile(r"^index (-?\d+) is out of bounds for a frame with (\d+) rows$"),
+        r"index \1 is out of bounds for axis 0 with size \2",
+    ),
+)
+
+
+def _pandas_words(message: str) -> str:
+    """A message from the core reworded the way pandas words the same failure."""
+    for pattern, replacement in _PANDAS_WORDS:
+        message = pattern.sub(replacement, message)
+    return message
+
+
 def translate(error: BaseException) -> BaseException:
     """Turns an error that crossed the boundary into the class it should be.
 
@@ -511,7 +530,7 @@ def translate(error: BaseException) -> BaseException:
         # evidence of what went wrong.
         wanted = BY_KIND.get(kind)
         # The core names its date and time module first, which pandas never does.
-        rest = rest.removeprefix("temporal: ")
+        rest = _pandas_words(rest.removeprefix("temporal: "))
         return wanted(rest) if wanted is not None else RuntimeError(message)
 
     # `Exception: TypeError: ...` and the double wrapped `ValueError: TypeError:
