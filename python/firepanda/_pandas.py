@@ -10636,6 +10636,24 @@ def _column_labels(frame: DataFrame) -> Index:
     return made
 
 
+def _all_columns_named(frame: Any, held: list[Any]) -> None:
+    """Refuses a list of names some of which the frame lacks, in pandas' words.
+
+    pandas lists the missing names when some are there, and repeats the whole
+    key as an index when none of them are.
+    """
+    names = frame._inner.names()
+    missing = [name for name in held if name not in names]
+    if not missing or _column_depth(_names.shown_all(names)) > 1:
+        return
+    if len(missing) < len(held):
+        raise ColumnNotFoundError(f"{_names.shown_all(missing)!r} not in index")
+    from ._frame import Index
+
+    shown = repr(Index(_names.shown_all(held)))
+    raise ColumnNotFoundError(f"None of [{shown}] are in the [columns]")
+
+
 def _column_depth(labels: list[Any]) -> int:
     """How many levels a frame's column labels have, which is one unless they are tuples.
 
@@ -12485,6 +12503,7 @@ class DataFrameMixin(_Carries):
             key = list(key.tolist())
         if isinstance(key, list):
             key = _names.held_all(key)
+            _all_columns_named(self, key)
         elif isinstance(key, tuple) and key:
             try:
                 named = _names.held(key)
@@ -12506,6 +12525,9 @@ class DataFrameMixin(_Carries):
                 return Series._wrap(self._inner.column(key))
             except Exception as error:
                 levelled = _level_selected(self, key)
+                if levelled is None and key not in self._inner.names():
+                    # pandas names the missing column and nothing else.
+                    raise ColumnNotFoundError(_names.shown(key)) from None
                 if levelled is None:
                     raise translate(error) from None
                 return levelled
@@ -16909,6 +16931,8 @@ class DataFrameMixin(_Carries):
             return _settled(self, made, inplace)
         if len(wanted) != 1 or _flag("append", append):
             return _settled(self, self._set_levels(wanted, bool(drop), bool(append)), inplace)
+        if wanted[0] not in _shown_names(self):
+            raise ColumnNotFoundError(f"None of {wanted} are in the columns")
         try:
             made = self._inner.set_index(_names.held(wanted[0]), bool(drop))
             return _settled(self, DataFrame._wrap(made), inplace)

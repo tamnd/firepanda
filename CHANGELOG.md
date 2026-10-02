@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Missing column messages match pandas
+
+Asking a frame for a column it lacks raises a KeyError carrying just the name, a list with some names missing says which are not in the index, a list with none present repeats the key as an index, and `set_index` on a missing column says none of the names are in the columns, all in pandas' words. `sort_values` by a missing column follows from the first.
+
 ### Changed: RangeIndex methods keep a RangeIndex
 
 Slicing, taking, sorting, deleting, inserting, appending, the set operations, arithmetic by an integer and the other RangeIndex methods now answer with a RangeIndex whenever the labels still step evenly, as pandas does, and fall back to a plain Index otherwise. Two ranges intersect with pandas' own range arithmetic, so the stop matches, `min` and `max` give Python ints, and `repeat` gives a plain Index. Labels that are not a range are no longer typed as a RangeIndex.
