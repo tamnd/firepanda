@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Index labels as numpy scalars, set operations with a list, putmask of another kind
+
+One label taken out of a number index by position, and the label `Index.asof` answers, are now numpy's scalar of the index's type, as in pandas, while a range index and `Index.item` still answer a plain int. `union`, `intersection`, `difference` and `symmetric_difference` keep this index's name when the other side is a list, a column or an array, and accept a column or an array as the other side. `intersection` with `sort=None` sorts unless the other side holds the same labels in the same order. `Index.putmask` with a replacement of another kind reads the labels again together, giving floats or objects instead of an error.
+
 ### Fixed: Index.insert of another kind, to_flat_index, and slice_locs bounds
 
 `Index.insert` with a label of another kind now reads the labels together the way pandas does, so a float among whole numbers makes a float64 index and text among numbers makes an object index, keeping the name. A position past either end raises pandas' `IndexError` message. `MultiIndex.to_flat_index` answers a flat index of tuples instead of another MultiIndex. `Index.slice_locs` answers a numpy int64 for a bound it had to search for and a plain int for a label the index holds, on both the forward and backward paths.
