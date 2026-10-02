@@ -66,6 +66,7 @@ __all__ = [
     "Rolling",
     "Series",
     "SeriesGroupBy",
+    "SqlSession",
     "StringAccessor",
 ]
 
@@ -4751,6 +4752,58 @@ class Index(IndexMixin):
         """The labels' Arrow data, as an arrow_schema and an arrow_array PyCapsule."""
         try:
             return tuple(_arrow_column(self).arrow_c_array(requested_schema))
+        except Exception as error:
+            raise translate(error) from None
+
+
+class SqlSession:
+    """A SQL session, whose tables, views, settings and prepared statements last from one
+    statement to the next, which is what the shell runs on.
+    """
+
+    __slots__ = ("_inner",)
+
+    @classmethod
+    def _wrap(cls, inner: _firepanda.SqlSession) -> SqlSession:
+        """Puts the wrapper around an extension object.
+
+        Not a public entry point. It allocates without going through
+        __init__ because __init__ is the pandas constructor, which takes
+        data rather than an extension object.
+        """
+        self = object.__new__(cls)
+        self._inner = inner
+        return self
+
+    def __init__(self, inner: _firepanda.SqlSession) -> None:
+        """Wraps an extension object. Not a public entry point."""
+        self._inner = inner
+
+    def execute(self, query: str) -> DataFrame:
+        """Runs one statement and answers what it answers, as a frame."""
+        try:
+            return DataFrame._wrap(self._inner.execute(query))
+        except Exception as error:
+            raise translate(error) from None
+
+    def register(self, name: str, frame: DataFrame) -> None:
+        """Puts a frame under a name, replacing whatever the name held."""
+        try:
+            return self._inner.register(name, frame._inner)
+        except Exception as error:
+            raise translate(error) from None
+
+    def names(self) -> list[str]:
+        """Every table and view the session holds, as they were written."""
+        try:
+            return self._inner.names()
+        except Exception as error:
+            raise translate(error) from None
+
+    def functions(self) -> list[str]:
+        """Every function name the dialect knows, aliases included, sorted."""
+        try:
+            return self._inner.functions()
         except Exception as error:
             raise translate(error) from None
 

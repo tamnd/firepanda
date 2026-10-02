@@ -28,6 +28,10 @@ classifiers = [
 # pyarrow to accept a frame with no copy. docs/specs/07-python-bindings.md section 4.
 dependencies = []
 
+# The SQL shell. `python -m firepanda` is the same thing.
+[project.scripts]
+firepanda = "firepanda._shell:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8", "pyarrow>=25.0", "pandas>=3.0", "polars>=1.43", "duckdb"]
 

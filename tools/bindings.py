@@ -4655,7 +4655,81 @@ FUNCTIONS = (
     ),
 )
 
-TYPES: tuple[Exposed, ...] = (FRAME, SERIES, INDEX)
+SESSION = Exposed(
+    mojo="PySqlSession",
+    name="SqlSession",
+    py="SqlSession",
+    doc=(
+        "A SQL session, whose tables, views, settings and prepared statements last"
+        " from one statement to the next, which is what the shell runs on."
+    ),
+    init="PySqlSession.py_init",
+    module="firepanda.py.session",
+    bindings=(
+        Binding(
+            mojo="PySqlSession.execute",
+            name="execute",
+            doc="Runs one statement against the session's catalog.",
+            params=(("query", "str"),),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PySqlSession.register",
+            name="register",
+            doc="Puts a frame under a name, replacing whatever the name held.",
+            params=(("name", "str"), ("frame", "DataFrame")),
+            returns="None",
+        ),
+        Binding(
+            mojo="PySqlSession.names",
+            name="names",
+            doc="Every table and view the session holds, as they were written.",
+            returns="list[str]",
+        ),
+        Binding(
+            mojo="PySqlSession.functions",
+            name="functions",
+            doc="Every function name the dialect knows, aliases included, sorted.",
+            returns="list[str]",
+        ),
+    ),
+    members=(
+        Member(
+            name="execute",
+            kind="method",
+            signature="query: str",
+            body="self._inner.execute(query)",
+            doc="Runs one statement and answers what it answers, as a frame.",
+            returns="DataFrame",
+            wraps="DataFrame",
+        ),
+        Member(
+            name="register",
+            kind="method",
+            signature="name: str, frame: DataFrame",
+            body="self._inner.register(name, frame._inner)",
+            doc="Puts a frame under a name, replacing whatever the name held.",
+            returns="None",
+        ),
+        Member(
+            name="names",
+            kind="method",
+            body="self._inner.names()",
+            doc="Every table and view the session holds, as they were written.",
+            returns="list[str]",
+        ),
+        Member(
+            name="functions",
+            kind="method",
+            body="self._inner.functions()",
+            doc="Every function name the dialect knows, aliases included, sorted.",
+            returns="list[str]",
+        ),
+    ),
+)
+
+
+TYPES: tuple[Exposed, ...] = (FRAME, SERIES, INDEX, SESSION)
 
 
 @dataclass(frozen=True)

@@ -551,6 +551,20 @@ class Index:
         """The labels' Arrow schema and data, in two capsules."""
         ...
 
+class SqlSession:
+    def execute(self, query: str) -> DataFrame:
+        """Runs one statement against the session's catalog."""
+        ...
+    def register(self, name: str, frame: DataFrame) -> None:
+        """Puts a frame under a name, replacing whatever the name held."""
+        ...
+    def names(self) -> list[str]:
+        """Every table and view the session holds, as they were written."""
+        ...
+    def functions(self) -> list[str]:
+        """Every function name the dialect knows, aliases included, sorted."""
+        ...
+
 def _read_csv(path: str) -> DataFrame:
     """Reads a CSV file into a frame, behind `read_csv` in `_pandas`."""
     ...
