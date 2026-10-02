@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Comparing series on different labels says what pandas says
+
+`==`, `!=`, `<` and the rest between two typed series whose labels differ now raise a `ValueError` with pandas' words, "Can only compare identically-labeled Series objects", where the message used to be firepanda's own.
+
 ### Fixed: Logical operators between integers and bools
 
 `&`, `|` and `^` between an integer column and a boolean column, either way round, now work bit by bit with the bools as zero and one and answer bools, so `True & 2` is False, as pandas does. An integer column on the left used to be refused.

@@ -154,17 +154,16 @@ def test_the_reflected_forms_put_the_operands_the_other_way_round(
 
 
 def test_a_comparison_operator_refuses_to_align(firepanda: ModuleType) -> None:
-    """And says which methods will, which is the part that makes the refusal usable.
+    """With pandas' words, which code catching it is written against.
 
     pandas' rule, not an implementation limit. A row only one side has has no true
     or false answer, so `==` refuses the pair outright, and the named forms are
     the ones that align. The class is `ValueError` because that is what pandas
-    raises and what code catching it is written against.
+    raises.
     """
     left, right = _pair(firepanda)
-    with pytest.raises(ValueError, match="identically-labeled") as raised:
+    with pytest.raises(ValueError, match=r"^Can only compare identically-labeled Series objects$"):
         left == right  # noqa: B015
-    assert "eq" in str(raised.value)
 
     assert (left == firepanda.Series([1, 9, 3], name="x")).tolist() == [True, False, True]
     assert (left < 2).tolist() == [True, False, False]

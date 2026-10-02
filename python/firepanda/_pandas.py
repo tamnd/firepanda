@@ -20847,6 +20847,8 @@ class SeriesMixin(_Carries):
             scaled = _span_arithmetic(self, other, op, flip)
         if scaled is not None:
             return scaled
+        if strict and isinstance(other, SeriesMixin) and _labels_differ(self, other, 0):
+            raise InvalidArgumentError("Can only compare identically-labeled Series objects")
         try:
             if isinstance(other, SeriesMixin):
                 if strict:
