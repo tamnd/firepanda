@@ -54,6 +54,7 @@ from ._pandas import (
     _lossless_or_raise,
     _naive_convert,
     _numpy,
+    _numpy_out,
     _on_the_clock,
     _spelled,
     _zone_name,
@@ -474,6 +475,12 @@ class DatetimeIndex(HeldFreq, Index):
         return _objects_out([NaT if label is None else label.date() for label in self._labels()])
 
     @property
+    def values(self) -> Any:
+        """The labels as numpy datetime64, a zoned label read on UTC's clock, as in pandas."""
+        naive = self if self.tz is None else self.tz_convert("UTC").tz_localize(None)
+        return naive.to_numpy()
+
+    @property
     def asi8(self) -> list[Any]:
         """The labels as the whole numbers they are stored as.
 
@@ -757,8 +764,8 @@ class DatetimeIndex(HeldFreq, Index):
             return int(self.slice_indexer(None, label).stop)
         return super().get_slice_bound(label, side)
 
-    def indexer_at_time(self, time: Any, asof: bool = False) -> list[int]:
-        """The positions of the labels whose time of day is `time`."""
+    def indexer_at_time(self, time: Any, asof: bool = False) -> Any:
+        """The positions of the labels whose time of day is `time`, as a numpy array."""
         if asof:
             raise NotImplementedError("'asof' argument is not supported")
         if isinstance(time, str):
@@ -769,7 +776,7 @@ class DatetimeIndex(HeldFreq, Index):
             raise InvalidArgumentError("Index must be timezone aware.")
         wanted = _time_micros(time)
         found = self._micros(time.tzinfo)
-        return [at for at, micros in enumerate(found) if micros == wanted]
+        return _numpy_out([at for at, micros in enumerate(found) if micros == wanted], "positions")
 
     def indexer_between_time(
         self,
@@ -777,8 +784,8 @@ class DatetimeIndex(HeldFreq, Index):
         end_time: Any,
         include_start: bool = True,
         include_end: bool = True,
-    ) -> list[int]:
-        """The positions of the labels whose time of day is between two times.
+    ) -> Any:
+        """The positions of the labels whose time of day is between two times, as a numpy array.
 
         When the start is after the end the range wraps past midnight.
         """
@@ -791,11 +798,12 @@ class DatetimeIndex(HeldFreq, Index):
             return micros <= end if include_end else micros < end
 
         wraps = start > end
-        return [
+        found = [
             at
             for at, micros in enumerate(self._micros())
             if ((after(micros) or before(micros)) if wraps else (after(micros) and before(micros)))
         ]
+        return _numpy_out(found, "positions")
 
     def isocalendar(self) -> Any:
         """The ISO year, week and day of every label, as a frame on this index."""

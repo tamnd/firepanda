@@ -1007,8 +1007,8 @@ def _datetime_members() -> tuple[Member, ...]:
             name="isocalendar",
             kind="method",
             signature="",
-            body="self._isocalendar()",
-            doc="The ISO 8601 year, week and day of every row, as a frame.",
+            body='self._isocalendar().astype("UInt32")',
+            doc="The ISO 8601 year, week and day of every row, as a frame of pandas' UInt32.",
             returns="DataFrame",
         )
     )

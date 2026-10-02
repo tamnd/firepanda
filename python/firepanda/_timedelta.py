@@ -60,6 +60,11 @@ class TimedeltaIndex(HeldFreq, Index):
 
     __slots__ = ()
 
+    @property
+    def values(self) -> Any:
+        """The labels as numpy timedelta64, as pandas hands them out."""
+        return self.to_numpy()
+
     def __init__(
         self,
         data: Any = None,

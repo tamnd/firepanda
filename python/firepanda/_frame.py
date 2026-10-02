@@ -430,9 +430,9 @@ class DatetimeProperties(DatetimeMixin):
             raise translate(error) from None
 
     def isocalendar(self) -> DataFrame:
-        """The ISO 8601 year, week and day of every row, as a frame."""
+        """The ISO 8601 year, week and day of every row, as a frame of pandas' UInt32."""
         try:
-            return self._isocalendar()
+            return self._isocalendar().astype("UInt32")
         except Exception as error:
             raise translate(error) from None
 

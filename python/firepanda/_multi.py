@@ -400,7 +400,8 @@ class MultiIndex:
     @property
     def dtypes(self) -> Series:
         """The type of every level, labelled by the level names."""
-        return Series([str(level.dtype) for level in self.levels], index=self._names)
+        names = [f"level_{at}" if name is None else name for at, name in enumerate(self._names)]
+        return Series([str(level.dtype) for level in self.levels], index=names, dtype="object")
 
     @property
     def inferred_type(self) -> str:
