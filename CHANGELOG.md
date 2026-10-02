@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Number column names print to one width
+
+A frame whose column names are whole or decimal numbers prints them the way its index would, flush left to one width and to one precision, measured over the columns that print, as pandas does. A dict of formatters finds a column by its position first when a column has that position as its name, as pandas' lookup does.
+
 ### Fixed: groupby groups prints like pandas
 
 `groups` over one key is a dict that prints each group's labels as a list, with text quoted and long groups cut at a hundred items, as pandas prints it. The values are still an `Index`, and over several keys it stays a plain dict.
