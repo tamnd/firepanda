@@ -135,6 +135,11 @@ def masked_for(lower: str) -> str:
     return _UPPER[lower]
 
 
+def upper_of(lower: str) -> str:
+    """The masked type a numpy type stands as, such as `Int64` for `int64`, else `Float64`."""
+    return _UPPER.get(lower, "Float64")
+
+
 def masked_of(column: Any) -> str | None:
     """The masked type of a series, or None for any other column."""
     return _objects.masked_name_of(column._inner)
@@ -287,13 +292,17 @@ def _held_values_of(column: Any) -> list[Any]:
     return [_gapless(value) for value in _held_values(column._inner)]
 
 
-def operated(column: Series, other: Any, op: str, run: Any) -> Any:
+def operated(column: Series, other: Any, op: str, run: Any, flip: bool = False) -> Any:
     """An operator with a masked column on either side, run over the lower case columns.
 
     A comparison answers `boolean` with a gap wherever either side has one, which
     is the one rule the lower case kernels do not already keep.
     """
     from ._pandas import SeriesMixin
+
+    whole = _whole_over_zero(column, other, op, flip)
+    if whole is not None:
+        return whole
 
     left = plain(column) if masked_of(column) else column
     right = other
@@ -311,6 +320,46 @@ def operated(column: Series, other: Any, op: str, run: Any) -> Any:
         ]
         return _boolean(flags, answer)
     return rewrap(answer)
+
+
+def _whole_over_zero(column: Series, other: Any, op: str, flip: bool) -> Series | None:
+    """Floor division or the remainder of masked whole numbers, a zero divisor giving 0.
+
+    pandas answers 0 where a masked integer column is floored or taken the
+    remainder of by zero, keeping the type, where the lower case kernel answers
+    a gap. A divisor that is not a whole number, a column on the right, or two
+    masked types that differ go the usual way, and None says so.
+    """
+    from ._frame import Series
+    from ._pandas import SeriesMixin
+
+    name = masked_of(column)
+    if flip or op not in ("floordiv", "mod") or not name or "Int" not in name:
+        return None
+    rows = _held_values_of(column)
+    if isinstance(other, SeriesMixin):
+        if not other.index.equals(column.index):
+            return None
+        theirs = masked_of(other)
+        if theirs not in (None, name) or not str(other.dtype).startswith(("int", "uint", name)):
+            return None
+        divisors = _held_values_of(other)
+    elif (isinstance(other, int) and not isinstance(other, bool)) or _is_whole(other):
+        divisors = [int(other)] * len(rows)
+    else:
+        return None
+    take = (lambda a, b: a // b) if op == "floordiv" else (lambda a, b: a % b)
+    held = [
+        None if a is None or b is None else 0 if b == 0 else take(int(a), int(b))
+        for a, b in zip(rows, divisors, strict=True)
+    ]
+    cells = _objects.masked_cells(held, name)
+    return Series(cells, dtype="str", index=column.index, name=column.name)
+
+
+def _is_whole(value: Any) -> bool:
+    """Whether a value is a numpy whole number."""
+    return type(value).__module__ == "numpy" and type(value).__name__.startswith(("int", "uint"))
 
 
 def _boolean(flags: list[Any], like: Any) -> Series:
@@ -376,9 +425,11 @@ def truth(values: list[Any], kind: str, skipna: bool) -> Any:
     value settles the answer anyway, a True for `any` or a False for `all`.
     """
     from ._na import NA
+    from ._pandas import _numpy
 
     present = [bool(value) for value in values if value is not None]
     settled = any(present) if kind == "any" else all(present)
     if skipna or len(present) == len(values) or settled == (kind == "any"):
-        return settled
+        # A settled answer is a numpy flag, as pandas answers it.
+        return _numpy().bool_(settled)
     return NA
