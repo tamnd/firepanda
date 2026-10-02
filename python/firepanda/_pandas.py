@@ -6106,6 +6106,12 @@ def _logical_operand(value: Any, op: str) -> None:
     elif isinstance(value, bool):
         return
     else:
+        if isinstance(value, (list, tuple)):
+            raise TypeError(
+                "Logical ops (and, or, xor) between Pandas objects and dtype-less sequences"
+                " (e.g. list, tuple) are no longer supported. Wrap the object in a Series,"
+                " Index, or np.array before operating instead."
+            )
         if isinstance(value, (float, str, type(None))):
             raise TypeError(
                 f"Cannot perform '{op}_' with a dtyped [bool] array and scalar of type"
@@ -6157,6 +6163,12 @@ def _bitwise(column: Any, other: Any, op: str, flip: bool) -> Any:
     elif _integral(mine) and isinstance(other, int) and not isinstance(other, bool):
         values = [other] * len(column)
         kind, name = mine, column.name
+    elif isinstance(other, int) and (mine == "bool") != isinstance(other, bool) and (
+        mine == "bool" or _integral(mine)
+    ):
+        # A flag against a whole number goes bit by bit and reads back as flags.
+        values = [other] * len(column)
+        kind, name = "bool", column.name
     else:
         return None
     run = {"and": operator.and_, "or": operator.or_, "xor": operator.xor}[op]
@@ -16112,6 +16124,8 @@ class DataFrameMixin(_Carries):
 
         if (bitwise := _bitwise_frame(self, other, op, flip)) is not None:
             return bitwise
+        if isinstance(other, (list, tuple)):
+            _logical_operand(other, op)
         _logical_operand(self, op)
         _logical_operand(other, op)
         try:
@@ -21124,6 +21138,8 @@ class SeriesMixin(_Carries):
             return _masked.logical(self, other, op)
         if (bitwise := _bitwise(self, other, op, flip)) is not None:
             return bitwise
+        if isinstance(other, (list, tuple)):
+            _logical_operand(other, op)
         _logical_operand(self, op)
         _logical_operand(other, op)
         try:

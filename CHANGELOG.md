@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Logical operators against constants and lists
+
+A boolean column against a whole number constant, and a whole number column against True or False, now work bit by bit and answer flags, as pandas does, where both used to be refused. A list or tuple on the right raises pandas' `TypeError` asking for a Series, Index or array instead.
+
 ### Fixed: Comparing series on different labels says what pandas says
 
 `==`, `!=`, `<` and the rest between two typed series whose labels differ now raise a `ValueError` with pandas' words, "Can only compare identically-labeled Series objects", where the message used to be firepanda's own.
