@@ -1728,6 +1728,36 @@ def _categories_kept(made: Any, index: Any) -> Any:
     return made
 
 
+_NUMPY_LABELS = frozenset(
+    (
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float32",
+        "float64",
+        "bool",
+    )
+)
+
+
+def _index_values(inner: Any) -> Any:
+    """An index's labels as pandas hands out `values`, a numpy array for numbers and flags.
+
+    Labels of any other type stay a Python list, since pandas' answer for those
+    is an extension array that firepanda has no twin of.
+    """
+    values = _values_of(inner)
+    dtype = str(inner.dtype())
+    if dtype not in _NUMPY_LABELS or (dtype == "bool" and None in values):
+        return values
+    return _numpy().array(values, dtype=dtype)
+
+
 def _typed_labels(index: Any, labels: list[Any]) -> Any:
     """The labels as they go in, a categorical index's as its categorical so its type stays."""
     if index is not None and str(getattr(index, "dtype", "")) == "category":
@@ -20190,7 +20220,11 @@ class SeriesMixin(_Carries):
         from ._categorical import Categorical
 
         seen = self[_first_seen(self)]
-        return Categorical._held_by(seen) if seen.dtype == "category" else FirepandaArray(seen)
+        if seen.dtype == "category":
+            return Categorical._held_by(seen)
+        if str(seen.dtype) in _NUMPY_LABELS and not (seen.dtype == "bool" and seen.hasnans):
+            return _numpy().array(seen.tolist(), dtype=str(seen.dtype))
+        return FirepandaArray(seen)
 
     def factorize(
         self, sort: bool = False, use_na_sentinel: bool = True
@@ -30123,6 +30157,34 @@ def _answers(*kinds: str) -> Any:
     return wrap
 
 
+def _equal_across_types(left: Any, right: Any) -> bool:
+    """Whether two indexes of different types hold equal labels, as pandas' `equals` finds.
+
+    pandas compares numbers by value whatever their width or sign, so int64 and
+    uint64 labels can be equal, and labels of objects are compared one by one
+    with whatever they sit beside. Text never equals numbers.
+    """
+    kinds = {_label_kind(left), _label_kind(right)}
+    if len(left) != len(right) or None in kinds:
+        return False
+    if kinds == {"number"} and str(left.dtype) == str(right.dtype):
+        return False
+    return all(
+        _is_gap(a) and _is_gap(b) if _is_gap(a) or _is_gap(b) else a == b
+        for a, b in zip(left.tolist(), right.tolist(), strict=True)
+    )
+
+
+def _label_kind(index: Any) -> str | None:
+    """The kind `_equal_across_types` compares an index as, None for one it leaves alone."""
+    if _objects.is_object(index._inner):
+        return "object"
+    dtype = str(index.dtype)
+    if dtype in _NUMPY_LABELS and dtype != "bool":
+        return "number"
+    return None
+
+
 class IndexMixin:
     """The hand written half of `Index`."""
 
@@ -30615,7 +30677,8 @@ class IndexMixin:
         run = found[-1] - found[0] + 1 == len(found)
         if run and self._inner.is_monotonic_increasing():
             return slice(found[0], found[-1] + 1, None)
-        return [i in set(found) for i in range(self._inner.length())]
+        hits = set(found)
+        return _numpy_out([i in hits for i in range(self._inner.length())], "flags")
 
     @property
     def categories(self) -> Index:
@@ -31427,9 +31490,10 @@ class IndexMixin:
         if not isinstance(other, IndexMixin):
             return False
         try:
-            return self._inner.equals(other._inner)
+            same = self._inner.equals(other._inner)
         except Exception as error:
             raise translate(error) from None
+        return same or _equal_across_types(self, other)
 
     def identical(self, other: Any) -> bool:
         """Whether the labels and the name both match."""

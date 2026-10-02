@@ -4494,9 +4494,9 @@ INDEX = Exposed(
         Member(
             name="values",
             kind="property",
-            body="_values_of(self._inner)",
-            doc="The labels as a Python list, where pandas hands back a numpy array.",
-            returns="list[object]",
+            body="_index_values(self._inner)",
+            doc="The labels as a numpy array for numbers and flags, a Python list otherwise.",
+            returns="Any",
         ),
         Member(
             name="is_unique",
@@ -5298,6 +5298,8 @@ def wrapper() -> str:
     # values have to be made moments on the way, which is hand written too.
     if any("_values_of(" in m.body for m in every):
         mixins.add("_values_of")
+    if any("_index_values(" in m.body for m in every):
+        mixins.add("_index_values")
     # A frame and a column print through the text formatter, since the core
     # writes a frame as a summary and a zoned instant as its count.
     if any("_printed(" in m.body for m in every):
