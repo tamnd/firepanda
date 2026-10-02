@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `firepanda`, the SQL shell
+
+`firepanda -c "SELECT ..."`, statements piped in, or an interactive prompt when run
+at a terminal. `python -m firepanda` is the same shell. Every statement runs in one
+session, so a table, a view, a setting or a prepared statement made by one is there
+for the next. The new `SqlSession` extension type holds that session.
+
+Results print as DuckDB's shell prints them by default: a box with the column names
+over their types. `.mode` switches to `csv`, `list` or `line`. The interactive prompt
+keeps its history, carries a statement across lines until a semicolon, and completes
+table, view and function names and keywords with tab. `.tables`, `.timer`, `.read`
+and `.import` work as they do in DuckDB's shell.
+
+`-c` and piped input start with `enable_external_access` off, because that text may
+have been assembled by a script. The setting cannot be turned back on.
+
 ### Changed: Flags and positions on an index are numpy arrays
 
 `Index.isin`, `isna`, `notna`, `isnull`, `notnull`, `duplicated`, `argsort`, `get_indexer`, `get_indexer_for`, `get_indexer_non_unique` and `asof_locs`, and the positions `sort_values(return_indexer=True)`, `join(return_indexers=True)` and `reindex` answer beside an index, are numpy arrays of bools or positions where they were lists, as pandas answers them. An index also takes a numpy array or a numpy number as a key.

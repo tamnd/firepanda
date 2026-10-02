@@ -24,6 +24,7 @@ from firepanda.py.frame import (
 )
 from firepanda.py.index import PyIndex
 from firepanda.py.series import PySeries
+from firepanda.py.session import PySqlSession
 
 
 def register(mut module: PythonModuleBuilder) raises:
@@ -642,4 +643,28 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = index.def_method[PyIndex.arrow_c_array](
         "arrow_c_array",
         docstring="The labels' Arrow schema and data, in two capsules.",
+    )
+
+    ref sqlsession = module.add_type[PySqlSession]("SqlSession")
+    _ = sqlsession.def_py_init[PySqlSession.py_init]()
+    _ = sqlsession.def_method[PySqlSession.execute](
+        "execute", docstring="Runs one statement against the session's catalog."
+    )
+    _ = sqlsession.def_method[PySqlSession.register](
+        "register",
+        docstring=(
+            "Puts a frame under a name, replacing whatever the name held."
+        ),
+    )
+    _ = sqlsession.def_method[PySqlSession.names](
+        "names",
+        docstring=(
+            "Every table and view the session holds, as they were written."
+        ),
+    )
+    _ = sqlsession.def_method[PySqlSession.functions](
+        "functions",
+        docstring=(
+            "Every function name the dialect knows, aliases included, sorted."
+        ),
     )
