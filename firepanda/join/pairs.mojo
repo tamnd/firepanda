@@ -1040,13 +1040,26 @@ def _pair_sparse[
         ).bitcast[DType.uint64]()
         var mine_left = List[Int]()
         var mine_right = List[Int]()
+        # The sieve is asked about every row first and the rows it lets
+        # through are listed, then only those are looked up. Each row is
+        # written to the list whether it passes or not and the end of the list
+        # moves by the answer, so the first loop has no branch on the key. A
+        # sieve that lets a few rows in a hundred through is a branch the
+        # predictor gets wrong at every one of them, and on a run of keys that
+        # mixes hits and misses it gets wrong far more.
+        var passed = List[Int32](unsafe_uninit_length=stop - start)
+        var put = passed.unsafe_ptr()
+        var found = 0
         for i in range(start, stop):
             var at = Int(reads.unsafe_offset(i).unsafe_load()) - low
-            if at < 0 or at >= span:
-                continue
-            var word = words.unsafe_offset(at >> 6).unsafe_load()
-            if (word >> UInt64(at & 63)) & 1 == 0:
-                continue
+            var inside = UInt(at) < UInt(span)
+            var spot = at if inside else 0
+            var word = words.unsafe_offset(spot >> 6).unsafe_load()
+            put.unsafe_offset(found).unsafe_write(Int32(i - start))
+            found += Int(inside) & Int((word >> UInt64(spot & 63)) & 1)
+        for f in range(found):
+            var i = start + Int(put.unsafe_offset(f).unsafe_load())
+            var at = Int(reads.unsafe_offset(i).unsafe_load()) - low
             var g: Int
             if direct:
                 g = Int(slots.unsafe_offset(at).unsafe_load()) - 1
@@ -1065,6 +1078,7 @@ def _pair_sparse[
                 for p in range(table.starts[g], table.starts[g + 1]):
                     mine_left.append(i)
                     mine_right.append(table.bucket[p])
+        _ = passed^
         lefts[start // LEFT_MORSEL_ROWS] = mine_left^
         rights[start // LEFT_MORSEL_ROWS] = mine_right^
 
