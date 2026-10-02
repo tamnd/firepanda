@@ -25,3 +25,13 @@ def test_reduction_over_plain_columns():
     assert type(frame.sum().index) is pd.Index
     assert type(frame.dtypes.index) is pd.Index
     assert frame.sum().index.tolist() == [0, 1, 2]
+
+
+def test_apply_answer_labelled_by_columns():
+    counted = pd.DataFrame([[1, 2, 3], [4, 5, 6]])
+    assert isinstance(counted.apply(lambda c: c.sum()).index, pd.RangeIndex)
+    named = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+    named.columns.name = "k"
+    answer = named.apply(lambda c: c.max())
+    assert answer.index.name == "k"
+    assert answer.tolist() == [2, 4]
