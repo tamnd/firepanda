@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Place a dense filter's rows eight at a time
+
+A filter that keeps more than one row in eight used to copy a row and move its cursor by the mask byte, so every store waited on the add before it. It now reads eight mask bytes as one word, and one multiply turns that word into the place each of the eight rows goes, so the eight stores no longer wait on each other. Six million doubles keeping one row in two filtered 2.2 to 2.6 times faster, side by side in one process, and a plain copy of the same bytes was faster still, which is what says the old loop was not waiting on memory. Over six interleaved rounds on a shared eight core box, best of fifteen, q3 at scale factor one went from 49.8 to 44.3 ms, q12 from 24.9 to 21.9 ms and q10 from 46.4 to 43.7 ms, with q7 and q20 unmoved.
+
 ### Changed: datetime index fields, inferred objects and categorical arrays follow pandas
 
 The `is_leap_year`, `is_month_start` and other flag fields of a `DatetimeIndex` are numpy arrays of bools, False for a gap, and `date`, `time`, `timetz` and `to_pydatetime` are numpy arrays of objects with `NaT` for a gap. `DataFrame.infer_objects` and `Index.infer_objects` give object columns and labels the type their values share, and `.array` of a categorical column or index is a `Categorical`.
@@ -67,6 +71,7 @@ A NaN in a float column is now missing to `sort_values` on a series, a frame and
 ### Fixed: the extension tests collect again
 
 A test module that imports firepanda at its top, as `test_clipboard.py`, `test_multiindex_labels.py`, `test_object_columns.py` and `test_optional.py` do, ran that import while pytest collected it, before the fixture had staged the package. The name then found the Mojo sources at the root of the repository as an empty namespace package, the four modules failed to collect, and the extension job stopped there on every pull request without running a test. The conftest now stages the package when it is imported, ahead of collection, and the fixture hands back that one.
+
 ### Added: C strftime composites, level arithmetic from a flat frame, and text reindex fills
 
 `strftime` writes out the C library's `%r`, `%c`, `%x` and `%X` as pandas does. A flat frame added to, compared with or divided by a MultiIndex frame with `level=` spreads its rows onto the other's. `loc` reads a column key that is not a mask as labels, groupby `ffill` and `bfill` work on number column names, `to_timedelta` reads a numpy array of numbers, and `reindex` with a text `fill_value` beside numbers answers an object column instead of refusing.
@@ -210,6 +215,7 @@ The one pass pairing of a tall side against a short one now also covers a short 
 ### Changed: List a sparse filter's kept rows and prefetch them
 
 A filter morsel that keeps fewer than one row in eight now lists the rows it keeps first and then copies them with a prefetch sixteen rows ahead, where before it copied each kept row as it found it in the mask and waited on a cache miss for nearly every one. A microbenchmark keeping one row in eighty went from 1.40 to 1.43 ms to 0.60 to 0.72 ms. Over three interleaved rounds on a shared six core box, best of fifteen, q14 at scale factor one went from 14.6 to 20.0 ms to 13.2 to 14.6 ms, with the other queries inside the noise.
+
 ### Changed: a reduction that reads its values more than once folds morsel by morsel
 
 A query whose plan starts with a reduction, such as `SELECT SUM(a), AVG(b), MIN(c) FROM t`, now cuts the table into morsels and folds each on its own core when the reduction reads the values at least twice and holds no column whole, merging the partial rows in order. Every pass after the first then reads the morsel from cache. On ClickBench at 1M rows, q29, ninety sums over one column, went from 43.5 ms to 25.1 ms and q6 from 1.5 ms to 1.1 ms. A count of rows and a distinct count still run as before.
@@ -239,6 +245,7 @@ A join key whose values sit close enough together is matched through a table ind
 ### Changed: Let an inner join skip putting an exchanged pairing back in left row order
 
 `join` and `join_on` take `ordered=False`, which lets an inner join against a much taller right side come out in right row order, as a Polars join does by default. The join builds on the short left side either way, and putting the pairs back in left row order meant gathering every right column one cache miss a row. On TPC-H q2 at scale factor one, which joins 2,000 suppliers with 800,000 part supplies, the query went from about 35 ms to about 26 ms on a shared six core box, best of fifteen. The default stays the pandas order.
+
 ### Fixed: Fill one-sided NaN in arithmetic and read frames by level
 
 An arithmetic method given fill_value now lines both sides up first and fills a missing value on one side only, as pandas does, so a NaN already in the data is filled too and not just a label gap. A frame with a MultiIndex combined with a flat frame through level= reads the other frame by that level, the power path keeps the index names, and a concat mixing a MultiIndex with a flat index builds an object index of tuples and labels.
