@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Index.insert of another kind, to_flat_index, and slice_locs bounds
+
+`Index.insert` with a label of another kind now reads the labels together the way pandas does, so a float among whole numbers makes a float64 index and text among numbers makes an object index, keeping the name. A position past either end raises pandas' `IndexError` message. `MultiIndex.to_flat_index` answers a flat index of tuples instead of another MultiIndex. `Index.slice_locs` answers a numpy int64 for a bound it had to search for and a plain int for a label the index holds, on both the forward and backward paths.
+
 ### Fixed: masked columns through frame reductions, rank, round, clip and zero divisors
 
 A frame with an `Int64` or `Float64` column sums, averages and takes the extremes and spreads of each column into one masked answer, where it raised. `describe` keeps the masked type, `round` and `clip` work on masked columns, `rank` answers `UInt64` or `Float64` by method, `isin` answers `boolean` flags, `value_counts(dropna=False)` puts the gap after the values it ties with, and `any` and `all` answer numpy flags. Floor division and the remainder of masked whole numbers by zero answer 0 as pandas does, where they answered text NaN. Masked floats and whole numbers print with pandas' spacing around a minus.

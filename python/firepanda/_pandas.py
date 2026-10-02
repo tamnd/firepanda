@@ -30280,6 +30280,42 @@ def _stamps_out(stamps: list[Any]) -> Any:
     return numpy.array([floor if value is None else value for value in stamps], dtype=numpy.int64)
 
 
+def _bound_out(bound: Any, label: Any, index: Any) -> Any:
+    """A slice bound as pandas answers it, a numpy int64 when the label had to be searched for.
+
+    A label the index holds is found where it is and answers a plain int, and
+    one it does not hold is searched for, which answers numpy's int64.
+    """
+    try:
+        held = label is None or label in index
+    except Exception:
+        held = False
+    return bound if held else _numpy().int64(bound)
+
+
+def _label_inserted(index: Any, loc: int, item: Any) -> Any:
+    """The extension index with one label put in, an index of objects when kinds differ.
+
+    The core inserts a label of the index's own kind. One of another kind makes
+    the index the labels read as together, objects for text among numbers, as
+    pandas does, keeping the name.
+    """
+    from ._frame import Index
+
+    height = index._inner.length()
+    if isinstance(loc, int) and not -height - 1 <= loc <= height:
+        raise IndexError(f"index {loc} is out of bounds for axis 0 with size {height}")
+    try:
+        return index._inner.insert(loc, item)
+    except Exception as error:
+        if not isinstance(loc, int):
+            raise translate(error) from None
+        labels = _values_of(index._inner)
+        labels.insert(loc, item)
+        # The labels are read again, so a float among whole numbers makes floats.
+        return Index(labels, name=index.name)._inner
+
+
 def _numpy_out(values: Any, kind: str) -> Any:
     """A list of flags or positions as the numpy array pandas answers, anything else as it is."""
     if not isinstance(values, list):
@@ -31777,11 +31813,11 @@ class IndexMixin:
         if forward and self._temporal and self.is_monotonic_increasing:
             # Instants and spans are compared, and text read, as the slice reads them.
             found = self.slice_indexer(start, end)
-            return (found.start, found.stop)
+            return (_bound_out(found.start, start, self), _bound_out(found.stop, end, self))
         try:
             if forward:
                 first, last = self._inner.slice_locs(start, end)
-                return (first, last)
+                return (_bound_out(first, start, self), _bound_out(last, end, self))
             height = self._inner.length()
             first = 0 if end is None else int(self.get_slice_bound(end, "left"))
             last = height if start is None else int(self.get_slice_bound(start, "right"))
@@ -31792,7 +31828,7 @@ class IndexMixin:
             last -= height
         if first == -1:
             first -= height
-        return (first, last)
+        return (_bound_out(first, end, self), _bound_out(last, start, self))
 
     def take(
         self,

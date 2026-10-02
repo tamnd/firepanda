@@ -1719,10 +1719,10 @@ class MultiIndex:
         )
 
     def to_flat_index(self) -> Index:
-        """Refused, since an index cannot hold tuples."""
-        raise NotImplementedError(
-            "to_flat_index is not supported yet, because an index cannot hold tuples"
-        )
+        """The rows as one level of tuples, with no name, as pandas answers."""
+        from ._frame import Index
+
+        return Index(list(self), tupleize_cols=False)
 
     def value_counts(
         self,

@@ -4544,7 +4544,7 @@ INDEX = Exposed(
             name="insert",
             kind="method",
             signature="loc: int, item: object",
-            body="self._inner.insert(loc, item)",
+            body="_label_inserted(self, loc, item)",
             doc="The index with one label put in at a position.",
             returns="Index",
             wraps="Index",
@@ -5300,6 +5300,8 @@ def wrapper() -> str:
         mixins.add("_values_of")
     if any("_index_values(" in m.body for m in every):
         mixins.add("_index_values")
+    if any("_label_inserted(" in m.body for m in every):
+        mixins.add("_label_inserted")
     # A frame and a column print through the text formatter, since the core
     # writes a frame as a summary and a zoned instant as its count.
     if any("_printed(" in m.body for m in every):
