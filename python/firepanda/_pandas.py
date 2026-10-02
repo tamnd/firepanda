@@ -13453,8 +13453,13 @@ class DataFrameMixin(_Carries):
         _settled(self, self.assign(**wanted), True)
 
     def infer_objects(self, copy: Any = NO_DEFAULT) -> DataFrame:
-        """The frame itself, as a copy, since every column already has a type."""
-        return self.copy()
+        """A copy with every object column given the type its values share, as in pandas."""
+        made = self.copy()
+        for name in list(made.columns):
+            column = made[name]
+            if _objects.is_object(column._inner):
+                made[name] = column.infer_objects()
+        return made
 
     @classmethod
     def from_dict(
@@ -20205,10 +20210,14 @@ class SeriesMixin(_Carries):
 
     @property
     def array(self) -> FirepandaArray:
-        """The values with no row labels and no name, which is pandas' `array`."""
-        from ._array import FirepandaArray
+        """The values with no row labels and no name, which is pandas' `array`.
 
-        return FirepandaArray(self)
+        A categorical column hands out a `Categorical`, as pandas' does.
+        """
+        from ._array import FirepandaArray
+        from ._categorical import Categorical
+
+        return Categorical._held_by(self) if self.dtype == "category" else FirepandaArray(self)
 
     def unique(self) -> FirepandaArray:
         """Each value once, in the order first seen, a missing value kept once.
@@ -31206,9 +31215,7 @@ class IndexMixin:
     @property
     def array(self) -> Any:
         """The labels as an array with no name, which is pandas' `array`."""
-        from ._array import FirepandaArray
-
-        return FirepandaArray(self.to_series())
+        return self.to_series().array
 
     def reindex(
         self,
@@ -31415,7 +31422,11 @@ class IndexMixin:
         return self
 
     def infer_objects(self, copy: bool = True) -> Index:
-        """The index itself, since its labels already have a type."""
+        """The index itself, or labels of objects given the type they share, as in pandas."""
+        if _objects.is_object(self._inner):
+            from ._frame import Index
+
+            return Index(_values_of(self._inner), name=self.name)
         return self.copy() if copy else self
 
     def repeat(self, repeats: Any, axis: None = None) -> Any:

@@ -53,6 +53,7 @@ from ._pandas import (
     _label_of,
     _lossless_or_raise,
     _naive_convert,
+    _numpy,
     _on_the_clock,
     _spelled,
     _zone_name,
@@ -119,6 +120,13 @@ def _clocked(index: DatetimeIndex, tz: Any, ambiguous: Any) -> None:
         )
     if _zone_text(tz) != held:
         raise TypeError(f"data is already tz-aware {held}, unable to set specified tz: {tz}")
+
+
+def _objects_out(values: list[Any]) -> Any:
+    """Values as a numpy array of objects, each kept as it is rather than read as a numpy type."""
+    out = _numpy().empty(len(values), dtype=object)
+    out[:] = values
+    return out
 
 
 class DatetimeIndex(HeldFreq, Index):
@@ -250,6 +258,12 @@ class DatetimeIndex(HeldFreq, Index):
             freq = _period_alias(found)
         values = [NaT if value is NaT else value.tz_localize(None) for value in self.tolist()]
         return PeriodIndex(values, freq=freq, name=self.name)
+
+    def _flags(self, kind: str) -> Any:
+        """A flag of every label as the numpy array of bools pandas answers, False for a gap."""
+        return _numpy().array(
+            [flag is not None and bool(flag) for flag in self._part(kind).tolist()], dtype=bool
+        )
 
     def _part(self, kind: str, arg: str = "") -> Index:
         """Reads one part of the labels, and hands back a plain index.
@@ -417,44 +431,47 @@ class DatetimeIndex(HeldFreq, Index):
         return self._part("days_in_month")
 
     @property
-    def is_leap_year(self) -> Index:
+    def is_leap_year(self) -> Any:
         """Whether every label falls in a leap year."""
-        return self._part("is_leap_year")
+        return self._flags("is_leap_year")
 
     @property
-    def is_month_start(self) -> Index:
+    def is_month_start(self) -> Any:
         """Whether every label is the first day of its month."""
-        return self._part("is_month_start")
+        return self._flags("is_month_start")
 
     @property
-    def is_month_end(self) -> Index:
+    def is_month_end(self) -> Any:
         """Whether every label is the last day of its month."""
-        return self._part("is_month_end")
+        return self._flags("is_month_end")
 
     @property
-    def is_quarter_start(self) -> Index:
+    def is_quarter_start(self) -> Any:
         """Whether every label is the first day of its quarter."""
-        return self._part("is_quarter_start")
+        return self._flags("is_quarter_start")
 
     @property
-    def is_quarter_end(self) -> Index:
+    def is_quarter_end(self) -> Any:
         """Whether every label is the last day of its quarter."""
-        return self._part("is_quarter_end")
+        return self._flags("is_quarter_end")
 
     @property
-    def is_year_start(self) -> Index:
+    def is_year_start(self) -> Any:
         """Whether every label is the first day of its year."""
-        return self._part("is_year_start")
+        return self._flags("is_year_start")
 
     @property
-    def is_year_end(self) -> Index:
+    def is_year_end(self) -> Any:
         """Whether every label is the last day of its year."""
-        return self._part("is_year_end")
+        return self._flags("is_year_end")
 
     @property
-    def date(self) -> Index:
-        """Every label with the time of day taken off, as a date."""
-        return self._part("date")
+    def date(self) -> Any:
+        """Every label with the time of day taken off, as a date, and `NaT` for a gap.
+
+        A numpy array of objects, as pandas answers it.
+        """
+        return _objects_out([NaT if label is None else label.date() for label in self._labels()])
 
     @property
     def asi8(self) -> list[Any]:
@@ -830,23 +847,23 @@ class DatetimeIndex(HeldFreq, Index):
             name=self.name,
         )
 
-    def to_pydatetime(self) -> list[Any]:
+    def to_pydatetime(self) -> Any:
         """Every label as a Python datetime, `NaT` for a missing one, as in pandas.
 
-        A list where pandas answers a numpy array of objects, which is the
-        convention document 41 set for everything an index answers position by position.
+        A numpy array of objects, as pandas answers it.
         """
-        return [NaT if label is None else label.to_pydatetime() for label in self._labels()]
+        labels = self._labels()
+        return _objects_out([NaT if label is None else label.to_pydatetime() for label in labels])
 
     @property
-    def time(self) -> list[Any]:
+    def time(self) -> Any:
         """The time of day of every label, without the clock, and `NaT` for a gap."""
-        return [NaT if label is None else label.time() for label in self._labels()]
+        return _objects_out([NaT if label is None else label.time() for label in self._labels()])
 
     @property
-    def timetz(self) -> list[Any]:
+    def timetz(self) -> Any:
         """The time of day of every label, with the clock, and `NaT` for a gap."""
-        return [NaT if label is None else label.timetz() for label in self._labels()]
+        return _objects_out([NaT if label is None else label.timetz() for label in self._labels()])
 
     @property
     def tzinfo(self) -> Any:
