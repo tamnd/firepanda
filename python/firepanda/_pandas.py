@@ -9365,11 +9365,55 @@ def _decided_categories(dtype: Any) -> bool:
     return isinstance(dtype, CategoricalDtype) and dtype._decided
 
 
-def _as_decided(column: Series, dtype: Any) -> Series:
-    """A category column under the categories and order flag `dtype` decides."""
+def _as_decided(column: Series, dtype: Any, source: Any = None) -> Series:
+    """A category column under the categories and order flag `dtype` decides.
+
+    Categories that are not text are matched against the values the column came
+    from, `source`, by equality, so a float 1.0 lands in the category 1 as it
+    does in pandas.
+    """
     categories = dtype.categories
     held = column.cat.categories.tolist() if categories is None else categories.tolist()
+    if source is not None and not all(isinstance(label, str) for label in held):
+        at = {label: place for place, label in enumerate(held)}
+        codes = [
+            -1 if _objects.is_gap(value) else at.get(value, -1)
+            for value in _held_values(source._inner)
+        ]
+        return _coded_categories(codes, held, bool(dtype.ordered), source.index, source.name)
     return column.cat.set_categories(held, ordered=bool(dtype.ordered))
+
+
+def _coded_categories(
+    codes: list[int], categories: list[Any], ordered: bool, index: Any = None, name: Any = None
+) -> Series:
+    """A category column whose rows are `categories` picked by `codes`, -1 for a gap.
+
+    Text categories go through the text column the extension holds. Categories of
+    numbers, instants, spans or flags are written as cells, spec 97, and to have
+    every category written whether or not a row uses it, the column is made with
+    the categories in front of the rows and those are cut off again.
+    """
+    from ._frame import Index, Series
+
+    picked = [None if code == -1 else categories[code] for code in codes]
+    if all(isinstance(label, str) for label in categories):
+        text = Series(picked, dtype="str", index=index, name=name)
+        return text.astype("category").cat.set_categories(list(categories), ordered=ordered)
+    printed = _word(Index(list(categories)).dtype)
+    if not _written_categories(printed):
+        raise NotImplementedError(
+            "categories of mixed kinds are not held yet, because firepanda writes"
+            f" categories of one kind at a time, and these are {printed}"
+        )
+    if printed.startswith(("int", "uint")):
+        # The rows can have a gap, which a numpy integer column cannot hold.
+        printed = printed.replace("int", "Int").replace("uInt", "UInt")
+    column = Series(list(categories) + picked, dtype=printed)
+    held = _number_categories(column, widen=False)
+    held = held.cat.set_categories(list(categories), ordered=ordered).iloc[len(categories) :]
+    held.index = range(len(picked)) if index is None else index
+    return held.rename(name)
 
 
 def _written_category(inner: Any) -> bool:
@@ -11333,6 +11377,33 @@ def _held_type(values: list[Any]) -> str | None:
         return None
 
 
+def _mapped_categories(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
+    """A category column with `apply` called on each category rather than each row.
+
+    New categories that are distinct and none of them a gap keep the column a
+    category over them, as pandas does, and otherwise the answer is the plain
+    column of what each row's category became.
+    """
+    from ._frame import Series
+
+    new = [apply(label) for label in column.cat.categories.tolist()]
+    codes = column.cat.codes.tolist()
+    gap = math.nan
+    if -1 in codes and na_action is None:
+        gap = apply(math.nan)
+    try:
+        distinct = len(set(new)) == len(new)
+    except TypeError:
+        distinct = False
+    if distinct and not any(_missing(label) for label in new) and _missing(gap):
+        ordered = bool(column.cat.ordered)
+        return _coded_categories(codes, new, ordered, column.index, column.name)
+    # A category that maps to nothing is NaN, as a gap row is, so numbers stay floats.
+    new = [math.nan if _missing(label) else label for label in new]
+    values = [new[code] if code >= 0 else gap for code in codes]
+    return Series(values, index=column.index, name=column.name)
+
+
 def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
     """A column with `apply` called on each value, the labels and name kept.
 
@@ -11343,8 +11414,6 @@ def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
 
     Raises:
         InvalidArgumentError: For an `na_action` pandas does not know.
-        NotImplementedError: On a category column, whose categories pandas
-            maps rather than its values.
     """
     if na_action not in (None, "ignore"):
         raise InvalidArgumentError(
@@ -11352,10 +11421,7 @@ def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
         )
     printed = _word(column.dtype)
     if printed == "category":
-        raise NotImplementedError(
-            "map on a category column maps the categories and keeps the column a category,"
-            " which firepanda does not do yet; map `astype(str)` for the plain answer"
-        )
+        return _mapped_categories(column, apply, na_action)
     if len(column) == 0:
         return column.copy()
     gap = NaT if printed.startswith(("datetime64", "timedelta64", "period[")) else math.nan
@@ -21498,7 +21564,7 @@ class SeriesMixin(_Carries):
         if _written_category(self._inner) and str(dtype) != "category":
             return _category_values(self)._astype(dtype, copy, errors)
         if _decided_categories(dtype):
-            return _as_decided(self._astype("category", copy, errors), dtype)
+            return _as_decided(self._astype("category", copy, errors), dtype, self)
         unit = _unit_change(_word(self.dtype), dtype)
         if unit:
             return self.dt.as_unit(unit)
@@ -22200,6 +22266,24 @@ class CategoricalMixin:
             out.append(label)
         return out
 
+    def _recoded(self, labels: list[Any], ordered: bool, rename: bool) -> Series | None:
+        """Labels that are not text on a column of text categories, or None to go on.
+
+        The extension's categories are text, so a column given numbers or other
+        values as its categories is made again from its codes, positionally when
+        `rename`, and by value otherwise, where no text row equals a number.
+        """
+        if self._written() or all(isinstance(label, str) for label in labels):
+            return None
+        self._distinct(labels)
+        codes = self._codes().tolist()
+        if rename:
+            codes = [code if code < len(labels) else -1 for code in codes]
+        else:
+            codes = [-1] * len(codes)
+        series = self._series
+        return _coded_categories(codes, labels, ordered, series.index, series.name)
+
     def _wanted(self, value: Any, name: str) -> list[str]:
         """Reads what a caller passed as a list of category labels.
 
@@ -22288,7 +22372,16 @@ class CategoricalMixin:
                 names = [new_categories(label) for label in shown]
             else:
                 names = [new_categories.get(label, label) for label in shown]
+            made = self._recoded(names, self._ordered(), True)
+            if made is not None:
+                return made
             return self._relabel(self._wanted(names, "new_categories"), self._ordered())
+        if not isinstance(new_categories, str) and not _is_scalar(new_categories):
+            labels = list(new_categories)
+            if len(labels) == len(held):
+                made = self._recoded(labels, self._ordered(), True)
+                if made is not None:
+                    return made
         wanted = self._wanted(new_categories, "new_categories")
         if len(wanted) != len(held):
             raise InvalidArgumentError(
@@ -22314,8 +22407,12 @@ class CategoricalMixin:
         them go missing, and a longer one leaves the extra labels there with
         nothing in them.
         """
-        wanted = self._wanted(new_categories, "new_categories")
         wants = self._ordered() if ordered is None else bool(ordered)
+        if not isinstance(new_categories, str) and not _is_scalar(new_categories):
+            made = self._recoded(list(new_categories), wants, rename)
+            if made is not None:
+                return made
+        wanted = self._wanted(new_categories, "new_categories")
         if rename:
             return self._relabel(wanted, wants)
         return self._against(wanted, wants)

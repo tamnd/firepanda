@@ -146,10 +146,12 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     assert str(mine.value) == str(theirs.value)
 
 
-def test_a_category_column_is_refused(firepanda: ModuleType) -> None:
-    """pandas maps the categories, which is not done here yet."""
-    with pytest.raises(NotImplementedError, match="category"):
-        firepanda.Series(["a"], dtype="category").map(str.upper)
+def test_a_category_column_maps_its_categories(firepanda: ModuleType) -> None:
+    """pandas maps the categories and keeps the column a category over them."""
+    out = firepanda.Series(["a", "b", "a"], dtype="category").map(str.upper)
+    assert str(out.dtype) == "category"
+    assert out.cat.categories.tolist() == ["A", "B"]
+    assert out.tolist() == ["A", "B", "A"]
 
 
 @pytest.mark.parametrize(
