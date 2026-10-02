@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Out of bounds and group column messages match pandas
+
+A column position off the end under `iloc` says single positional indexer or positional indexers are out-of-bounds, one cell off the end and a frame cell past the last row say index N is out of bounds for axis 0 with size M, a row list off the end drops the core's extra clause, and `take` says indices are out-of-bounds, all as pandas words them. A group by narrowed to a missing column says Column not found, or Columns not found with the sorted names, and `fillna` without a value is refused as pandas refuses it.
+
 ### Fixed: Missing column messages match pandas
 
 Asking a frame for a column it lacks raises a KeyError carrying just the name, a list with some names missing says which are not in the index, a list with none present repeats the key as an index, and `set_index` on a missing column says none of the names are in the columns, all in pandas' words. `sort_values` by a missing column follows from the first.
