@@ -7667,7 +7667,12 @@ struct Group(Movable):
 
         var out = List[AnyArray](capacity=self.width)
         for k in range(len(self.keys)):
-            out.append(AnyArray(copy=self.state[k]))
+            # A key grouped on its codes goes out as text, as it would have
+            # come in had nothing here read the codes. One row a group.
+            if self.state[k].is_coded():
+                out.append(self.state[k].decoded())
+            else:
+                out.append(AnyArray(copy=self.state[k]))
         var late = List[AnyArray]()
         if len(self._kept) > 0:
             late = self._reduce_held(len(self.state[0]))

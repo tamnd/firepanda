@@ -2104,6 +2104,7 @@ def test_a_group_by_a_coded_key_reads_the_codes() raises:
     var out = pipeline^.run()
     assert_equal(read_back(out, "c"), [3, 2, 1, 1], "first seen first")
     assert_equal(read_back(out, "total"), [12, 8, 3, 5], "summed per group")
+    assert_false(out.column("s").values.is_coded(), "the key goes out as text")
     assert_equal(out.column("s").text(0), "a")
     assert_equal(out.column("s").text(1), "")
     assert_equal(out.column("s").text(3), "a phrase too long to inline")
