@@ -2065,6 +2065,83 @@ def test_codes_pass_through_a_projection() raises:
     assert_equal(one_int(out, "kinds"), 4, "the same count")
 
 
+def phrase_frame() raises -> DataFrame:
+    """A text column held as codes with an empty string among its categories,
+    in two chunks over one set of them, beside a number column. No nulls."""
+    var codes = Array[DType.int32](7)
+    var picked: List[Int32] = [1, 0, 2, 1, 3, 0, 1]
+    for i in range(7):
+        codes[i] = picked[i]
+    var col = AnyArray.dictionary_encoded(
+        codes^,
+        strings_from_list(["", "a", "b", "a phrase too long to inline"]),
+    )
+    var s = ChunkedArray(LogicalType.STRING)
+    s.append(col.slice(0, 4))
+    s.append(col.slice(4, 7))
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3, 4]))
+    n.append(numbers([5, 6, 7]))
+    var columns = List[ChunkedArray]()
+    columns.append(s^)
+    columns.append(n^)
+    var fields = List[Field]()
+    fields.append(Field("s", LogicalType.STRING))
+    fields.append(Field("n", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_group_by_a_coded_key_reads_the_codes() raises:
+    """One text key held as codes is grouped on them, a count of rows over it
+    included, and the groups and their keys are the ones the strings give."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SIZE, "c"))
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    var keys: List[Int] = [0]
+    var pipeline = Pipeline(phrase_frame())
+    pipeline.add(Node(Group(keys^, aggs^)))
+    assert_true(pipeline.coded_columns()[0], "the key stays coded")
+    var out = pipeline^.run()
+    assert_equal(read_back(out, "c"), [3, 2, 1, 1], "first seen first")
+    assert_equal(read_back(out, "total"), [12, 8, 3, 5], "summed per group")
+    assert_equal(out.column("s").text(0), "a")
+    assert_equal(out.column("s").text(1), "")
+    assert_equal(out.column("s").text(3), "a phrase too long to inline")
+
+
+def test_a_filter_hands_the_codes_on() raises:
+    """A comparison against the empty string reads the categories, and the key
+    reaches the group by still coded."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SIZE, "c"))
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    var keys: List[Int] = [0]
+    var keep: List[Int] = [0, 1]
+    var pipeline = Pipeline(phrase_frame())
+    pipeline.add(Node(Filter(0, Value(String("")), BinaryOp.NE, keep^)))
+    pipeline.add(Node(Group(keys^, aggs^)))
+    assert_true(pipeline.coded_columns()[0], "coded through the filter")
+    var out = pipeline^.run()
+    assert_equal(read_back(out, "c"), [3, 1, 1], "the empty one is gone")
+    assert_equal(read_back(out, "total"), [12, 3, 5], "summed per group")
+    assert_equal(out.column("s").text(1), "b")
+
+
+def test_a_coded_key_with_a_null_groups_as_the_strings_do() raises:
+    """A null in the key sends the group by off the map halfway, and the codes
+    it was given before then still name the right groups."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    var keys: List[Int] = [0]
+    var pipeline = Pipeline(coded_frame())
+    pipeline.add(Node(Group(keys^, aggs^)))
+    assert_true(pipeline.coded_columns()[0], "the key stays coded")
+    var out = pipeline^.run()
+    assert_equal(out.column("s").text(0), "b")
+    assert_equal(read_back(out, "total")[0], 1, "b is row one")
+    assert_equal(read_back(out, "total")[1], 8, "a is rows two and six")
+
+
 def big_frame() raises -> DataFrame:
     """Six values near 1.9e18, in chunks of two, three and one.
 

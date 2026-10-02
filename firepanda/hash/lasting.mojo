@@ -127,7 +127,7 @@ from firepanda.dtype.lists import ALL, dtype_size
 from firepanda.dtype.logical import LogicalType
 from firepanda.exec.morsel import parallel_morsels
 from firepanda.exec.parallel import parallel_for
-from firepanda.kernel.concat import concat_any
+from firepanda.kernel.concat import concat_any, same_categories
 from firepanda.kernel.select import take_any
 
 from .factorize import CHUNK_ROWS, DIRECT_LIMIT, direct_plan
@@ -1199,6 +1199,15 @@ struct LastingKeys(Movable):
     var textual: Bool
     """Whether the key column is text, and so whether `text` is the map."""
 
+    var coded: Bool
+    """Whether the map is keyed on the codes of a dictionary encoded text
+    column rather than on its strings. The codes go through the integer routes
+    and `keys` holds codes, which `take_keys` puts the categories back on."""
+
+    var template: AnyArray
+    """A chunk of the coded key column, kept for its categories. Empty unless
+    `coded`."""
+
     def __init__(out self):
         """Constructs an empty map that has not yet picked a route."""
         self.parts = _Parts()
@@ -1210,6 +1219,8 @@ struct LastingKeys(Movable):
         self.keys = List[AnyArray]()
         self.text = LastingText()
         self.textual = False
+        self.coded = False
+        self.template = AnyArray(Array[DType.int32](0))
 
     def __len__(self) -> Int:
         """Returns the number of ordinals handed out.
@@ -1234,6 +1245,21 @@ struct LastingKeys(Movable):
         Raises:
             If the key dtype has no physical layout.
         """
+        # A text key held as codes is grouped on the codes, which are small
+        # integers and go through the direct table, as long as every chunk is
+        # coded into the same categories. The first chunk that is not ends
+        # that, and `_uncode` moves what was seen onto the text map.
+        if key.is_coded() and (
+            not self.opened
+            or (self.coded and same_categories(self.template, key))
+        ):
+            if not self.opened:
+                self.coded = True
+                self.template = AnyArray(copy=key)
+            self._fixed(key.code_column(), rows, codes)
+            return
+        if self.coded:
+            self._uncode()
         if not key.is_flat():
             self.ordinals(key.decoded(), rows, codes)
             return
@@ -1246,7 +1272,21 @@ struct LastingKeys(Movable):
             _ = self.text.ordinals(key.strings(), rows, codes)
             self.groups = self.text.__len__()
             return
+        self._fixed(key, rows, codes)
 
+    def _fixed(
+        mut self, key: AnyArray, rows: Int, mut codes: Array[DType.uint32]
+    ) raises:
+        """Gives every row of a fixed width key the ordinal its key holds.
+
+        Args:
+            key: The chunk's key column, flat and fixed width.
+            rows: The chunk's height.
+            codes: Filled with one ordinal per row of the chunk.
+
+        Raises:
+            If the key dtype has no physical layout.
+        """
         var firsts = List[Int]()
         comptime for candidate in ALL:
             if key.dtype() == candidate:
@@ -1277,7 +1317,24 @@ struct LastingKeys(Movable):
             return AnyArray(self.text.take_keys())
         var out = concat_any(self.keys)
         self.keys = List[AnyArray]()
+        if self.coded:
+            return self.template.with_codes(out^)
         return out^
+
+    def _uncode(mut self) raises:
+        """Moves a map keyed on codes onto the text map.
+
+        The keys seen so far are distinct and in ordinal order, so handing them
+        to an empty text map gives each the ordinal it already had, and the
+        rows already folded under those ordinals stay where they are.
+
+        Raises:
+            If the keys cannot be stacked or decoded.
+        """
+        var seen = self.take_keys().decoded()
+        self = LastingKeys()
+        var ignored = Array[DType.uint32](len(seen))
+        self.ordinals(seen, len(seen), ignored)
 
     def _chunk[
         dt: DType

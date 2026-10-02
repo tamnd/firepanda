@@ -79,7 +79,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.dtype.lists import ALL
+from firepanda.dtype.lists import ALL, dtype_size
 from firepanda.dtype.logical import LogicalType, TypeKind, promote
 from firepanda.dtype.temporal import TimeUnit, TimeZone, finer_unit
 from firepanda.exec.morsel import parallel_morsels
@@ -1540,6 +1540,64 @@ def _mask_into(
         dst.unsafe_offset(i).unsafe_store(r)
 
 
+def _coded_positions(
+    a: AnyArray,
+    b: Value,
+    op: BinaryOp,
+    value_on_left: Bool,
+    picks: List[UInt32],
+    through: Bool,
+) raises -> Optional[List[UInt32]]:
+    """Compares a text column held as codes against one constant.
+
+    Each category is compared once and the rows are read off their codes, so a
+    filter over a coded column never decodes it. `SearchPhrase <> ''` reaches
+    here once the scan hands the codes on.
+
+    Args:
+        a: The column, dictionary encoded.
+        b: The constant.
+        op: The comparison.
+        value_on_left: True for the mirrored comparison.
+        picks: The selection to read `a` through, ignored when `through` is
+            False.
+        through: Whether the rows are `a` at `picks`.
+
+    Returns:
+        The rows the comparison is true on, numbered as
+        `compare_value_positions` numbers them, or None when a null in the
+        column or in the answers needs the long way round.
+
+    Raises:
+        As the comparison of the categories does.
+    """
+    if a.null_count() > 0:
+        return None
+    var answers = binary_value_any(a.distinct(), b, op, value_on_left)
+    var count = len(answers)
+    if (
+        count == 0
+        or count != len(a.text.value())
+        or answers.null_count() > 0
+        or dtype_size(answers.type.physical) != 1
+    ):
+        return None
+    var codes = a.data.values.bitcast[DType.int32]()
+    var hit = answers.data.values.unsafe_ptr()
+    var out = List[UInt32]()
+    if through:
+        for i in range(len(picks)):
+            var code = codes.unsafe_offset(Int(picks[i])).unsafe_load()
+            if hit.unsafe_offset(Int(code)).unsafe_load() != 0:
+                out.append(UInt32(i))
+    else:
+        for i in range(len(a)):
+            var code = codes.unsafe_offset(i).unsafe_load()
+            if hit.unsafe_offset(Int(code)).unsafe_load() != 0:
+                out.append(UInt32(i))
+    return out^
+
+
 def compare_value_positions(
     a: AnyArray,
     b: Value,
@@ -1595,6 +1653,8 @@ def compare_value_positions(
     Raises:
         If the constant cannot be read at the column's dtype.
     """
+    if op.is_comparison() and a.is_coded():
+        return _coded_positions(a, b, op, value_on_left, picks, through)
     if not op.is_comparison() or a.is_dictionary() or not a.is_flat():
         return None
     var scalar = resolve_constant(a.type, b, op)

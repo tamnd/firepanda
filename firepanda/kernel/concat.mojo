@@ -127,14 +127,36 @@ def concat_any(parts: List[AnyArray]) raises -> AnyArray:
     return concat_refs_any(refs)
 
 
+def same_categories(a: AnyArray, b: AnyArray) -> Bool:
+    """Reports whether two columns are coded into the very same categories.
+
+    The same buffers, not equal strings, so the answer costs a few pointer
+    compares however many categories there are. Two columns coded apart can
+    hold the same strings in another order, and their codes mean different
+    things.
+
+    Args:
+        a: One column.
+        b: The other.
+
+    Returns:
+        True if both are dictionary encoded over the one set of categories.
+    """
+    if not a.is_coded() or not b.is_coded():
+        return False
+    ref first = a.text.value()
+    ref other = b.text.value()
+    return (
+        len(other) == len(first)
+        and Int(other.views.unsafe_ptr()) == Int(first.views.unsafe_ptr())
+        and Int(other.payload.unsafe_ptr()) == Int(first.payload.unsafe_ptr())
+    )
+
+
 def _share_categories(
     parts: List[Pointer[AnyArray, ImmUntrackedOrigin]],
 ) -> Bool:
     """Reports whether every part is coded into the very same categories.
-
-    The same buffers, not equal strings, so the answer costs a few pointer
-    compares however many categories there are. Two columns coded apart can
-    hold the same strings in another order, and those go through the decode.
 
     Args:
         parts: References to the columns.
@@ -144,17 +166,8 @@ def _share_categories(
     """
     if not parts[0][].is_coded():
         return False
-    ref first = parts[0][].text.value()
     for p in range(1, len(parts)):
-        if not parts[p][].is_coded():
-            return False
-        ref other = parts[p][].text.value()
-        if (
-            len(other) != len(first)
-            or Int(other.views.unsafe_ptr()) != Int(first.views.unsafe_ptr())
-            or Int(other.payload.unsafe_ptr())
-            != Int(first.payload.unsafe_ptr())
-        ):
+        if not same_categories(parts[0][], parts[p][]):
             return False
     return True
 

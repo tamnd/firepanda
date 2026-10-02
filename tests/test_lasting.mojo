@@ -6,10 +6,11 @@ consecutive, in the order the keys first arrived, and the same across chunks.
 """
 
 from std.collections import Dict
-from std.testing import TestSuite, assert_equal
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import strings_from_list
 from firepanda.hash.lasting import LastingKeys
 
 
@@ -105,6 +106,63 @@ def test_unsigned_keys_past_the_signed_range() raises:
         one.append(Int(UInt32(4_000_000_000) + UInt32((i * 7919) % 40_000)))
     chunks.append(one^)
     _check[DType.uint32](chunks)
+
+
+
+
+def _coded(picked: List[Int], var categories: List[String]) raises -> AnyArray:
+    var codes = Array[DType.int32](len(picked))
+    for i in range(len(picked)):
+        codes[i] = Int32(picked[i])
+    return AnyArray.dictionary_encoded(codes^, strings_from_list(categories))
+
+
+def test_a_coded_key_is_grouped_on_its_codes() raises:
+    """Two chunks over one set of categories go through the codes, and the
+    keys come back as text over those categories."""
+    var col = _coded([2, 0, 2, 1, 0], ["x", "y", "z"])
+    var map = LastingKeys()
+    var codes = Array[DType.uint32](3)
+    map.ordinals(col.slice(0, 3), 3, codes)
+    assert_equal(Int(codes[0]), 0)
+    assert_equal(Int(codes[1]), 1)
+    assert_equal(Int(codes[2]), 0)
+    var more = Array[DType.uint32](2)
+    map.ordinals(col.slice(3, 5), 2, more)
+    assert_equal(Int(more[0]), 2)
+    assert_equal(Int(more[1]), 1)
+    assert_true(map.coded, "still on the codes")
+    var keys = map.take_keys()
+    assert_true(keys.is_coded(), "the keys keep the categories")
+    var flat = keys.decoded()
+    assert_equal(len(flat), 3)
+    assert_equal(String(flat.strings()[0]), "z")
+    assert_equal(String(flat.strings()[1]), "x")
+    assert_equal(String(flat.strings()[2]), "y")
+
+
+def test_a_chunk_coded_apart_moves_the_map_to_text() raises:
+    """A chunk over other categories, and then a flat one, keep the ordinals
+    the first chunk handed out."""
+    var map = LastingKeys()
+    var first = Array[DType.uint32](3)
+    map.ordinals(_coded([1, 0, 1], ["a", "b"]), 3, first)
+    assert_equal(Int(first[0]), 0)
+    assert_equal(Int(first[1]), 1)
+    var second = Array[DType.uint32](3)
+    map.ordinals(_coded([0, 1, 2], ["b", "c", "a"]), 3, second)
+    assert_false(map.coded, "off the codes")
+    assert_equal(Int(second[0]), 0, "b was first")
+    assert_equal(Int(second[1]), 2, "c is new")
+    assert_equal(Int(second[2]), 1, "a was second")
+    var third = Array[DType.uint32](2)
+    map.ordinals(AnyArray(strings_from_list(["c", "d"])), 2, third)
+    assert_equal(Int(third[0]), 2)
+    assert_equal(Int(third[1]), 3)
+    var keys = map.take_keys()
+    assert_equal(len(keys), 4)
+    assert_equal(String(keys.strings()[0]), "b")
+    assert_equal(String(keys.strings()[3]), "d")
 
 
 def main() raises:

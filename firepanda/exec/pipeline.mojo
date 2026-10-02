@@ -65,7 +65,7 @@ from .node import node_computes_per_row, node_ends_early, node_finish
 from .node import mark_chained_filters, node_is_breaker
 from .node import node_is_row_local, node_process
 from .node import node_reads_codes, node_status
-from .node import Project
+from .node import Filter, Project
 from .parallel import worker_count
 
 comptime BATCH_CHUNKS_PER_WORKER = 4
@@ -529,9 +529,10 @@ struct Pipeline(Movable):
     def coded_columns(self) -> List[Bool]:
         """Works out which source columns can reach the line as codes.
 
-        A column goes through the projections at the front of the line to the
-        first operator that is not one, and stays coded if that operator says
-        it reads codes there, or if a projection drops it on the way.
+        A column goes through the projections and filters at the front of the
+        line to the first operator that is neither, and stays coded if that
+        operator says it reads codes there, or if one of them drops it on the
+        way.
 
         Returns:
             One flag per source column.
@@ -555,6 +556,28 @@ struct Pipeline(Movable):
                     if times > 1:
                         break
                     at = found
+                    continue
+                if self.operators[i].isa[Filter]():
+                    # A filter compares a coded column through its categories
+                    # and moves the rest of the row as codes, so a column goes
+                    # through it the way it goes through a projection. Only
+                    # its mask, which is never coded, stops here.
+                    ref f = self.operators[i][Filter]
+                    if f.on == at and not f.test:
+                        break
+                    if f.narrows:
+                        var found = -1
+                        var times = 0
+                        for j in range(len(f.keep)):
+                            if f.keep[j] == at:
+                                found = j
+                                times += 1
+                        if times == 0:
+                            coded = True
+                            break
+                        if times > 1:
+                            break
+                        at = found
                     continue
                 coded = node_reads_codes(self.operators[i], at)
                 break

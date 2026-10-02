@@ -7252,6 +7252,33 @@ struct Group(Movable):
             return NodeStatus.HAVE_OUTPUT
         return NodeStatus.FINISHED
 
+    def reads_codes(self, column: Int) -> Bool:
+        """Reports whether an input column can reach this node as codes.
+
+        It can when it is the one key, which the map and the grouping kernels
+        group on its codes, or when nothing reads it but a count of rows. A
+        tuple of keys is written out as bytes and wants the strings.
+
+        Args:
+            column: The input column's position.
+
+        Returns:
+            True if the column is never read as strings here.
+        """
+        for k in range(len(self.keys)):
+            if self.keys[k] == column and len(self.keys) > 1:
+                return False
+        for t in range(len(self._source)):
+            if (
+                self._source[t] == column
+                and self._produce[t] != AggKind.SIZE
+            ):
+                return False
+        for h in range(len(self._kept)):
+            if self._kept[h] == column:
+                return False
+        return True
+
     def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
         """Groups the chunk and merges its answers into the running table.
 
@@ -9206,7 +9233,8 @@ def node_reads_codes(node: Node, column: Int) -> Bool:
 
     The scan decodes every coded morsel, because almost nothing reads codes.
     A reduction that only counts a column's distinct values is one that does,
-    and decoding for it turned a count of codes into a hash of every string.
+    and decoding for it turned a count of codes into a hash of every string. A
+    group by on one text key is another, since its map groups the codes.
 
     Args:
         node: The node, as the first in the line.
@@ -9217,6 +9245,8 @@ def node_reads_codes(node: Node, column: Int) -> Bool:
     """
     if node.isa[Reduce]():
         return node[Reduce].reads_codes(column)
+    if node.isa[Group]():
+        return node[Group].reads_codes(column)
     return False
 
 
