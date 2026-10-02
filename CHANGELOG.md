@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: datetime index fields, inferred objects and categorical arrays follow pandas
+
+The `is_leap_year`, `is_month_start` and other flag fields of a `DatetimeIndex` are numpy arrays of bools, False for a gap, and `date`, `time`, `timetz` and `to_pydatetime` are numpy arrays of objects with `NaT` for a gap. `DataFrame.infer_objects` and `Index.infer_objects` give object columns and labels the type their values share, and `.array` of a categorical column or index is a `Categorical`.
+
 ### Changed: numeric uniques, label values and label masks are numpy arrays
 
 `Series.unique` and `pd.unique` on a column of numbers or flags give a numpy array, as pandas does, and so do `Index.values` for labels of numbers or flags and the mask `Index.get_loc` gives for a label repeated out of order. `Index.equals` now compares numbers by value across widths, signs and objects, so int64 labels equal the same uint64, float64 or object labels, while text never equals numbers.
