@@ -13098,7 +13098,8 @@ class DataFrameMixin(_Carries):
         framed = _sequences_framed(self, results, names)
         if framed is not None:
             return framed
-        return _gathered(results, names, None)
+        # The answer is labelled by the columns themselves, kind and name kept.
+        return _gathered(results, self.columns, None)
 
     def agg(self, func: Any = None, axis: Any = 0, *args: Any, **kwargs: Any) -> Any:
         """One or more reductions of each column, by name, function, list or dict.

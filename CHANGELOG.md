@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: apply labels its answer by the columns
+
+A function on each column that answers a value now gives a column labelled by the frame's own columns, so default columns give a `RangeIndex` and a name on the columns is kept, as in pandas.
+
 ### Changed: Counting row labels are a RangeIndex
 
 Row labels that count up from zero, which is what a frame or a column gets by default, now come back as a `RangeIndex` with its `start`, `stop` and `step`, as they do in pandas. A reduction such as `sum` or `dtypes` over whole-number columns the user named keeps a plain `Index`, and over default columns gives a `RangeIndex`.
