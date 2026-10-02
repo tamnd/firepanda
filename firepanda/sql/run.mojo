@@ -137,6 +137,50 @@ def _frames(plan: Plan, root: Int, catalog: Catalog) raises -> List[DataFrame]:
     return held^
 
 
+struct Prepared(Movable):
+    """A query lowered, bound and optimized, waiting for its frames.
+
+    Everything about a query that does not depend on the rows: which nodes, in
+    which order, reading which columns at which positions. The frames are found
+    by name when it runs, so a plan made against one catalog runs against any
+    other holding the same names with the same columns, and that is what lets a
+    cache keep one.
+    """
+
+    var plan: Plan
+    """The optimized plan."""
+
+    var root: Int
+    """The node whose output is the answer."""
+
+    def __init__(out self, var plan: Plan, root: Int):
+        """Wraps a plan and its root.
+
+        Args:
+            plan: The optimized plan.
+            root: The node whose output is the answer.
+        """
+        self.plan = plan^
+        self.root = root
+
+    def run(self, catalog: Catalog) raises -> DataFrame:
+        """Finds the frames the scans name and runs the plan over them.
+
+        Args:
+            catalog: Where the frames are found.
+
+        Returns:
+            The frame the query produces.
+
+        Raises:
+            Error: If a scan names something the catalog does not hold, or the
+                plan holds a node the pipeline has no operator for.
+        """
+        var frames = _frames(self.plan, self.root, catalog)
+        var pipe = lower_plan(self.plan, self.root, frames^)
+        return pipe^.run()
+
+
 struct Dialect(Movable):
     """The three tables the front end reads and never writes.
 
@@ -269,6 +313,43 @@ struct Dialect(Movable):
         Raises:
             Error: As `run` does.
         """
+        return self.plan_ast(ast, statement, catalog).run(catalog)
+
+    def plan(self, sql: StringSlice, catalog: Catalog) raises -> Prepared:
+        """Takes one `SELECT` as far as an optimized plan and no further.
+
+        Args:
+            sql: The whole statement, with or without a trailing semicolon.
+            catalog: The names the query is allowed to say.
+
+        Returns:
+            The plan, which runs against any catalog holding the same names
+            with the same columns.
+
+        Raises:
+            Error: As `run` does, for every reason but the ones a run finds.
+        """
+        var ast = Ast()
+        var statement = self.rules.parse_statement(sql, self.grammar, ast)
+        self.settle(ast, catalog)
+        return self.plan_ast(ast, statement, catalog)
+
+    def plan_ast(
+        self, ast: Ast, statement: UInt32, catalog: Catalog
+    ) raises -> Prepared:
+        """Lowers, binds and optimizes a query the transform has built.
+
+        Args:
+            ast: The arenas the transform filled.
+            statement: The query's root statement.
+            catalog: The names the query is allowed to say.
+
+        Returns:
+            The optimized plan.
+
+        Raises:
+            Error: If the query does not lower or does not bind.
+        """
         var built = lower(ast, statement, catalog, self.grammar, self.registry)
 
         # Binding before the optimizer rather than leaving it to the passes, so
@@ -281,10 +362,9 @@ struct Dialect(Movable):
             built.sources,
             catalog.settings.disabled_passes(),
         )
-
-        var frames = _frames(built.plan, root, catalog)
-        var pipe = lower_plan(built.plan, root, frames^)
-        return pipe^.run()
+        var plan = built.plan^
+        built.plan = Plan()
+        return Prepared(plan^, root)
 
 
 def run(sql: StringSlice, catalog: Catalog) raises -> DataFrame:

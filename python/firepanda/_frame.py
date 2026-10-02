@@ -4851,11 +4851,16 @@ def _series_to_frame(column: object, name: object) -> DataFrame:
 
 
 def _sql(
-    query: str, names: list[str], frames: list[object], parameters: list[str], row: object
+    query: str,
+    names: list[str],
+    frames: list[object],
+    parameters: list[str],
+    row: object,
+    session: object,
 ) -> DataFrame:
     """Runs one SQL statement over the frames named for it."""
     try:
-        return DataFrame._wrap(_firepanda._sql(query, names, frames, parameters, row))
+        return DataFrame._wrap(_firepanda._sql(query, names, frames, parameters, row, session))
     except Exception as error:
         raise translate(error) from None
 

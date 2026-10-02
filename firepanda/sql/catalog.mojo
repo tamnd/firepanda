@@ -325,6 +325,48 @@ struct Catalog(Movable, Sized):
         """
         return self._generation
 
+    def shape(self) -> String:
+        """What a plan made against this catalog depends on, written out.
+
+        Every name with its kind, and for a frame its columns and their types
+        and its keys, for a view its query and its column names. No rows: a
+        plan finds its frames by name when it runs, so two catalogs with the
+        same shape run the same plan, which is what lets a call that builds a
+        catalog of its own find a plan an earlier call made against another.
+
+        The generation is no use there, since it counts changes to one catalog
+        and two catalogs built the same way count the same.
+
+        Returns:
+            The text, which is only ever compared.
+        """
+        var out = String()
+        for at in range(len(self._keys)):
+            out.write(self._names[at].byte_length(), ":", self._names[at])
+            if self._kinds[at] == KIND_VIEW:
+                ref view = self._views[self._slots[at]]
+                out.write("\x1eview", view.sql.byte_length(), ":", view.sql)
+                for column in view.columns:
+                    out.write("\x1f", column.byte_length(), ":", column)
+            else:
+                ref fields = self._frames[self._slots[at]].schema.fields
+                out.write("\x1eframe")
+                for field in fields:
+                    out.write(
+                        "\x1f",
+                        field.name.byte_length(),
+                        ":",
+                        field.name,
+                        field.dtype,
+                        "!" if field.nullable else "",
+                    )
+                for unique in self._uniques[self._slots[at]]:
+                    out.write("\x1eprimary" if unique.primary else "\x1ekey")
+                    for column in unique.columns:
+                        out.write(",", column)
+            out.write("\x1d")
+        return out^
+
     def find(self, name: StringSlice) -> Int:
         """Looks a name up, folding it first.
 

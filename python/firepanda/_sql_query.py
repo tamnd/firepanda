@@ -39,6 +39,7 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
+from . import _firepanda
 from ._frame import DataFrame, Series, _sql
 
 _registered: dict[str, DataFrame | Series] = {}
@@ -73,6 +74,23 @@ def unregister(name: str) -> None:
     """Takes a registered frame away, as SQL reads the name, so in any case."""
     for held in [held for held in _registered if held.lower() == name.lower()]:
         del _registered[held]
+
+
+_SESSION: list[object] = []
+
+
+def _session() -> object:
+    """The one session every call borrows its dialect and plan cache from.
+
+    Made on the first call rather than at import, since reading the grammar
+    and the function catalog is two milliseconds a program that never runs SQL
+    should not pay. Only the dialect and the cache are borrowed: each call
+    still builds a catalog of its own, so nothing one call registers is seen
+    by the next.
+    """
+    if not _SESSION:
+        _SESSION.append(_firepanda.SqlSession())
+    return _SESSION[0]
 
 
 def _words(query: str) -> set[str]:
@@ -210,4 +228,4 @@ def _run(
     if values:
         said = list(values)
         row = DataFrame({f"p{i + 1}": [value] for i, value in enumerate(values.values())})._inner
-    return _sql(query, names, frames, said, row)
+    return _sql(query, names, frames, said, row, _session())

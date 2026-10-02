@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the prepared statement cache
+
+A query run a second time skips the parse, the binding and the optimizer and goes
+straight to the plan the first run made. In a `SqlSession`, which the shell runs on,
+plans are kept by the query's text and the catalog's generation, so a `CREATE`, an
+`INSERT`, a `DROP` or a `SET` throws them all away. `firepanda.sql` and `df.sql`
+build a fresh catalog for every call, so their plans are kept by the text and the
+names, columns and types of the frames in scope. A loop over the same query with
+different frames of the same columns, or with different `params`, plans once.
+Parameter values are rows, not text, so they never enter the key.
+
+`firepanda.sql` also stops reading the grammar and the function catalog on every
+call, which took about two milliseconds each time.
+
 ### Fixed: Argument checks match pandas
 
 `ascending` that is not a bool or a whole number is refused by `sort_values` and `sort_index` with pandas' sentence, `diff` refuses periods that are not whole, `replace` refuses a `regex` that is neither a flag nor paired with an empty `to_replace`, and the `keep` and `interpolation` refusals use pandas' exact wording.

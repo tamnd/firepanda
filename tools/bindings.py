@@ -4639,6 +4639,7 @@ FUNCTIONS = (
             ("frames", "list[object]"),
             ("parameters", "list[str]"),
             ("row", "object"),
+            ("session", "object"),
         ),
         returns="DataFrame",
     ),
