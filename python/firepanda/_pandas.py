@@ -2962,7 +2962,7 @@ def _keep_word(keep: Any) -> str:
             has no way to tell which library wrote it.
     """
     if keep not in ("first", "last", False):
-        raise InvalidArgumentError("keep must be either 'first', 'last' or False")
+        raise InvalidArgumentError('keep must be either "first", "last" or False')
     return keep if isinstance(keep, str) else "none"
 
 
@@ -2982,6 +2982,28 @@ def _as_keys(by: Any) -> list[Any]:
     if isinstance(by, str) or not isinstance(by, (list, tuple)):
         return [by]
     return list(by)
+
+
+def _diff_periods(periods: Any) -> int:
+    """How far back `diff` looks, a whole number or a float that holds one, as pandas reads it."""
+    if isinstance(periods, bool):
+        raise InvalidArgumentError("periods must be an integer")
+    if isinstance(periods, float) or type(periods).__name__.startswith("float"):
+        if not float(periods).is_integer():
+            raise InvalidArgumentError("periods must be an integer")
+        return int(periods)
+    if not hasattr(periods, "__index__"):
+        raise InvalidArgumentError("periods must be an integer")
+    return int(periods)
+
+
+def _ascending_flag(value: Any) -> bool:
+    """One `ascending` flag, which pandas takes as a bool or a whole number and nothing else."""
+    if isinstance(value, (bool, int)) or type(value).__name__ == "bool_":
+        return bool(value)
+    raise InvalidArgumentError(
+        f'For argument "ascending" expected type bool, received type {type(value).__name__}.'
+    )
 
 
 def _directions(ascending: Any, keys: int) -> list[bool]:
@@ -3005,7 +3027,9 @@ def _directions(ascending: Any, keys: int) -> list[bool]:
             length. The sentence is pandas' own.
     """
     if not isinstance(ascending, (list, tuple)):
-        return [not bool(ascending)] * keys
+        return [not _ascending_flag(ascending)] * keys
+    for one in ascending:
+        _ascending_flag(one)
     if len(ascending) != keys:
         raise InvalidArgumentError(
             f"Length of ascending ({len(ascending)}) != length of by ({keys})"
@@ -3732,7 +3756,8 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
     _spelled(
         interpolation,
         _INTERPOLATIONS,
-        f"{interpolation!r} is not a valid method. Use one of: " + ", ".join(_INTERPOLATIONS),
+        f"{interpolation!r} is not a valid method."
+        f" Use one of: dict_keys({list(_INTERPOLATIONS)!r})",
     )
     _held_at(
         "interpolation",
@@ -3837,7 +3862,8 @@ def _interpolation_written(interpolation: str) -> None:
     _spelled(
         interpolation,
         _INTERPOLATIONS,
-        f"{interpolation!r} is not a valid method. Use one of: " + ", ".join(_INTERPOLATIONS),
+        f"{interpolation!r} is not a valid method."
+        f" Use one of: dict_keys({list(_INTERPOLATIONS)!r})",
     )
     if interpolation != "linear" and interpolation not in _PICKED:
         raise NotImplementedError(
@@ -7188,6 +7214,8 @@ def _regex_pairs(to_replace: Any, value: Any, regex: Any) -> list[tuple[Any, Any
         InvalidArgumentError: If a run of texts is not as long as the patterns.
         NotImplementedError: For a replacement that is not text.
     """
+    if not isinstance(regex, bool) and to_replace is not None:
+        raise InvalidArgumentError("'to_replace' must be 'None' if 'regex' is not a bool")
     pattern = to_replace if regex is True else regex
     if regex is not True and to_replace is not None:
         pattern = None
@@ -17186,6 +17214,8 @@ class DataFrameMixin(_Carries):
 
         across = _axis_number(axis, "DataFrame", 0, (0, 1))
         inplace = _flag("inplace", inplace)
+        for flag in ascending if isinstance(ascending, (list, tuple)) else [ascending]:
+            _ascending_flag(flag)
         labels = self.index if across == 0 else self.columns
         if isinstance(ascending, (list, tuple)) and not isinstance(labels, MultiIndex):
             # On labels of one level pandas leaves them be when every flag
@@ -18027,6 +18057,8 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
+        if kind == "diff":
+            periods = _diff_periods(periods)
         if kind == "diff" and _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
             # pandas takes the difference across the rows as the frame less its
             # columns shifted along, which keeps whole numbers whole.
@@ -21623,6 +21655,8 @@ class SeriesMixin(_Carries):
         from ._frame import Series
 
         _transforming_axis(axis, "Series")
+        if kind == "diff":
+            periods = _diff_periods(periods)
 
         try:
             return Series._wrap(self._inner.transform(kind, periods))

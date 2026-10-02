@@ -172,7 +172,7 @@ def test_a_frame_with_nothing_in_it_drops_nothing(firepanda):
 def test_a_rule_that_is_not_one_of_the_three_is_refused(firepanda):
     with pytest.raises(ValueError) as raised:
         made(firepanda).duplicated("key", keep="all")
-    assert "keep must be either 'first', 'last' or False" in str(raised.value)
+    assert 'keep must be either "first", "last" or False' in str(raised.value)
     with pytest.raises(ValueError):
         made(firepanda).drop_duplicates("key", keep="all")
 

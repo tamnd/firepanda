@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Argument checks match pandas
+
+`ascending` that is not a bool or a whole number is refused by `sort_values` and `sort_index` with pandas' sentence, `diff` refuses periods that are not whole, `replace` refuses a `regex` that is neither a flag nor paired with an empty `to_replace`, and the `keep` and `interpolation` refusals use pandas' exact wording.
+
 ### Fixed: Out of bounds and group column messages match pandas
 
 A column position off the end under `iloc` says single positional indexer or positional indexers are out-of-bounds, one cell off the end and a frame cell past the last row say index N is out of bounds for axis 0 with size M, a row list off the end drops the core's extra clause, and `take` says indices are out-of-bounds, all as pandas words them. A group by narrowed to a missing column says Column not found, or Columns not found with the sorted names, and `fillna` without a value is refused as pandas refuses it.
