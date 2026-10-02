@@ -11916,7 +11916,8 @@ class _Carries:
             return multi_of(labels)
         if _has_names(self):
             # Row labels that were column names, as a reduction over the rows makes.
-            return _names_index(_names.shown_all(labels.tolist()), labels.name)
+            plain = getattr(self, "_plain_columns", False)
+            return _names_index(_names.shown_all(labels.tolist()), labels.name, plain)
         if isinstance(labels.name, str) and labels.name.startswith(_names.MARK):
             # Labels that were a column whose name is not text, as `set_index` makes.
             return labels.rename(_names.shown(labels.name))
@@ -12566,7 +12567,11 @@ class DataFrameMixin(_Carries):
         ]
         made = _labelled(names, kinds)
         # pandas' answer is an object column, and it prints as one.
-        return Series._wrap(made._inner.relabel(None).renamed_axis(None)).astype(object)
+        answer = Series._wrap(made._inner.relabel(None).renamed_axis(None)).astype(object)
+        if getattr(self, "_plain_columns", False):
+            # Whole-number names the user gave stay a plain Index, as in pandas.
+            answer.index = _names_index(names, None, True)
+        return answer
 
     def memory_usage(self, index: Any = True, deep: Any = False) -> Series:
         """How many bytes each column weighs, labelled by column name.
@@ -18281,7 +18286,7 @@ def _unturnable(cond: Any) -> None:
 class SeriesMixin(_Carries):
     """The hand written half of `Series`."""
 
-    __slots__ = ("_carried", "_inner", "_row_freq", "_typed_name")
+    __slots__ = ("_carried", "_inner", "_plain_columns", "_row_freq", "_typed_name")
     """The column the core holds, for the reason `DataFrameMixin` gives, a name
     given as a number, which `_named_as` explains, the `attrs` and flags, and
     the frequency of the row labels, which `_attrs.py` passes on."""
@@ -30977,10 +30982,16 @@ class IndexMixin:
 
         pandas answers labels of instants with a DatetimeIndex and labels of spans
         with a TimedeltaIndex whatever made them, so a plain `Index` of either
-        becomes one. Any other class stays as asked.
+        becomes one, and labels the core holds as a range become a RangeIndex.
+        Any other class stays as asked.
         """
         if cls.__name__ != "Index":
             return cls
+        if inner.is_range():
+            # Labels the core still holds as a range, as a new frame's rows are.
+            from ._range_index import RangeIndex
+
+            return RangeIndex
         kind = inner.dtype()
         if kind.startswith("datetime64"):
             from ._datetime import DatetimeIndex

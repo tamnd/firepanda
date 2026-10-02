@@ -129,17 +129,17 @@ class RangeIndex(Index):
     @property
     def start(self) -> int:
         """The first number."""
-        return self._range.start
+        return self._range_of().start
 
     @property
     def stop(self) -> int:
         """The number the labels stop before."""
-        return self._range.stop
+        return self._range_of().stop
 
     @property
     def step(self) -> int:
         """The distance between labels."""
-        return self._range.step
+        return self._range_of().step
 
     def __repr__(self) -> str:
         """The three numbers and the name, the way pandas writes them."""
