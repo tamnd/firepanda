@@ -6134,20 +6134,25 @@ def _bitwise(column: Any, other: Any, op: str, flip: bool) -> Any:
 
     An integer column against another with the same labels, or against a plain
     integer, is answered one row at a time. A boolean column against an integer
-    column reads the integers as bools, as pandas does, and anything else is
-    left to the boolean path, which answers `None` here.
+    column, either way round, is answered bit by bit with the bools as zero and
+    one and then read as bools, so `True & 2` is False, as pandas does. Anything
+    else is left to the boolean path, which answers `None` here.
     """
     from ._frame import Series
 
     mine = column._inner.dtype()
     if isinstance(other, SeriesMixin) and not _labels_differ(column, other, 0):
         theirs_type = other._inner.dtype()
-        if mine == "bool" and _integral(theirs_type):
-            return column._logical(other != 0, op, flip)
-        if not (_integral(mine) and _integral(theirs_type)):
+        kinds = (mine, theirs_type)
+        if "bool" in kinds and all(kind == "bool" or _integral(kind) for kind in kinds):
+            if mine == theirs_type:
+                return None
+            kind = "bool"
+        elif not (_integral(mine) and _integral(theirs_type)):
             return None
+        else:
+            kind = mine if mine == theirs_type else "int64"
         values = other.tolist()
-        kind = mine if mine == theirs_type else "int64"
         name = column.name if column.name == other.name else None
     elif _integral(mine) and isinstance(other, int) and not isinstance(other, bool):
         values = [other] * len(column)
@@ -6156,9 +6161,11 @@ def _bitwise(column: Any, other: Any, op: str, flip: bool) -> Any:
         return None
     run = {"and": operator.and_, "or": operator.or_, "xor": operator.xor}[op]
     answered = [
-        run(theirs, ours) if flip else run(ours, theirs)
+        run(int(theirs), int(ours)) if flip else run(int(ours), int(theirs))
         for ours, theirs in zip(column.tolist(), values, strict=True)
     ]
+    if kind == "bool":
+        answered = [bool(value) for value in answered]
     return Series(answered, index=column.index, name=name, dtype=kind)
 
 

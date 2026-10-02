@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Logical operators between integers and bools
+
+`&`, `|` and `^` between an integer column and a boolean column, either way round, now work bit by bit with the bools as zero and one and answer bools, so `True & 2` is False, as pandas does. An integer column on the left used to be refused.
+
 ### Fixed: Number column names print to one width
 
 A frame whose column names are whole or decimal numbers prints them the way its index would, flush left to one width and to one precision, measured over the columns that print, as pandas does. A dict of formatters finds a column by its position first when a column has that position as its name, as pandas' lookup does.
