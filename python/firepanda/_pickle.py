@@ -327,6 +327,7 @@ def frame_state(frame: Any) -> dict[str, Any]:
         "levels": levels,
         "index_names": names,
         "carried": _carried(frame),
+        "plain_columns": bool(getattr(frame, "_plain_columns", False)),
     }
 
 
@@ -336,6 +337,10 @@ def frame_rebuilt(state: dict[str, Any]) -> Any:
 
     frame = from_arrow(_Export(state["schema"], state["array"])).set_index(state["levels"])
     frame = frame.rename_axis(state["index_names"])
+    if state.get("plain_columns"):
+        from ._attrs import hold_plain_columns
+
+        hold_plain_columns(frame, True)
     return _carry(frame, state["carried"])
 
 

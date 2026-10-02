@@ -9759,12 +9759,51 @@ def _same_values(left: Any, right: Any) -> bool:
     return bool(alike.all())
 
 
+def _columns_plain(frame: Any, labels: Any) -> None:
+    """Marks a frame's columns plain unless the labels it was given are a range.
+
+    None stands for labels pandas builds into a new index, as a rename does. Only
+    names that would otherwise read as a range are marked, so text columns, the
+    usual kind, leave the methods on their quick path.
+    """
+    from ._attrs import hold_plain_columns
+
+    if frame is None or _name_range(_names.shown_all(frame._inner.names())) is None:
+        if getattr(frame, "_plain_columns", False):
+            hold_plain_columns(frame, False)
+        return
+    ranged = isinstance(labels, range) or (
+        isinstance(labels, IndexMixin)
+        and (isinstance(getattr(labels, "_range", None), range) or labels._inner.is_range())
+    )
+    hold_plain_columns(frame, not ranged)
+
+
+def _labelled_by_rows(answer: Any, index: Any) -> Any:
+    """A transposed frame whose columns are the row index itself, as pandas' are.
+
+    The columns are built by label, which reads whole numbers in steps as a
+    range, so the index is put back to keep its own type and name. One the
+    frame cannot take as columns leaves the columns as they were built.
+    """
+    if not len(index) or type(index).__name__ == "MultiIndex":
+        return answer
+    try:
+        answer = answer.set_axis(index, axis=1)
+    except Exception:
+        return answer
+    _columns_plain(answer, index)
+    return answer
+
+
 def _valid_label(owner: Any, present: Any, last: bool) -> Any:
     """The first or the last row label where `present` is True, or None when there is none."""
-    labels = owner.index[present.tolist()].tolist() if len(owner) else []
-    if not labels:
+    flags = present.tolist() if len(owner) else []
+    picked = [at for at, flag in enumerate(flags) if flag]
+    if not picked:
         return None
-    return labels[-1] if last else labels[0]
+    # The label is taken out of the index by position, so it is numpy's scalar as pandas' is.
+    return owner.index[picked[-1] if last else picked[0]]
 
 
 _INCLUSIVE = {
@@ -10571,7 +10610,8 @@ def _column_labels(frame: DataFrame) -> Index:
         from ._multi import MultiIndex
 
         return MultiIndex.from_tuples(names, names=held)
-    made = _names_index(names, None) if names else RangeIndex(0)
+    plain = getattr(frame, "_plain_columns", False)
+    made = _names_index(names, None, plain) if names else RangeIndex(0)
     if held is not None and held[0] is not None:
         made.rename(held[0], inplace=True)
     return made
@@ -10793,15 +10833,19 @@ def _held_names(frame: Any) -> list[str]:
     return frame._inner.names()
 
 
-def _names_index(names: list[Any], name: Any) -> Any:
-    """Names read back out of the extension as the index pandas would hold them in."""
+def _names_index(names: list[Any], name: Any, plain: bool = False) -> Any:
+    """Names read back out of the extension as the index pandas would hold them in.
+
+    `plain` keeps whole numbers that step evenly a plain index, for columns a
+    caller handed over rather than ones pandas made.
+    """
     from ._frame import Index
 
     kinds = {type(one) for one in names}
     if len(kinds) > 1 and not kinds <= {int, float}:
         # pandas holds names of mixed kinds, such as 7 beside "a", in an index of objects.
         return Index(names, name=name, dtype="object")
-    ranged = _name_range(names)
+    ranged = None if plain else _name_range(names)
     return Index(names, name=name) if ranged is None else ranged
 
 
@@ -11899,7 +11943,7 @@ class _Carries:
 class DataFrameMixin(_Carries):
     """The hand written half of `DataFrame`."""
 
-    __slots__ = ("_carried", "_column_names", "_inner", "_row_freq")
+    __slots__ = ("_carried", "_column_names", "_inner", "_plain_columns", "_row_freq")
     """The state, declared here rather than on the generated class.
 
     It has to be here because the constructor is here, and a class cannot assign
@@ -11989,6 +12033,8 @@ class DataFrameMixin(_Carries):
             self._inner = self._shaped(data, index, columns)
         if listed:
             self._inner = _int_gaps_widened(self._inner, listed)
+        if columns is not None and _from_outside():
+            _columns_plain(self, columns)
         dtype = _arrow_named(dtype)
         if dtype is not None and (
             type(dtype).__name__ == "ArrowDtype"
@@ -12730,7 +12776,10 @@ class DataFrameMixin(_Carries):
 
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> DataFrame:
         """The frame with new row or column labels. `copy` is accepted and unused."""
-        return _with_axis(self, labels, axis)
+        answer = _with_axis(self, labels, axis)
+        if _align_axis(axis, "DataFrame", (0, 1)) == 1 and _from_outside():
+            _columns_plain(answer, labels)
+        return answer
 
     def droplevel(self, level: Any, axis: Any = 0) -> DataFrame:
         """The frame without some levels of its row labels, or of its column names."""
@@ -13193,7 +13242,7 @@ class DataFrameMixin(_Carries):
                 label: Series(_objects.cells(row, "N"), dtype="str")
                 for label, row in zip(labels, rows, strict=True)
             }
-            return type(self)(built).set_axis(self.columns)
+            return _labelled_by_rows(type(self)(built).set_axis(self.columns), self.index)
         answer = type(self)(
             {label: _readable(list(row)) for label, row in zip(labels, rows, strict=True)},
             index=self.columns,
@@ -13204,7 +13253,7 @@ class DataFrameMixin(_Carries):
                 # Text with NaN for its gaps stays that text, as in pandas.
                 kind = "str"
             answer = answer.astype(kind)
-        return answer
+        return _labelled_by_rows(answer, self.index)
 
     def update(
         self,
@@ -14698,7 +14747,10 @@ class DataFrameMixin(_Carries):
         inplace = _flag("inplace", inplace)
         if mapper is None and index is not None and columns is not None:
             both = self.rename(index=index, level=level, errors=errors)
-            return _settled(self, both.rename(columns=columns, level=level, errors=errors), inplace)
+            both = both.rename(columns=columns, level=level, errors=errors)
+            if _from_outside():
+                _columns_plain(both, None)
+            return _settled(self, both, inplace)
         where, mapping = _renaming(mapper, axis, index, columns)
         if where == "index":
             moved = self.set_axis(_mapped_labels(self.index, mapping, level, errors), axis=0)
@@ -14717,9 +14769,13 @@ class DataFrameMixin(_Carries):
                 " the collision is refused rather than made"
             )
         try:
-            return _settled(self, DataFrame._wrap(self._inner.renamed_columns(olds, news)), inplace)
+            renamed = DataFrame._wrap(self._inner.renamed_columns(olds, news))
         except Exception as error:
             raise translate(error) from None
+        if _from_outside():
+            # pandas maps the columns into a new index, which is never a range.
+            _columns_plain(renamed, None)
+        return _settled(self, renamed, inplace)
 
     def melt(
         self,
@@ -32928,11 +32984,15 @@ def _from_outside(depth: int = 2) -> bool:
     firepanda's own layer builds integer columns with gaps from lists all the time,
     counts under instants and spans above all, and relies on them staying integers
     with a hole, so the widening is kept to lists that come from outside. `depth` is
-    how many frames up the caller is from here, and the wrapper `_attrs` puts around a
-    method is looked through, since it is part of the method rather than a caller.
+    how many frames up the caller is from here, and the wrappers `_attrs` and this module
+    put around a method are looked through, since they are part of the method rather
+    than a caller.
     """
     frame = sys._getframe(depth)
-    while frame.f_back is not None and frame.f_globals.get("__name__") == "firepanda._attrs":
+    while frame.f_back is not None and (
+        frame.f_globals.get("__name__") == "firepanda._attrs"
+        or (frame.f_code.co_name == "method" and frame.f_globals.get("__name__") == __name__)
+    ):
         frame = frame.f_back
     return not frame.f_globals.get("__name__", "").startswith("firepanda")
 
@@ -34585,7 +34645,11 @@ def concat(
         out = _concat_columns(frames, join, ignore_index, verify, ordered)
     if any(out.null_counts()):
         out = out._widened_for_missing()
-    return DataFrame._wrap(out)
+    made = DataFrame._wrap(out)
+    if CONCAT_AXES[axis] == 0 and any(getattr(part, "_plain_columns", False) for part in parts):
+        # Stacked rows keep the columns' index, which is plain when any side's is.
+        _columns_plain(made, None)
+    return made
 
 
 _WHOLE_TEXT = re.compile(r"\s*[+-]?\d+\s*")

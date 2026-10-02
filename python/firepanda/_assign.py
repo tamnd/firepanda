@@ -21,6 +21,7 @@ from . import _names
 from ._attrs import column_names, hold_columns
 from ._frame import DataFrame, Index, Series
 from ._multi import MultiIndex
+from ._pandas import _columns_plain
 from .errors import InvalidArgumentError
 
 __all__: list[str] = []
@@ -107,6 +108,7 @@ def _frame_index(self: Any, labels: Any) -> None:
 
 def _frame_columns(self: Any, labels: Any) -> None:
     _set_axis(self, labels, 1)
+    _columns_plain(self, labels)
 
 
 def _index_name(self: Any, value: Any) -> None:

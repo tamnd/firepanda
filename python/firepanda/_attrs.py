@@ -254,6 +254,24 @@ def hold_columns(obj: Any, names: Any) -> None:
         _COLUMNS_USED = True
 
 
+def hold_plain_columns(obj: Any, plain: bool) -> None:
+    """Marks a frame whose whole number columns are a plain index rather than a range.
+
+    pandas keeps the columns it was handed, so labels written out, renamed or
+    transposed from rows stay an `Index` even when they step evenly, and only
+    the columns it makes itself are a `RangeIndex`. The names alone cannot tell
+    the two apart, so the frame carries the mark, as it carries the axis names.
+    """
+    global _COLUMNS_USED
+    if not plain:
+        with contextlib.suppress(AttributeError):
+            del obj._plain_columns
+        return
+    with contextlib.suppress(AttributeError):
+        obj._plain_columns = True
+        _COLUMNS_USED = True
+
+
 _COLUMNS_DROPS = frozenset(
     [
         "melt",
@@ -281,6 +299,9 @@ def _carry_columns(result: Any, source: Any, name: str) -> None:
     """
     if result is source or name in _COLUMNS_DROPS:
         return
+    if getattr(source, "_plain_columns", False) and type(result) is type(source):
+        with contextlib.suppress(AttributeError):
+            result._plain_columns = True
     held = column_names(source)
     if held is None:
         return

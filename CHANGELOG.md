@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Whole number columns a caller hands over stay a plain index
+
+A frame now remembers when its whole number columns are a plain `Index` rather than a `RangeIndex`, as pandas does: columns written out with `columns=`, put on with `set_axis` or assignment, renamed, or transposed from a row index that is not a range keep a plain index even when the labels step evenly, while columns pandas makes itself stay a range. The mark is carried through methods that keep the columns, row-wise `concat` and pickle. `transpose` now puts the row index itself on as the columns, so its type and name come along. `first_valid_index` and `last_valid_index` answer the label taken out of the index by position, numpy's scalar for a number index and a plain int for a range.
+
 ### Fixed: Index labels as numpy scalars, set operations with a list, putmask of another kind
 
 One label taken out of a number index by position, and the label `Index.asof` answers, are now numpy's scalar of the index's type, as in pandas, while a range index and `Index.item` still answer a plain int. `union`, `intersection`, `difference` and `symmetric_difference` keep this index's name when the other side is a list, a column or an array, and accept a column or an array as the other side. `intersection` with `sort=None` sorts unless the other side holds the same labels in the same order. `Index.putmask` with a replacement of another kind reads the labels again together, giving floats or objects instead of an error.
