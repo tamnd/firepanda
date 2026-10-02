@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: groupby groups prints like pandas
+
+`groups` over one key is a dict that prints each group's labels as a list, with text quoted and long groups cut at a hundred items, as pandas prints it. The values are still an `Index`, and over several keys it stays a plain dict.
+
 ### Fixed: apply labels its answer by the columns
 
 A function on each column that answers a value now gives a column labelled by the frame's own columns, so default columns give a `RangeIndex` and a name on the columns is kept, as in pandas.
