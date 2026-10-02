@@ -11543,6 +11543,37 @@ def _method_named(owner: Any, func: str, kind: str) -> Any:
     raise AttributeError(f"'{func}' is not a valid function for '{kind}' object")
 
 
+class _PrettyDict(dict):
+    """A dict that prints its keys and values the short way pandas prints them.
+
+    Text is quoted and anything else is written plainly, and a value that holds
+    several items prints as a list. Past a hundred items the rest is `...`.
+    """
+
+    def __repr__(self) -> str:
+        pairs = [f"{_pretty_item(key)}: {_pretty_item(value)}" for key, value in self.items()]
+        return "{" + _pretty_joined(pairs) + "}"
+
+
+def _pretty_joined(parts: list[str]) -> str:
+    """Parts joined by commas, cut to a hundred with `...` after, as pandas cuts them."""
+    if len(parts) > 100:
+        return ", ".join([*parts[:100], "..."])
+    return ", ".join(parts)
+
+
+def _pretty_item(value: Any) -> str:
+    """One key or value written the way pandas' printing writes it."""
+    if isinstance(value, str):
+        return repr(value)
+    if hasattr(value, "tolist") and not isinstance(value, tuple):
+        return "[" + _pretty_joined([_pretty_item(item) for item in value.tolist()]) + "]"
+    if isinstance(value, tuple):
+        inner = ", ".join(_pretty_item(item) for item in value)
+        return f"({inner},)" if len(value) == 1 else f"({inner})"
+    return str(value)
+
+
 def _gathered(results: list[Any], labels: list[Any], stack: Any, name: Any = None) -> Any:
     """What a function on each column or row answered, put together the way pandas does.
 
@@ -28742,11 +28773,16 @@ class GroupByMixin[Answer]:
 
     @property
     def groups(self) -> dict[Any, Index]:
-        """Every group's key and the row labels in it."""
-        return {
+        """Every group's key and the row labels in it.
+
+        Over one key it is a dict that prints the labels as lists, as pandas'
+        own dict for this does, and over several it is a plain dict.
+        """
+        made = {
             self._named(key, False): self._frame.iloc[places].index
             for key, places in self._members()
         }
+        return made if len(self._by) > 1 else _PrettyDict(made)
 
     @property
     def indices(self) -> dict[Any, Any]:
