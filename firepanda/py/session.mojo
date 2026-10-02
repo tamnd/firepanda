@@ -19,8 +19,8 @@ from firepanda.frame import DataFrame
 from firepanda.py.args import words
 from firepanda.py.errors import UNSUPPORTED, VALUE, retagged, tagged
 from firepanda.py.frame import PyDataFrame
+from firepanda.sql.cache import PlanCache
 from firepanda.sql.catalog import Catalog
-from firepanda.sql.ddl import execute
 from firepanda.sql.run import Dialect
 
 
@@ -33,10 +33,19 @@ struct PySqlSession(Movable, Writable):
     var dialect: Dialect
     """The grammar, the jump table and the function catalog, read once."""
 
+    var cache: PlanCache
+    """The plans of the queries this session has run, by text and generation."""
+
+    var shared: PlanCache
+    """The plans of the queries `firepanda.sql` has run through this session,
+    by text and the shape of the catalog each call built."""
+
     def __init__(out self) raises:
         """An empty catalog and the dialect."""
         self.catalog = Catalog()
         self.dialect = Dialect()
+        self.cache = PlanCache()
+        self.shared = PlanCache()
 
     @staticmethod
     def py_init(
@@ -87,7 +96,12 @@ struct PySqlSession(Movable, Writable):
         var held = Self._held(py_self)
         var answer: DataFrame
         try:
-            answer = execute(held[].dialect, text, held[].catalog)
+            answer = held[].cache.answer(
+                held[].dialect,
+                text,
+                held[].catalog,
+                String(held[].catalog.generation()),
+            )
         except cause:
             var message = String(cause)
             if message.startswith("firepanda ") or message.startswith(

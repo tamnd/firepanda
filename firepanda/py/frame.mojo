@@ -78,6 +78,7 @@ from firepanda.py.errors import (
     tagged,
 )
 from firepanda.py.index import PyIndex
+from firepanda.py.session import PySqlSession
 from firepanda.py.ops import (
     binary_failure,
     binary_op,
@@ -2744,6 +2745,7 @@ def run_sql(
     frames: PythonObject,
     parameters: PythonObject,
     values: PythonObject,
+    session: PythonObject,
 ) raises -> PythonObject:
     """Runs one SQL statement over frames named for it, in DuckDB's dialect.
 
@@ -2771,6 +2773,10 @@ def run_sql(
             name. Empty when the call passed none.
         values: A frame of one row with one column per parameter, `p1` for the
             first and on, or `None` when `parameters` is empty.
+        session: A `SqlSession` whose dialect and shared plan cache the call
+            borrows, or `None` to read the dialect afresh and keep no plan.
+            Only those two are borrowed: the catalog is still the one built
+            here, and the session's own is not looked at.
 
     Returns:
         What the statement answers, as a new frame.
@@ -2815,7 +2821,13 @@ def run_sql(
         _ = catalog.bind(Arguments(said^, texts^))
     var answer: DataFrame
     try:
-        answer = execute(Dialect(), text, catalog)
+        if session is Python.none():
+            answer = execute(Dialect(), text, catalog)
+        else:
+            var held = PySqlSession._held(session)
+            answer = held[].shared.answer(
+                held[].dialect, text, catalog, catalog.shape()
+            )
     except cause:
         var message = String(cause)
         # A refusal names firepanda as what cannot do it, which is the one

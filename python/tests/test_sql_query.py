@@ -181,3 +181,24 @@ def test_a_parameter_and_its_value_have_to_match(firepanda: ModuleType) -> None:
         firepanda.sql("SELECT $k AS x", [1], k=2)
     with pytest.raises(TypeError, match="not int"):
         firepanda.sql("SELECT ? AS x", 1)
+
+
+def test_a_query_run_again_answers_from_its_rows_not_its_plan(firepanda: ModuleType) -> None:
+    """The second call reuses the first one's plan and still reads its own rows and values."""
+    query = "SELECT a, sum(b) AS s FROM orders WHERE b > ? GROUP BY a ORDER BY a"
+    orders = firepanda.DataFrame(ORDERS)
+    first = firepanda.sql(query, params=[15])
+    assert first["a"].tolist() == [1, 2, 3]
+    assert first["s"].tolist() == [30, 70, 40]
+    again = firepanda.sql(query, params=[35])
+    assert again["a"].tolist() == [2, 3]
+    assert again["s"].tolist() == [50, 40]
+    orders = firepanda.DataFrame({"a": [7, 7], "b": [100, 200]})
+    other = firepanda.sql(query, params=[0])
+    assert other["a"].tolist() == [7]
+    assert other["s"].tolist() == [300]
+    orders = firepanda.DataFrame({"a": ["x", "y"], "b": [1.5, 2.5]})
+    typed = firepanda.sql(query, params=[2])
+    assert typed["a"].tolist() == ["y"]
+    assert typed["s"].tolist() == [2.5]
+    assert len(orders) == 2
