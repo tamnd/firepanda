@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: asi8 is a numpy int64 array
+
+`DatetimeIndex.asi8` and `TimedeltaIndex.asi8` answer a numpy int64 array, as pandas does, with a gap as the smallest int64, where they answered a list with None. The list stays inside firepanda under a private name for the frequency and reduction code that reads it.
+
 ### Added: number categories on a column of text categories
 
 `rename_categories`, `set_categories` and `Categorical.from_codes` take numbers, floats, instants and other values that are not text as categories, and `Series.map` on a category column maps the categories and keeps the column a category when the new ones are distinct, as pandas does. A `CategoricalDtype` of numbers given to `astype` matches the values by equality, so a float column with a gap lands in its integer categories instead of becoming all gaps.

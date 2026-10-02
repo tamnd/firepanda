@@ -57,6 +57,7 @@ from ._pandas import (
     _numpy_out,
     _on_the_clock,
     _spelled,
+    _stamps_out,
     _zone_name,
 )
 from ._scalars import NaT, _single_frequency
@@ -481,13 +482,16 @@ class DatetimeIndex(HeldFreq, Index):
         return naive.to_numpy()
 
     @property
-    def asi8(self) -> list[Any]:
-        """The labels as the whole numbers they are stored as.
+    def asi8(self) -> Any:
+        """The labels as the whole numbers they are stored as, a numpy int64 array.
 
-        A list where pandas gives a numpy array, which is the divergence
-        document 21 section 7 recorded for `Index.values` and is the same
-        divergence wearing another name.
+        A gap is the smallest int64, which is how numpy stores NaT.
         """
+        return _stamps_out(self._stamps)
+
+    @property
+    def _stamps(self) -> list[Any]:
+        """The labels as the whole numbers they are stored as, None for a gap."""
         try:
             return list(self._inner.to_list())
         except Exception as error:
@@ -813,7 +817,7 @@ class DatetimeIndex(HeldFreq, Index):
         """The average instant, or NaT when there is none."""
         if axis not in (0, -1, None):
             raise IndexError("tuple index out of range")
-        stamps = self.asi8
+        stamps = self._stamps
         present = [value for value in stamps if value is not None]
         if not present or (not skipna and len(present) < len(stamps)):
             return NaT
@@ -831,7 +835,7 @@ class DatetimeIndex(HeldFreq, Index):
         """The spread of the instants as a span, or NaT when there are too few."""
         from ._scalars import Timedelta
 
-        stamps = self.asi8
+        stamps = self._stamps
         present = [float(value) for value in stamps if value is not None]
         count = len(present)
         if count - ddof <= 0 or (not skipna and count < len(stamps)):

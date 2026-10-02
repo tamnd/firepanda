@@ -180,7 +180,7 @@ def _inferred(index: Any) -> str | None:
 
     if len(index) < 3:
         raise ValueError("Need at least 3 dates to infer frequency")
-    stored = index.asi8
+    stored = index._stamps
     if any(one is None for one in stored):
         return None
     unit = index.unit
@@ -189,7 +189,7 @@ def _inferred(index: Any) -> str | None:
         first = epoch + datetime.timedelta(seconds=stored[0] / (_PER_DAY[unit] // 86_400))
         return _Inferer(stored, stored, unit, None, first).rule()
     local = index.tz_localize(None) if index.tz is not None else index
-    wall = local.asi8
+    wall = local._stamps
     fields = (
         local.year.tolist(),
         local.month.tolist(),
@@ -277,7 +277,7 @@ def _conforming(index: Any, offset: Any) -> None:
     ranged = timedelta_range if spans else date_range
     try:
         made = ranged(start=index[0], periods=len(index), freq=step, unit=index.unit)
-        kept = made.asi8 == index.asi8
+        kept = made._stamps == index._stamps
     except (ValueError, TypeError, NotImplementedError):
         kept = False
     if not kept:

@@ -463,5 +463,19 @@ def test_the_clock_type_and_copy_arguments_are_pandas(
 def test_the_stored_whole_numbers_are_reachable(firepanda: ModuleType) -> None:
     """`asi8` is the labels as the integers they are, in the index's own unit."""
     got = made(firepanda).as_unit("s").asi8
-    want = list(theirs().as_unit("s").asi8)
-    assert got == want
+    want = theirs().as_unit("s").asi8
+    assert type(got).__name__ == "ndarray"
+    assert str(got.dtype) == "int64"
+    assert got.tolist() == want.tolist()
+
+
+@needs_pandas
+def test_a_gap_is_the_smallest_whole_number(firepanda: ModuleType) -> None:
+    """`asi8` stores NaT as the smallest int64, as numpy does."""
+    import pandas
+
+    got = firepanda.DatetimeIndex(["2020-01-01", None]).asi8
+    want = pandas.DatetimeIndex(["2020-01-01", None]).asi8
+    assert got.tolist() == want.tolist()
+    spans = firepanda.to_timedelta(["1s", None]).asi8
+    assert spans.tolist() == pandas.to_timedelta(["1s", None]).asi8.tolist()

@@ -8547,7 +8547,7 @@ def _interpolation_points(column: Series, method: str, index: Any) -> Series:
             " an index of numbers, instants or spans is read as positions along the line"
         )
     # Instants and spans sit at their counts in the index's unit, as pandas reads them.
-    points = index.asi8 if counted else index.tolist()
+    points = index._stamps if counted else index.tolist()
     return Series(points, index=column.index, dtype="float64")
 
 
@@ -30223,6 +30223,13 @@ def _temporal_insert(index: Any, loc: int, item: Any) -> Any:
     if not 0 <= at <= size:
         raise IndexError(f"index {loc} is out of bounds for axis 0 with size {size}")
     return index[:at].append([one, index[at:]])
+
+
+def _stamps_out(stamps: list[Any]) -> Any:
+    """Stored whole numbers as the numpy int64 array `asi8` answers, a gap the smallest int64."""
+    numpy = _numpy()
+    floor = numpy.iinfo(numpy.int64).min
+    return numpy.array([floor if value is None else value for value in stamps], dtype=numpy.int64)
 
 
 def _numpy_out(values: Any, kind: str) -> Any:

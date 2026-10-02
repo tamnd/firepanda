@@ -42,6 +42,7 @@ from ._pandas import (
     _span_frame,
     _span_parts,
     _span_type,
+    _stamps_out,
     to_timedelta,
 )
 from ._scalars import NaT, Timedelta
@@ -189,8 +190,13 @@ class TimedeltaIndex(HeldFreq, Index):
         return str(self.dtype)[len("timedelta64[") : -1]
 
     @property
-    def asi8(self) -> list[Any]:
-        """Every label as the whole number it is stored as, in its own unit."""
+    def asi8(self) -> Any:
+        """Every label as the whole number it is stored as, a numpy int64 array."""
+        return _stamps_out(self._stamps)
+
+    @property
+    def _stamps(self) -> list[Any]:
+        """Every label as the whole number it is stored as, in its own unit, None for a gap."""
         scale = _UNITS[self.unit]
         return [
             None if value is None else value.value // scale for value in _held_values(self._inner)
