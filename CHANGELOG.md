@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: masked columns through frame reductions, rank, round, clip and zero divisors
+
+A frame with an `Int64` or `Float64` column sums, averages and takes the extremes and spreads of each column into one masked answer, where it raised. `describe` keeps the masked type, `round` and `clip` work on masked columns, `rank` answers `UInt64` or `Float64` by method, `isin` answers `boolean` flags, `value_counts(dropna=False)` puts the gap after the values it ties with, and `any` and `all` answer numpy flags. Floor division and the remainder of masked whole numbers by zero answer 0 as pandas does, where they answered text NaN. Masked floats and whole numbers print with pandas' spacing around a minus.
+
 ### Changed: asi8 is a numpy int64 array
 
 `DatetimeIndex.asi8` and `TimedeltaIndex.asi8` answer a numpy int64 array, as pandas does, with a gap as the smallest int64, where they answered a list with None. The list stays inside firepanda under a private name for the frequency and reduction code that reads it.

@@ -16104,13 +16104,19 @@ class DataFrameMixin(_Carries):
         for _, answer in sorted(described, key=lambda pair: len(pair[1])):
             labels += [label for label in answer.index.tolist() if label not in labels]
         # A label a column has no answer for is NaN, as pandas prints it.
-        return DataFrame(
+        out = DataFrame(
             {
                 name: [answer[label] if label in answer.index else math.nan for label in labels]
                 for name, answer in described
             },
             index=labels,
         )
+        for at, (_, answer) in enumerate(described):
+            # A masked column's answer keeps its masked type, which the lists above lose.
+            kind = _masked.masked_of(answer)
+            if kind and len(answer) == len(labels):
+                out.isetitem(at, _masked.as_masked(out.iloc[:, at], kind))
+        return out
 
     def _reduce(
         self,
@@ -16154,6 +16160,9 @@ class DataFrameMixin(_Carries):
 
             totals = [read[name].sum(skipna=skipna, min_count=min_count) for name in names]
             return Series(totals, index=names, dtype=object)
+        masked = [_masked.masked_of(read[name]) for name in names]
+        if any(masked) and kind in _MASKED_FRAME_FOLDS:
+            return _masked_folded(read, names, kind, param, skipna, min_count)
         if kind in ("sum", "prod"):
             read = _flags_counted(read)
         try:
@@ -20714,7 +20723,11 @@ class SeriesMixin(_Carries):
             )
         if _masked_side(self, other):
             return _masked.operated(
-                self, other, op, lambda left, right: left._operator(right, op, flip, strict)
+                self,
+                other,
+                op,
+                lambda left, right: left._operator(right, op, flip, strict),
+                flip,
             )
         if _written_category(self._inner) or (
             isinstance(other, SeriesMixin) and _written_category(other._inner)
@@ -20790,6 +20803,7 @@ class SeriesMixin(_Carries):
                 other,
                 op,
                 lambda left, right: left._named(right, op, axis, level, fill_value, flip),
+                flip,
             )
         if fill_value is None and _holds_objects(self, other):
             return _object_operator(self, other, op, flip)
@@ -22530,6 +22544,40 @@ _MASKED_CALLED = "a function"
 _MASKED_SKIPPED = frozenset(
     {"nunique", "idxmax", "idxmin", "cumcount", "ngroup", "value_counts", "apply", "corr", "cov"}
 )
+
+
+_MASKED_FRAME_FOLDS = frozenset(
+    ("sum", "prod", "mean", "median", "min", "max", "std", "var", "sem")
+)
+
+
+def _masked_folded(
+    frame: Any, names: list[Any], kind: str, param: float, skipna: bool, min_count: int
+) -> Any:
+    """A reduction down a frame with a masked column, each column on its own.
+
+    pandas answers one masked column of the answers: `Int64` when every column
+    answers a whole number, `Float64` when one answers a float, and a column
+    that is not masked counts as its masked twin.
+    """
+    from ._frame import Series
+
+    totals, kinds = [], set()
+    for name in names:
+        column = frame[name]
+        if kind in ("sum", "prod"):
+            total = getattr(column, kind)(skipna=skipna, min_count=min_count)
+        elif kind in ("std", "var", "sem"):
+            total = getattr(column, kind)(skipna=skipna, ddof=int(param))
+        else:
+            total = getattr(column, kind)(skipna=skipna)
+        source = _masked.masked_of(column) or _masked.upper_of(_word(column.dtype))
+        kinds.add(_masked_answer(kind, source) or source)
+        totals.append(_masked._gapless(total))
+    family = kinds.pop() if len(kinds) == 1 else "Float64"
+    if family not in ("Int64", "Float64", "Float32", "boolean") and family[:1] not in "IU":
+        family = "Float64"
+    return _masked.as_masked(Series(totals, index=names, dtype=object), family)
 
 
 def _masked_answer(op: Any, source: str) -> str | None:
@@ -37199,7 +37247,13 @@ def _text_values(
         if dtype.startswith("Float") and formatter is None and float_format is None:
             precision = _config.get_option("display.precision")
             space = " " if leading else ""
-            return [space + ("<NA>" if value is None else _masked.float_text(value, precision))
+            texts = ["<NA>" if value is None else _masked.float_text(value, precision)
+                     for value in _held_values(lower._inner)]
+            # The leading space is the sign's slot, which a minus fills, as `f"{x: f}"` writes.
+            return [text if text[:1] == "-" and leading else space + text for text in texts]
+        if dtype[:1] in "IU" and formatter is None and leading:
+            # pandas writes each masked whole number after a space, a minus included.
+            return [" <NA>" if value is None else f" {value}"
                     for value in _held_values(lower._inner)]
         shown = _text_values(lower, formatter, float_format, na_rep, decimal, leading, justify)
         gap = " <NA>" if leading else "<NA>"
@@ -39196,6 +39250,26 @@ SeriesMixin.list = Namespace(_arrowtyped.ListAccessor)  # type: ignore[attr-defi
 SeriesMixin.struct = Namespace(_arrowtyped.StructAccessor)  # type: ignore[attr-defined]
 
 
+def _gap_counted_last(answer: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """Value counts of a masked column with the gap after the values it ties with.
+
+    pandas counts a masked column's values and then puts the count of its gaps
+    on the end before it sorts, and the sort is stable, so the gap comes after
+    every value with the same count, and last of all when nothing is sorted.
+    """
+    labels = answer.index.tolist()
+    gaps = [at for at, label in enumerate(labels) if _missing(label)]
+    if not gaps or not isinstance(answer, SeriesMixin):
+        return answer
+    sort = args[1] if len(args) > 1 else kwargs.get("sort", True)
+    ascending = args[2] if len(args) > 2 else kwargs.get("ascending", False)
+    order = [at for at in range(len(labels)) if at not in gaps] + gaps
+    if sort:
+        counts = answer.tolist()
+        order.sort(key=lambda at: counts[at], reverse=not ascending)
+    return answer.iloc[order]
+
+
 def _masked_through(method: Any, how: str) -> Any:
     """A method of a series that, on a masked column, runs over the lower case column.
 
@@ -39204,7 +39278,7 @@ def _masked_through(method: Any, how: str) -> Any:
     column's own type, `whole` does that for a column of whole numbers only,
     `reduce` reads a missing answer as `NA`, `truth` is `any` and `all` by Kleene's
     logic, `raw` hands it back as it is, `counts` is `family` with the labels
-    written back in the column's type, and
+    written back in the column's type, `rank` is `UInt64` or `Float64` by method, and
     `transform` picks one of these by the transform asked for.
     A masked series among the arguments is read the same way.
     """
@@ -39243,12 +39317,20 @@ def _masked_through(method: Any, how: str) -> Any:
             if name == "string":
                 raise _string_words(error) from None
             raise
-        if chosen == "raw":
+        if chosen == "raw" or (method.__name__ == "isin" and name == "string"):
+            # pandas answers plain flags for `isin` on a `string` column.
             return answer
         keep = chosen == "own" or (chosen == "whole" and name[0] in "IU")
+        if chosen == "rank":
+            # Ranks that are whole numbers are `UInt64`, and the average and percentages floats.
+            way = args[1] if len(args) > 1 else kwargs.get("method", "average")
+            pct = args[5] if len(args) > 5 else kwargs.get("pct", False)
+            answer = _masked.rewrap(answer, "UInt64" if way != "average" and not pct else None)
+            return _kept(self, answer, inplace)
         answer = _masked.rewrap(answer, name if keep else None)
         if chosen == "counts":
             # The counts are labelled by the values, which keep the column's type.
+            answer = _gap_counted_last(answer, args, kwargs)
             labels = _masked.as_masked(answer.index.to_series(), name)
             answer = _with_row_labels(answer, labels)
         return _kept(self, answer, inplace)
@@ -39269,8 +39351,11 @@ for _method, _how in (
     ("fillna", "own"),
     ("describe", "family"),
     ("to_numpy", "raw"),
-    ("isin", "raw"),
+    ("isin", "family"),
     ("replace", "family"),
+    ("round", "own"),
+    ("clip", "own"),
+    ("rank", "rank"),
 ):
     setattr(SeriesMixin, _method, _masked_through(getattr(SeriesMixin, _method), _how))
 
