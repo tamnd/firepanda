@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: Columns of different lengths say what pandas says
+
+`DataFrame({"a": [1, 2, 3], "b": [1]})` now raises `All arrays must be of the same length`, which is pandas' wording, instead of naming the short column and both row counts. The core's message is changed too, and until the extension is rebuilt the error boundary rewrites the old wording.
+
 ### Added: `DISTINCT ON` a computed key
 
 `SELECT DISTINCT ON (qty % 2) qty FROM sales` runs. Until now it was refused,

@@ -398,16 +398,6 @@ def frame_from(data: PythonObject) raises -> DataFrame:
         if rows < 0:
             rows = len(column)
         elif len(column) != rows:
-            raise tagged(
-                VALUE,
-                String(
-                    "all columns must be the same length, and '",
-                    name,
-                    "' has ",
-                    len(column),
-                    " rows where the ones before it have ",
-                    rows,
-                ),
-            )
+            raise tagged(VALUE, "All arrays must be of the same length")
         columns.append(column^)
     return DataFrame.from_series(columns^)

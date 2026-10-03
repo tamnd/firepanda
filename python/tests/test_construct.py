@@ -164,7 +164,7 @@ def test_an_empty_constructor_is_empty(firepanda: ModuleType) -> None:
 
 def test_columns_of_different_lengths_are_refused(firepanda: ModuleType) -> None:
     """A frame is rectangular and there is nothing defensible to do with the short one."""
-    with pytest.raises(ValueError, match="same length"):
+    with pytest.raises(ValueError, match=r"^All arrays must be of the same length$"):
         firepanda.DataFrame({"a": [1, 2, 3], "b": [1]})
 
 
