@@ -381,7 +381,10 @@ class FirepandaArray:
         """
         import numpy
 
-        if axis is not None:
+        if axis is not None and self._numpy_backed:
+            # numpy repeats these, and has the one axis there is.
+            _axis_checked(axis)
+        elif axis is not None:
             raise InvalidArgumentError(
                 "the 'axis' parameter is not supported in the pandas implementation of repeat()"
             )
@@ -808,10 +811,43 @@ class IntervalArray(FirepandaArray):
 
         return IntervalIndex(self._column)
 
+    can_hold_na = True
+
     @property
     def closed(self) -> str:
         """Which ends each interval holds."""
         return self._index().closed
+
+    @property
+    def closed_left(self) -> bool:
+        """Whether each interval holds its left end."""
+        return self._index().closed_left
+
+    @property
+    def closed_right(self) -> bool:
+        """Whether each interval holds its right end."""
+        return self._index().closed_right
+
+    @property
+    def open_left(self) -> bool:
+        """Whether each interval leaves out its left end."""
+        return self._index().open_left
+
+    @property
+    def open_right(self) -> bool:
+        """Whether each interval leaves out its right end."""
+        return self._index().open_right
+
+    def to_tuples(self, na_tuple: bool = True) -> Any:
+        """Each interval as a pair of its ends, a numpy array of objects."""
+        import numpy
+
+        pairs = self._index()._tuples(na_tuple)
+        found = numpy.empty(len(pairs), dtype=object)
+        for at, pair in enumerate(pairs):
+            # One at a time, or numpy reads the pairs as a second axis.
+            found[at] = pair
+        return found
 
     @property
     def left(self) -> Any:

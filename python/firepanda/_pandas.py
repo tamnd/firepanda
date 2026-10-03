@@ -30293,6 +30293,16 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         super().__init__(frame, by, as_index, sort, dropna)
         self._column = column
 
+    @property
+    def dtype(self) -> Series:
+        """The column's type once for each group, as a series of objects named after it."""
+        from ._frame import Series
+
+        sizes = self.size()
+        # The spelling of the type, as `DataFrame.dtypes` answers it.
+        kind = str(self._frame[self._column].dtype)
+        return Series([kind] * len(sizes), index=sizes.index, name=self._column).astype(object)
+
     def ohlc(self) -> DataFrame:
         """The first, highest, lowest and last value of each group, as four columns.
 

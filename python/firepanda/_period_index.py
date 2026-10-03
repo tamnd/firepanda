@@ -16,6 +16,7 @@ keeps its type in the slot a `DatetimeIndex` keeps its frequency in, is still a
 
 from __future__ import annotations
 
+import itertools
 import numbers
 import re
 from typing import Any
@@ -60,6 +61,21 @@ def _listed(data: Any) -> list[Any]:
     if hasattr(data, "tolist"):
         return list(data.tolist())
     return list(data)
+
+
+_RESOLUTIONS = {
+    "Y": "year",
+    "Q": "quarter",
+    "M": "month",
+    "D": "day",
+    "h": "hour",
+    "min": "minute",
+    "s": "second",
+    "ms": "millisecond",
+    "us": "microsecond",
+    "ns": "nanosecond",
+}
+"""The unit pandas names for each period frequency, which has none for a week."""
 
 
 class PeriodIndex(Index):
@@ -162,6 +178,41 @@ class PeriodIndex(Index):
     def inferred_type(self) -> str:
         """What pandas infers the labels to be."""
         return "period"
+
+    @property
+    def asi8(self) -> Any:
+        """Each period's ordinal as numpy whole numbers, the smallest int64 for a gap."""
+        import numpy
+
+        least = numpy.iinfo(numpy.int64).min
+        found = [least if value is NaT else value.ordinal for value in self._periods()]
+        return numpy.array(found, dtype=numpy.int64)
+
+    @property
+    def is_full(self) -> bool:
+        """Whether no period is missing between the first and the last.
+
+        Raises:
+            ValueError: For labels out of order, in pandas' words.
+        """
+        if len(self) == 0:
+            return True
+        if not self.is_monotonic_increasing:
+            raise InvalidArgumentError("Index is not monotonic")
+        ordinals = self.asi8.tolist()
+        return all(later - earlier < 2 for earlier, later in itertools.pairwise(ordinals))
+
+    @property
+    def resolution(self) -> str:
+        """The name of the unit the frequency counts in.
+
+        Raises:
+            ValueError: For a weekly or business day frequency, in pandas' words.
+        """
+        base = self.freqstr.split("-")[0]
+        if base not in _RESOLUTIONS:
+            raise InvalidArgumentError(f"Invalid frequency: {self.freqstr}")
+        return _RESOLUTIONS[base]
 
     def _periods(self) -> list[Any]:
         """The labels as periods, NaT for a gap."""
