@@ -47,6 +47,7 @@ from ._pandas import (
     _index_values,
     _label_inserted,
     _Labelled,
+    _numpy_keywords,
     _Point,
     _Positional,
     _printed,
@@ -2667,7 +2668,9 @@ class DataFrame(DataFrameMixin):
     ) -> Series:
         """The average of the values. Over the columns. One value per column."""
         try:
-            return self._reduce("mean", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "mean", kwargs)._reduce(
+                "mean", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2676,7 +2679,9 @@ class DataFrame(DataFrameMixin):
     ) -> Any:
         """The smallest value. Over the columns. One value per column."""
         try:
-            return self._fold("min", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "min", kwargs)._fold(
+                "min", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2685,7 +2690,9 @@ class DataFrame(DataFrameMixin):
     ) -> Any:
         """The largest value. Over the columns. One value per column."""
         try:
-            return self._fold("max", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "max", kwargs)._fold(
+                "max", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2694,7 +2701,9 @@ class DataFrame(DataFrameMixin):
     ) -> Series:
         """The middle value. Over the columns. One value per column."""
         try:
-            return self._reduce("median", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "median", kwargs)._reduce(
+                "median", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2703,7 +2712,9 @@ class DataFrame(DataFrameMixin):
     ) -> Series:
         """The unbiased skew, normalised by N-1. Over the columns. One value per column."""
         try:
-            return self._reduce("skew", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "skew", kwargs)._reduce(
+                "skew", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2718,7 +2729,9 @@ class DataFrame(DataFrameMixin):
     ) -> Any:
         """The sum of the values. Over the columns. One value per column."""
         try:
-            return self._fold("sum", 0.0, axis, skipna, numeric_only, min_count)
+            return _numpy_keywords(self, "sum", kwargs)._fold(
+                "sum", 0.0, axis, skipna, numeric_only, min_count
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2733,7 +2746,9 @@ class DataFrame(DataFrameMixin):
     ) -> Any:
         """The product of the values. Over the columns. One value per column."""
         try:
-            return self._fold("prod", 0.0, axis, skipna, numeric_only, min_count)
+            return _numpy_keywords(self, "prod", kwargs)._fold(
+                "prod", 0.0, axis, skipna, numeric_only, min_count
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2750,7 +2765,9 @@ class DataFrame(DataFrameMixin):
         column.
         """
         try:
-            return self._fold("prod", 0.0, axis, skipna, numeric_only, min_count)
+            return _numpy_keywords(self, "prod", kwargs)._fold(
+                "prod", 0.0, axis, skipna, numeric_only, min_count
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2759,7 +2776,7 @@ class DataFrame(DataFrameMixin):
     ) -> Any:
         """Whether any value is true. Over the columns. One value per column."""
         try:
-            return self._truth("any", axis, bool_only, skipna)
+            return _numpy_keywords(self, "any", kwargs)._truth("any", axis, bool_only, skipna)
         except Exception as error:
             raise translate(error) from None
 
@@ -2768,7 +2785,7 @@ class DataFrame(DataFrameMixin):
     ) -> Any:
         """Whether every value is true. Over the columns. One value per column."""
         try:
-            return self._truth("all", axis, bool_only, skipna)
+            return _numpy_keywords(self, "all", kwargs)._truth("all", axis, bool_only, skipna)
         except Exception as error:
             raise translate(error) from None
 
@@ -2785,7 +2802,9 @@ class DataFrame(DataFrameMixin):
         One value per column.
         """
         try:
-            return self._reduce("std", _ddof_number(ddof), axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "std", kwargs)._reduce(
+                "std", _ddof_number(ddof), axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2802,7 +2821,9 @@ class DataFrame(DataFrameMixin):
         per column.
         """
         try:
-            return self._reduce("var", _ddof_number(ddof), axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "var", kwargs)._reduce(
+                "var", _ddof_number(ddof), axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2819,7 +2840,9 @@ class DataFrame(DataFrameMixin):
         columns. One value per column.
         """
         try:
-            return self._reduce("sem", _ddof_number(ddof), axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "sem", kwargs)._reduce(
+                "sem", _ddof_number(ddof), axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3003,7 +3026,9 @@ class DataFrame(DataFrameMixin):
     ) -> DataFrame:
         """The running total, where row i holds the sum of every row up to i."""
         try:
-            return self._scan("cumsum", axis, skipna, numeric_only)
+            return _numpy_keywords(self, "cumsum", kwargs, args)._scan(
+                "cumsum", axis, skipna, numeric_only
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3017,7 +3042,9 @@ class DataFrame(DataFrameMixin):
     ) -> DataFrame:
         """The running product."""
         try:
-            return self._scan("cumprod", axis, skipna, numeric_only)
+            return _numpy_keywords(self, "cumprod", kwargs, args)._scan(
+                "cumprod", axis, skipna, numeric_only
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3031,7 +3058,9 @@ class DataFrame(DataFrameMixin):
     ) -> DataFrame:
         """The largest value seen so far."""
         try:
-            return self._scan("cummax", axis, skipna, numeric_only)
+            return _numpy_keywords(self, "cummax", kwargs, args)._scan(
+                "cummax", axis, skipna, numeric_only
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3045,7 +3074,9 @@ class DataFrame(DataFrameMixin):
     ) -> DataFrame:
         """The smallest value seen so far."""
         try:
-            return self._scan("cummin", axis, skipna, numeric_only)
+            return _numpy_keywords(self, "cummin", kwargs, args)._scan(
+                "cummin", axis, skipna, numeric_only
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3664,28 +3695,36 @@ class Series(SeriesMixin):
     def idxmax(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The label of the first largest value."""
         try:
-            return self._extreme_at("max", axis, skipna, True)
+            return _numpy_keywords(self, "argmax", kwargs, args)._extreme_at(
+                "max", axis, skipna, True
+            )
         except Exception as error:
             raise translate(error) from None
 
     def idxmin(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The label of the first smallest value."""
         try:
-            return self._extreme_at("min", axis, skipna, True)
+            return _numpy_keywords(self, "argmax", kwargs, args)._extreme_at(
+                "min", axis, skipna, True
+            )
         except Exception as error:
             raise translate(error) from None
 
     def argmax(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The position of the first largest value."""
         try:
-            return self._extreme_at("max", axis, skipna, False)
+            return _numpy_keywords(self, "argmax", kwargs, args)._extreme_at(
+                "max", axis, skipna, False
+            )
         except Exception as error:
             raise translate(error) from None
 
     def argmin(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The position of the first smallest value."""
         try:
-            return self._extreme_at("min", axis, skipna, False)
+            return _numpy_keywords(self, "argmax", kwargs, args)._extreme_at(
+                "min", axis, skipna, False
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3737,7 +3776,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The average of the values. Over the rows."""
         try:
-            return self._reduce("mean", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "mean", kwargs)._reduce(
+                "mean", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3746,7 +3787,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The smallest value. Over the rows."""
         try:
-            return self._reduce("min", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "min", kwargs)._reduce(
+                "min", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3755,7 +3798,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The largest value. Over the rows."""
         try:
-            return self._reduce("max", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "max", kwargs)._reduce(
+                "max", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3764,7 +3809,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The middle value. Over the rows."""
         try:
-            return self._reduce("median", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "median", kwargs)._reduce(
+                "median", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3773,7 +3820,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The unbiased skew, normalised by N-1. Over the rows."""
         try:
-            return self._reduce("skew", 0.0, axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "skew", kwargs)._reduce(
+                "skew", 0.0, axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3788,7 +3837,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The sum of the values. Over the rows."""
         try:
-            return self._reduce("sum", 0.0, axis, skipna, numeric_only, min_count)
+            return _numpy_keywords(self, "sum", kwargs)._reduce(
+                "sum", 0.0, axis, skipna, numeric_only, min_count
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3803,7 +3854,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The product of the values. Over the rows."""
         try:
-            return self._reduce("prod", 0.0, axis, skipna, numeric_only, min_count)
+            return _numpy_keywords(self, "prod", kwargs)._reduce(
+                "prod", 0.0, axis, skipna, numeric_only, min_count
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3818,7 +3871,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The product of the values. The same as prod. Over the rows."""
         try:
-            return self._reduce("prod", 0.0, axis, skipna, numeric_only, min_count)
+            return _numpy_keywords(self, "prod", kwargs)._reduce(
+                "prod", 0.0, axis, skipna, numeric_only, min_count
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3827,7 +3882,7 @@ class Series(SeriesMixin):
     ) -> Any:
         """Whether any value is true. Over the rows."""
         try:
-            return self._truth("any", axis, bool_only, skipna)
+            return _numpy_keywords(self, "any", kwargs)._truth("any", axis, bool_only, skipna)
         except Exception as error:
             raise translate(error) from None
 
@@ -3836,7 +3891,7 @@ class Series(SeriesMixin):
     ) -> Any:
         """Whether every value is true. Over the rows."""
         try:
-            return self._truth("all", axis, bool_only, skipna)
+            return _numpy_keywords(self, "all", kwargs)._truth("all", axis, bool_only, skipna)
         except Exception as error:
             raise translate(error) from None
 
@@ -3851,7 +3906,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The sample standard deviation, normalised by N-1 by default. Over the rows."""
         try:
-            return self._reduce("std", _ddof_number(ddof), axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "std", kwargs)._reduce(
+                "std", _ddof_number(ddof), axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3866,7 +3923,9 @@ class Series(SeriesMixin):
     ) -> Any:
         """The unbiased variance, normalised by N-1 by default. Over the rows."""
         try:
-            return self._reduce("var", _ddof_number(ddof), axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "var", kwargs)._reduce(
+                "var", _ddof_number(ddof), axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -3883,7 +3942,9 @@ class Series(SeriesMixin):
         rows.
         """
         try:
-            return self._reduce("sem", _ddof_number(ddof), axis, skipna, numeric_only, 0)
+            return _numpy_keywords(self, "sem", kwargs)._reduce(
+                "sem", _ddof_number(ddof), axis, skipna, numeric_only, 0
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -4051,28 +4112,36 @@ class Series(SeriesMixin):
     def cumsum(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Series:
         """The running total, where row i holds the sum of every row up to i."""
         try:
-            return self._scan("cumsum", axis, skipna, False)
+            return _numpy_keywords(self, "cumsum", kwargs, args)._scan(
+                "cumsum", axis, skipna, False
+            )
         except Exception as error:
             raise translate(error) from None
 
     def cumprod(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Series:
         """The running product."""
         try:
-            return self._scan("cumprod", axis, skipna, False)
+            return _numpy_keywords(self, "cumprod", kwargs, args)._scan(
+                "cumprod", axis, skipna, False
+            )
         except Exception as error:
             raise translate(error) from None
 
     def cummax(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Series:
         """The largest value seen so far."""
         try:
-            return self._scan("cummax", axis, skipna, False)
+            return _numpy_keywords(self, "cummax", kwargs, args)._scan(
+                "cummax", axis, skipna, False
+            )
         except Exception as error:
             raise translate(error) from None
 
     def cummin(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Series:
         """The smallest value seen so far."""
         try:
-            return self._scan("cummin", axis, skipna, False)
+            return _numpy_keywords(self, "cummin", kwargs, args)._scan(
+                "cummin", axis, skipna, False
+            )
         except Exception as error:
             raise translate(error) from None
 

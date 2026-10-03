@@ -141,7 +141,15 @@ def _python_statement(statement: str, indent: str) -> list[str]:
     one = f"{indent}{statement}"
     if len(one) <= PYTHON_COLUMNS:
         return [one]
-    head, _, rest = statement.partition("(")
+    # ruff splits the last brackets, which for a chain of calls is the last call's.
+    close = statement.rfind(")")
+    depth = 0
+    start = close
+    for start in range(close, -1, -1):
+        depth += {")": 1, "(": -1}.get(statement[start], 0)
+        if depth == 0:
+            break
+    head, rest = statement[:start], statement[start + 1 :]
     close = rest.rfind(")")
     inside = f"{indent}    {rest[:close]}"
     if close < 0 or len(inside) > PYTHON_COLUMNS:
@@ -684,7 +692,10 @@ def _reductions(py: str) -> tuple[Member, ...]:
                 name=name,
                 kind="method",
                 signature=", ".join(parts) + tail,
-                body=f'self.{door}("{word}", 0.0, axis, skipna, numeric_only, {count})',
+                body=(
+                    f'_numpy_keywords(self, "{word}", kwargs).{door}("{word}", 0.0, axis,'
+                    f" skipna, numeric_only, {count})"
+                ),
                 doc=f"{what} Over the {over}s. {plural}".strip(),
                 returns="Any" if folds else gives,
             )
@@ -698,7 +709,7 @@ def _reductions(py: str) -> tuple[Member, ...]:
                 signature=(
                     "*, axis: Any = 0, bool_only: bool = False, skipna: bool = True" + tail
                 ),
-                body=f'self._truth("{name}", axis, bool_only, skipna)',
+                body=f'_numpy_keywords(self, "{name}", kwargs)._truth("{name}", axis, bool_only, skipna)',
                 doc=f"{what} Over the {over}s. {plural}".strip(),
                 returns="Any",
             )
@@ -713,7 +724,10 @@ def _reductions(py: str) -> tuple[Member, ...]:
                     f"*, axis: Any = {'0' if frame else 'None'}, skipna: bool = True,"
                     " ddof: int = 1, numeric_only: bool = False" + tail
                 ),
-                body=f'self._reduce("{name}", _ddof_number(ddof), axis, skipna, numeric_only, 0)',
+                body=(
+                    f'_numpy_keywords(self, "{name}", kwargs)._reduce("{name}",'
+                    " _ddof_number(ddof), axis, skipna, numeric_only, 0)"
+                ),
                 doc=f"{what} Over the {over}s. {plural}".strip(),
                 returns=gives,
             )
@@ -2356,7 +2370,7 @@ def _transformations(py: str) -> tuple[Member, ...]:
                 name=name,
                 kind="method",
                 signature=", ".join(parts) + ", *args: Any, **kwargs: Any",
-                body=f'self._scan("{name}", axis, skipna, {only})',
+                body=f'_numpy_keywords(self, "{name}", kwargs, args)._scan("{name}", axis, skipna, {only})',
                 doc=what,
                 returns=gives,
             )
@@ -3900,7 +3914,8 @@ SERIES = Exposed(
             name="idxmax",
             kind="method",
             signature="axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any",
-            body='self._extreme_at("max", axis, skipna, True)',
+            body='_numpy_keywords(self, "argmax", kwargs, args)._extreme_at("max", axis,'
+            ' skipna, True)',
             doc="The label of the first largest value.",
             returns="Any",
         ),
@@ -3908,7 +3923,8 @@ SERIES = Exposed(
             name="idxmin",
             kind="method",
             signature="axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any",
-            body='self._extreme_at("min", axis, skipna, True)',
+            body='_numpy_keywords(self, "argmax", kwargs, args)._extreme_at("min", axis,'
+            ' skipna, True)',
             doc="The label of the first smallest value.",
             returns="Any",
         ),
@@ -3916,7 +3932,8 @@ SERIES = Exposed(
             name="argmax",
             kind="method",
             signature="axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any",
-            body='self._extreme_at("max", axis, skipna, False)',
+            body='_numpy_keywords(self, "argmax", kwargs, args)._extreme_at("max", axis,'
+            ' skipna, False)',
             doc="The position of the first largest value.",
             returns="Any",
         ),
@@ -3924,7 +3941,8 @@ SERIES = Exposed(
             name="argmin",
             kind="method",
             signature="axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any",
-            body='self._extreme_at("min", axis, skipna, False)',
+            body='_numpy_keywords(self, "argmax", kwargs, args)._extreme_at("min", axis,'
+            ' skipna, False)',
             doc="The position of the first smallest value.",
             returns="Any",
         ),
@@ -5332,6 +5350,9 @@ def wrapper() -> str:
         mixins.add("_ddof_number")
     if any("_row_count(" in m.body for m in every):
         mixins.add("_row_count")
+    # numpy's keywords on a reduction are checked to hold their defaults, as pandas checks them.
+    if any("_numpy_keywords(" in m.body for m in every):
+        mixins.add("_numpy_keywords")
     if mixins:
         out.extend(_imported(sorted(mixins, key=_import_order)))
     # The resampler is a class of its own module rather than of this one, so the

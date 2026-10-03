@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: numpy's keywords on a reduction are checked as pandas checks them
+
+`sum`, `mean`, `std`, `all`, `cumsum`, `argmax` and the rest of the reductions on a frame, a series and an index take numpy's `out`, `dtype`, `keepdims` and friends only while they hold their defaults, and refuse anything else with pandas' words: `the 'out' parameter is not supported in the pandas implementation of sum()`. A keyword numpy does not have on that reduction is a TypeError naming it, where before it was dropped without a word.
+
 ### Changed: Wrong calls name the method as pandas does, and reshaping mistakes read as pandas
 
 Python's own sentence for a call with an argument a method does not take, or without one it needs, starts with the function's qualified name, and firepanda's methods live on mixins pandas does not have. At import every DataFrame and Series method is renamed to what pandas prints: the class for most, `NDFrame` for the ones pandas shares, `IndexOpsMixin` for a few column methods, and the bare name where numpy's checks speak, so `df.head(x=1)` reads "NDFrame.head() got an unexpected keyword argument 'x'". `pivot_table` with an unknown function name and a columns key names the frame group by, its margins refuse a name a label already has or a name that is not text, and `get_dummies` refuses a missing column with the KeyError selecting it gives.
