@@ -1284,11 +1284,32 @@ def test_a_distinct_on_inside_an_arm_stays_inside_it() raises:
     same(read_back(out, "qty"), [5, 20, 5, 20], "and the same two")
 
 
-def test_a_computed_distinct_on_key_is_refused() raises:
-    # A computed key is a column the row does not have, so the rows kept would
-    # not be the rows the plan said.
-    with assert_raises(contains="decides on a binary expression"):
-        _ = run("SELECT DISTINCT ON (qty % 2) qty FROM sales", session())
+def test_a_distinct_on_may_decide_on_a_computed_key() raises:
+    # The parity of the quantity is a column the row does not have, so it is
+    # computed for the distinct and gone again before the answer comes back.
+    var out = run("SELECT DISTINCT ON (qty % 2) qty FROM sales", session())
+    assert_equal(len(out.schema), 1, "the parity was not returned")
+    same(read_back(out, "qty"), [5, 20], "the first odd and the first even")
+
+
+def test_a_computed_distinct_on_key_follows_the_order_by() raises:
+    var out = run(
+        (
+            "SELECT DISTINCT ON (qty % 2) qty, shop FROM sales"
+            " ORDER BY qty DESC"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [40, 25], "the largest even and odd")
+    same(read_back(out, "shop"), [2, 1], "with the shop each came from")
+
+
+def test_a_computed_distinct_on_key_may_read_a_column_not_returned() raises:
+    var out = run(
+        "SELECT DISTINCT ON (shop * 10 + 1) qty FROM sales", session()
+    )
+    assert_equal(len(out.schema), 1, "only the quantity comes back")
+    same(read_back(out, "qty"), [5, 20], "the first row of each shop")
 
 
 def test_a_values_is_the_table_it_writes_out() raises:

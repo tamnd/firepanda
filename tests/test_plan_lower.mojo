@@ -1758,7 +1758,9 @@ def test_a_distinct_that_reorders_the_row_keeps_the_first_of_each() raises:
     same(read_back(out, "evens"), [0, 0, 1, 1, 1, 1, 1, 0], "the second")
 
 
-def test_a_computed_distinct_key_is_refused_by_name() raises:
+def test_a_computed_distinct_key_is_cut_off_after() raises:
+    # The parity of the sum is computed for the distinct and is not a column
+    # of the answer, which keeps the first odd and the first even row whole.
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var pair = plan.exprs.binary(
@@ -1766,11 +1768,14 @@ def test_a_computed_distinct_key_is_refused_by_name() raises:
         plan.exprs.column("qty"),
         plan.exprs.column("price"),
     )
-    var root = plan.distinct(scan, [pair, plan.exprs.column("qty")])
-    _ = bind(plan, root, schemas())
-
-    with assert_raises(contains="decides on a binary expression"):
-        _ = lower(plan, root, one_frame())
+    var parity = plan.exprs.binary(
+        BinaryOp.MOD, pair, plan.exprs.literal(Value(Int64(2)))
+    )
+    var root = plan.distinct(scan, [parity])
+    var out = run(plan, root)
+    assert_equal(len(out.schema), 2, "the key is not a column")
+    same(read_back(out, "qty"), [5, 20], "the first odd and even sums")
+    same(read_back(out, "price"), [10, 2], "whole rows")
 
 
 def test_a_unary_expression_lands_in_a_column_of_its_own() raises:
@@ -2663,12 +2668,18 @@ def test_a_build_side_takes_the_relation_it_read() raises:
         _ = lower(plan, root, two_frames())
 
 
-def test_a_build_side_that_cannot_be_lowered_says_what_it_was() raises:
+def test_a_build_side_may_be_a_computed_distinct() raises:
+    # Of the four tiers the first odd sum and the first even one survive,
+    # bands 3 and 20, and the sales hold one quantity of each.
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)
     var right = plan.scan("tiers", List[String](), 1)
     var computed = plan.exprs.binary(
-        BinaryOp.ADD, plan.exprs.column("band"), plan.exprs.column("rate")
+        BinaryOp.MOD,
+        plan.exprs.binary(
+            BinaryOp.ADD, plan.exprs.column("band"), plan.exprs.column("rate")
+        ),
+        plan.exprs.literal(Value(Int64(2))),
     )
     var root = plan.join(
         left,
@@ -2677,9 +2688,8 @@ def test_a_build_side_that_cannot_be_lowered_says_what_it_was() raises:
         [plan.exprs.column("band")],
         JoinKind.INNER,
     )
-    _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="decides on a binary expression"):
-        _ = lower(plan, root, two_frames())
+    var out = run_two(plan, root)
+    assert_equal(len(out), 2, "a sale of band 3 and one of band 20")
 
 
 def test_a_join_on_two_key_pairs_that_agree_on_nothing_is_empty() raises:

@@ -2605,13 +2605,16 @@ def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     `Unique` holds every row, so the cheaper one is worth keeping for the case
     that can use it.
 
+    A key may be computed, `DISTINCT ON (a % 2)`, and then it is appended to
+    the row before `Unique` runs and cut off after, the way a sort key is.
+
     Args:
         plan: The plan.
         at: The distinct node.
         pipe: The pipeline, added to.
 
     Raises:
-        Error: If a key is a computed expression rather than a column.
+        Error: If a key has a kind no operator computes.
     """
     var held = plan.nodes[at].exprs.copy()
     var width = len(pipe.schema)
@@ -2623,19 +2626,11 @@ def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         pipe.add(Node(Group(keys^, List[GroupAgg]())))
         return
     for i in range(len(held)):
-        if plan.exprs.nodes[held[i]].kind != ExprKind.COLUMN:
-            raise Error(
-                String(
-                    "lower: this distinct decides on a ",
-                    plan.exprs.nodes[held[i]].kind,
-                    (
-                        " expression, and a computed key is a column the row"
-                        " does not have, so the rows kept would not be the rows"
-                        " the plan said"
-                    ),
-                )
+        keys.append(
+            _lower_expr(
+                plan.exprs, held[i], pipe, width, "key", memo, reuse=True
             )
-        keys.append(_lower_expr(plan.exprs, held[i], pipe, width, "", memo))
+        )
     var whole = len(keys) == width
     if whole:
         for i in range(width):
@@ -2646,6 +2641,9 @@ def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         pipe.add(Node(Group(keys^, List[GroupAgg]())))
         return
     pipe.add(Node(Unique(keys^)))
+    # A computed key was appended as a column of its own, and `Unique` hands
+    # every column it was given back, so the row is cut back to what it was.
+    _trim(pipe, width)
 
 
 def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
