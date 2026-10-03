@@ -299,6 +299,16 @@ _qualnames.name_each((_frame.Rolling, {}), (_frame.Expanding, {}))
 _qualnames.name_each((_frame.ExponentialMovingWindow, {}))
 _qualnames.name_each((_resample.Resampler, _qualnames._RESAMPLED))
 _pandas._NthSelector.__call__.__qualname__ = "GroupByNthSelector.__call__"
+_qualnames.name_indexes(
+    Index,
+    RangeIndex,
+    DatetimeIndex,
+    TimedeltaIndex,
+    PeriodIndex,
+    IntervalIndex,
+    CategoricalIndex,
+    MultiIndex,
+)
 _pandas._allow_positional(DataFrame, Series)
 _pandas._refuse_axis_none(DataFrame, Series)
 _attrs.install()
