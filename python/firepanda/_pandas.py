@@ -19159,7 +19159,12 @@ class SeriesMixin(_Carries):
             }
             return DataFrame(pieces, index=self.index)
         if isinstance(func, str):
-            answer = _method_named(self, func, "Series")(*args, **kwargs)
+            try:
+                method = _method_named(self, func, "Series")
+            except AttributeError:
+                # pandas tries the name, fails, and says only that the transform did.
+                raise InvalidArgumentError("Transform function failed") from None
+            answer = method(*args, **kwargs)
         else:
             try:
                 answer = func(self, *args, **kwargs)
@@ -19194,7 +19199,7 @@ class SeriesMixin(_Carries):
         `by_row` is accepted, and a function is always called on each value.
         """
         if isinstance(func, str):
-            return getattr(self, func)(*args, **kwargs)
+            return _method_named(self, func, "Series")(*args, **kwargs)
         if isinstance(func, (list, dict)):
             pairs = func.items() if isinstance(func, dict) else ((name, name) for name in func)
             labels, results = [], []
@@ -34781,8 +34786,8 @@ def concat(
         joined = concat(parts, axis=axis, join=join, sort=sort)
         return _levelled_rows(joined, keys, [len(part) for part in parts], names)
     if axis not in CONCAT_AXES:
-        kind = "DataFrame" if any(isinstance(p, DataFrame) for p in parts) else "Series"
-        raise InvalidArgumentError(f"No axis named {axis} for object type {kind}")
+        # pandas reads the axis as a frame's before it looks at what is being joined.
+        raise InvalidArgumentError(f"No axis named {axis} for object type DataFrame")
     if join not in ("inner", "outer"):
         raise InvalidArgumentError(
             "Only can inner (intersect) or outer (union) join the other axis"

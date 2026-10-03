@@ -29,6 +29,9 @@ Parameter values are rows, not text, so they never enter the key.
 
 `firepanda.sql` also stops reading the grammar and the function catalog on every
 call, which took about two milliseconds each time.
+### Fixed: Unknown function names are refused in pandas' words
+
+`transform` by a name that is neither a method nor a numpy function says Transform function failed, `apply` by such a name says it is not a valid function for a Series and reaches numpy for names like `sqrt` as pandas does, and `concat` with an axis it cannot read names a DataFrame whatever is being joined.
 
 ### Fixed: Argument checks match pandas
 
