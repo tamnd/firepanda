@@ -69,6 +69,9 @@ When a tall table joins a short one on a sparse key, the walk over the tall side
 ### Fixed: Whole numbers floor divided by zero answer floats as pandas does
 
 `Series([-2, 0, 3]) // 0` answers `-inf, NaN, inf` as float64, and `%` by zero answers NaN, where they used to answer gaps in an int64 column. The divisor is widened to floats only where it holds a zero, so a division with no zero in it stays whole, a zero answer is a positive zero as pandas' whole number division makes it, and a frame divided by a frame widens all its whole number columns together as pandas' one block of them does. Nullable types keep their gaps.
+### Performance: Grouping a text key on its dictionary codes
+
+A group by on a single dictionary encoded text column now hashes the codes instead of the strings, and a filter comparing such a column against a constant answers each category once and then walks the codes. The pipeline keeps the column coded through filters and projections up to the group, and the group hands the keys back as plain text, so results are unchanged. When a later chunk arrives with different categories, the group moves its map over to text and carries on.
 
 ### Fixed: Columns of different lengths say what pandas says
 
