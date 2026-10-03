@@ -30,7 +30,7 @@ import re
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
-from .errors import InvalidArgumentError
+from .errors import DTypeError, InvalidArgumentError, OutOfBoundsError, UnsupportedError
 
 if TYPE_CHECKING:
     from ._frame import Series
@@ -40,6 +40,9 @@ class FirepandaArray:
     """Values of one type in order, with no row labels and no name."""
 
     __slots__ = ("_column",)
+
+    # Whether pandas keeps these values in a numpy array, whose axes it checks.
+    _numpy_backed = False
 
     def __init__(self, column: Series, *args: Any, **kwargs: Any) -> None:
         if not hasattr(column, "reset_index"):
@@ -128,7 +131,7 @@ class FirepandaArray:
 
     def copy(self) -> FirepandaArray:
         """The same values in an array of their own."""
-        return FirepandaArray(self._column.copy())
+        return self._again(self._column.copy())
 
     def astype(self, dtype: Any, copy: bool = True) -> FirepandaArray:
         """The values as another type."""
@@ -298,6 +301,123 @@ class FirepandaArray:
         )
         return self._again(filled)
 
+    def _from_values(self, values: list[Any]) -> FirepandaArray:
+        """An array of the same type over `values`, a gap for each None."""
+        from ._frame import Series
+
+        if str(self._column.dtype) in _NO_GAP and any(_gap(value) for value in values):
+            # A numpy number or bool has no gap, so pandas lets the values pick a type.
+            return FirepandaArray(Series([float("nan") if _gap(v) else v for v in values]))
+        return self._again(Series(values, dtype=str(self._column.dtype)))
+
+    def _picked(self, positions: list[int]) -> FirepandaArray:
+        return self._again(self._column.iloc[positions])
+
+    def take(
+        self, indexer: Any, *, allow_fill: bool = False, fill_value: Any = None, axis: int = 0
+    ) -> FirepandaArray:
+        """The values at the positions `indexer` lists, -1 a gap when `allow_fill` is set.
+
+        Raises:
+            ValueError: For a position below -1 with `allow_fill`, in pandas' words.
+            IndexError: For a position past the values, in pandas' words.
+        """
+        len(indexer)
+        listed = indexer.tolist() if hasattr(indexer, "tolist") else list(indexer)
+        positions = [int(at) for at in listed]
+        size = len(self._column)
+        if allow_fill:
+            low = min(positions, default=0)
+            if low < -1:
+                raise InvalidArgumentError(
+                    f"'indices' contains values less than allowed ({low} < -1)"
+                )
+            if any(at >= size for at in positions):
+                raise OutOfBoundsError("indices are out-of-bounds")
+            if -1 in positions:
+                values = self._column.tolist()
+                return self._from_values([fill_value if at < 0 else values[at] for at in positions])
+            return self._picked(positions)
+        for at in positions:
+            if not -size <= at < size:
+                if isinstance(self, ArrowStringArray | ArrowExtensionArray):
+                    raise OutOfBoundsError("out of bounds value in 'indices'.")
+                raise OutOfBoundsError(f"index {at} is out of bounds for axis 0 with size {size}")
+        return self._picked([at % size for at in positions])
+
+    def delete(self, loc: Any, axis: int = 0) -> FirepandaArray:
+        """The values without the one at `loc`, or without each one at a position it lists.
+
+        Raises:
+            IndexError: For a position past the values, in numpy's words.
+        """
+        import numpy
+
+        try:
+            kept = numpy.delete(numpy.arange(len(self._column)), loc)
+        except IndexError as error:
+            raise OutOfBoundsError(str(error)) from None
+        return self._picked(kept.tolist())
+
+    def insert(self, loc: int, item: Any) -> FirepandaArray:
+        """The values with `item` put at the position `loc`, which may count from the end.
+
+        Raises:
+            IndexError: For a position outside the values and the one past them.
+        """
+        size = len(self._column)
+        if not isinstance(loc, numbers.Integral) or not -size <= loc <= size:
+            raise OutOfBoundsError(f"loc must be an integer between {-size} and {size}")
+        values = self._column.tolist()
+        values.insert(int(loc), item)
+        return self._from_values(values)
+
+    def repeat(self, repeats: Any, axis: Any = None) -> FirepandaArray:
+        """Each value `repeats` times, or as many times as its own entry in `repeats` says.
+
+        Raises:
+            ValueError: For an axis, or for counts that do not fit the values, in
+                pandas' and numpy's words.
+        """
+        import numpy
+
+        if axis is not None:
+            raise InvalidArgumentError(
+                "the 'axis' parameter is not supported in the pandas implementation of repeat()"
+            )
+        try:
+            kept = numpy.repeat(numpy.arange(len(self._column)), repeats)
+        except ValueError as error:
+            raise InvalidArgumentError(str(error)) from None
+        return self._picked(kept.tolist())
+
+    def equals(self, other: Any) -> bool:
+        """Whether `other` is an array of the same type with the same values and gaps."""
+        if type(other) is not type(self) or not bool(other.dtype == self.dtype):
+            return False
+        return bool(self._column.equals(other._column))
+
+    def ravel(self, *args: Any, **kwargs: Any) -> FirepandaArray:
+        """The same values, which already lie in one dimension."""
+        return self._again(self._column)
+
+    def transpose(self, *axes: int) -> FirepandaArray:
+        """The same values, as an array of one dimension is its own transpose.
+
+        Raises:
+            AxisError: For an axis past the one there is, on the kinds pandas keeps
+                in numpy, in numpy's words.
+        """
+        if self._numpy_backed:
+            for axis in axes[0] if len(axes) == 1 and isinstance(axes[0], tuple | list) else axes:
+                _axis_checked(axis)
+        return self._again(self._column)
+
+    @property
+    def T(self) -> FirepandaArray:
+        """The same values, as `transpose` gives them."""
+        return self.transpose()
+
     def _operated(self, other: Any, name: str) -> Any:
         """An operator applied value by value, as the column applies it."""
         if isinstance(other, FirepandaArray):
@@ -389,22 +509,131 @@ class FirepandaArray:
         )
 
 
+def _axis_checked(axis: Any, prefix: str | None = None) -> None:
+    """Refuse an axis an array of one dimension does not have, in numpy's words."""
+    import numpy
+
+    if not -1 <= int(axis) <= 0:
+        raise numpy.exceptions.AxisError(int(axis), 1, prefix)
+
+
+_NO_GAP = frozenset(
+    ("int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "bool")
+)
+
+
+class _Shaped:
+    """`reshape` and `swapaxes`, which pandas gives the kinds it can lay out in more axes."""
+
+    __slots__ = ()
+    _column: Series
+
+    def reshape(self, *args: Any, **kwargs: Any) -> Any:
+        """The same values, for a shape of one dimension as long as they are.
+
+        Raises:
+            ValueError: For a shape of another size, in numpy's words.
+            NotImplementedError: For a shape of more than one dimension.
+        """
+        import numpy
+
+        try:
+            laid = numpy.arange(len(self._column)).reshape(*args, **kwargs)
+        except ValueError as error:
+            raise InvalidArgumentError(str(error)) from None
+        if laid.ndim != 1:
+            raise UnsupportedError("firepanda arrays have one dimension, so reshape takes one")
+        return self._again(self._column)  # type: ignore[attr-defined]
+
+    def swapaxes(self, axis1: Any, axis2: Any) -> Any:
+        """The same values, as swapping the one axis with itself changes nothing.
+
+        Raises:
+            AxisError: For an axis past the one there is, in numpy's words.
+        """
+        _axis_checked(axis1, "axis1")
+        _axis_checked(axis2, "axis2")
+        return self._again(self._column)  # type: ignore[attr-defined]
+
+
+class _Truth:
+    """`all` and `any`, on the kinds pandas reads as true or false."""
+
+    __slots__ = ()
+    _column: Series
+
+    def all(self, *, skipna: bool = True, axis: Any = 0, **kwargs: Any) -> Any:
+        """Whether every value is true, a gap unknown when `skipna` is off."""
+        return self._column.all(skipna=skipna)
+
+    def any(self, *, skipna: bool = True, axis: Any = 0, **kwargs: Any) -> Any:
+        """Whether some value is true, a gap unknown when `skipna` is off."""
+        return self._column.any(skipna=skipna)
+
+
+class _Spread:
+    """`prod`, `std` and `var`, on the kinds of number pandas reduces itself."""
+
+    __slots__ = ()
+    _column: Series
+
+    def prod(self, *, skipna: bool = True, min_count: int = 0, axis: Any = 0, **kwargs: Any) -> Any:
+        """The product of the values."""
+        return self._column.prod(skipna=skipna, min_count=min_count)
+
+    def std(self, *, skipna: bool = True, axis: Any = 0, ddof: int = 1, **kwargs: Any) -> Any:
+        """The standard deviation of the values."""
+        return self._column.std(skipna=skipna, ddof=ddof)
+
+    def var(self, *, skipna: bool = True, axis: Any = 0, ddof: int = 1, **kwargs: Any) -> Any:
+        """The variance of the values."""
+        return self._column.var(skipna=skipna, ddof=ddof)
+
+
+class _Middle:
+    """`median`, on the kinds pandas keeps in a numpy array."""
+
+    __slots__ = ()
+    _column: Series
+
+    def median(self, *, axis: Any = None, skipna: bool = True, **kwargs: Any) -> Any:
+        """The middle value."""
+        return self._column.median(skipna=skipna)
+
+
 def _gap(value: Any) -> bool:
     from ._pandas import _missing
 
     return _missing(value)
 
 
-class NumpyExtensionArray(FirepandaArray):
+class NumpyExtensionArray(_Shaped, _Truth, _Spread, _Middle, FirepandaArray):
     """Values of a numpy type, which is `pandas.arrays.NumpyExtensionArray`."""
 
     __slots__ = ()
+    _numpy_backed = True
+
+    def sem(self, *, axis: Any = None, ddof: int = 1, skipna: bool = True, **kwargs: Any) -> Any:
+        """The standard error of the mean."""
+        return self._column.sem(skipna=skipna, ddof=ddof)
+
+    def skew(self, *, axis: Any = None, skipna: bool = True, **kwargs: Any) -> Any:
+        """The skew of the values."""
+        return self._column.skew(skipna=skipna)
+
+    def kurt(self, *, axis: Any = None, skipna: bool = True, **kwargs: Any) -> Any:
+        """The kurtosis of the values."""
+        return self._column.kurt(skipna=skipna)
 
 
-class IntegerArray(FirepandaArray):
+class IntegerArray(_Shaped, _Truth, _Spread, FirepandaArray):
     """Whole numbers of a masked type, which is `pandas.arrays.IntegerArray`."""
 
     __slots__ = ()
+
+    def round(self, decimals: int = 0, *args: Any, **kwargs: Any) -> FirepandaArray:
+        """Each value rounded to `decimals` places."""
+        return self._again(self._column.round(decimals))
 
     def isin(self, values: Any) -> Any:
         """Whether each value is among `values`, as a masked array of bools."""
@@ -449,6 +678,20 @@ class ArrowStringArray(FirepandaArray):
 
     __slots__ = ()
 
+    def _from_values(self, values: list[Any]) -> FirepandaArray:
+        """Text over `values`, each one a string or a gap.
+
+        Raises:
+            TypeError: For a value of another type, in pandas' words.
+        """
+        for value in values:
+            if not isinstance(value, str) and not _gap(value):
+                raise DTypeError(
+                    f"Invalid value '{value}' for dtype 'str'. Value should be a string or "
+                    f"missing value, got '{type(value).__name__}' instead."
+                )
+        return super()._from_values(values)
+
     def _shown(self, value: Any) -> str:
         from ._pandas import _pprinted
 
@@ -473,19 +716,21 @@ class ArrowExtensionArray(FirepandaArray):
         return "<NA>" if _gap(value) else _pprinted(value)
 
 
-class DatetimeArray(FirepandaArray):
+class DatetimeArray(_Shaped, _Middle, FirepandaArray):
     """Instants, which is `pandas.arrays.DatetimeArray`."""
 
     __slots__ = ()
+    _numpy_backed = True
 
     def _shown(self, value: Any) -> str:
         return "'NaT'" if _gap(value) else f"'{value}'"
 
 
-class TimedeltaArray(FirepandaArray):
+class TimedeltaArray(_Shaped, _Truth, _Middle, FirepandaArray):
     """Spans, which is `pandas.arrays.TimedeltaArray`."""
 
     __slots__ = ()
+    _numpy_backed = True
 
     def _formatter(self, values: list[Any]) -> Any:
         present = [value for value in values if not _gap(value)]
@@ -499,10 +744,22 @@ class TimedeltaArray(FirepandaArray):
         return shown
 
 
-class PeriodArray(FirepandaArray):
+class PeriodArray(_Shaped, _Middle, FirepandaArray):
     """Periods, which is `pandas.arrays.PeriodArray`."""
 
     __slots__ = ()
+    _numpy_backed = True
+
+    def median(self, *, axis: Any = None, skipna: bool = True, **kwargs: Any) -> Any:
+        """The middle period, the earlier of the two middle ones' midpoint for an even count."""
+        values = self._column.tolist()
+        present = sorted(value for value in values if not _gap(value))
+        if not present or (not skipna and len(present) < len(values)):
+            from ._pandas import NaT
+
+            return NaT
+        low, high = present[(len(present) - 1) // 2], present[len(present) // 2]
+        return low + (high.ordinal - low.ordinal) // 2
 
     def _shown(self, value: Any) -> str:
         return "'NaT'" if _gap(value) else f"'{value}'"
@@ -593,6 +850,11 @@ class IntervalArray(FirepandaArray):
     def overlaps(self, other: Any) -> Any:
         """Whether each interval shares a point with the interval `other`, as numpy bools."""
         return self._index().overlaps(other)
+
+    def _from_values(self, values: list[Any]) -> IntervalArray:
+        from ._interval_index import IntervalIndex
+
+        return self._of(IntervalIndex(values, closed=self.closed))
 
     def set_closed(self, closed: str) -> IntervalArray:
         """The same ends, each interval holding the ends `closed` names."""
