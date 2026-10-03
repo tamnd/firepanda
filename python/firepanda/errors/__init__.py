@@ -495,6 +495,10 @@ _PANDAS_WORDS = (
         _re.compile(r"^index (-?\d+) is out of bounds for a frame with (\d+) rows$"),
         r"index \1 is out of bounds for axis 0 with size \2",
     ),
+    (
+        _re.compile(r"^all columns must be the same length, and .* has \d+ rows where .*$", _re.S),
+        "All arrays must be of the same length",
+    ),
 )
 
 
