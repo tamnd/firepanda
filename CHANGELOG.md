@@ -11,6 +11,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Changed: A sparse join looks up only the rows its sieve passes
 
 When a tall table joins a short one on a sparse key, the walk over the tall side used to test the sieve and do the lookup in one loop, so every row paid a branch on a bit the predictor could not learn. The walk now runs the sieve first, branch free, and writes down the rows that pass, then looks up only those. On a shared eight core box q17 is 17% faster and q8 and q10 are 7 to 12% faster at the best run. On a busy six core VM the same build is 10% faster on q17 and within noise either way on q3, q5, q8 and q10, so the gain depends on the machine.
+### Fixed: fillna shapes, ddof, argmax axis and nlargest types read as pandas reads them
+
+`fillna` refuses a list, a tuple, a set or an array with pandas' words for each class: a Series and a DataFrame name the shape, and an Index takes one value only. A `ddof` that is not a number raises pandas' ValueError instead of the core's RuntimeError, `Series.argmax(axis=1)` gives numpy's sentence, a groupby quantile out of range prints `q` as a float, and the `validate` words are listed short ones first. `nlargest` and `nsmallest` refuse text, object and category columns with pandas' sentence, and now rank flag columns and nullable number columns such as `Int64`, which used to be refused.
+
+### Fixed: Whole numbers floor divided by zero answer floats as pandas does
+
+`Series([-2, 0, 3]) // 0` answers `-inf, NaN, inf` as float64, and `%` by zero answers NaN, where they used to answer gaps in an int64 column. The divisor is widened to floats only where it holds a zero, so a division with no zero in it stays whole, a zero answer is a positive zero as pandas' whole number division makes it, and a frame divided by a frame widens all its whole number columns together as pandas' one block of them does. Nullable types keep their gaps.
 
 ### Fixed: Columns of different lengths say what pandas says
 
