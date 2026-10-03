@@ -41,6 +41,7 @@ from . import (
     _attrs,
     _firepanda,
     _pandas,
+    _qualnames,
     api,
     arrays,
     compat,
@@ -286,6 +287,8 @@ wheel was assembled out of two different builds, and `python/tests` is where
 that gets caught.
 """
 
+# First, so the wrappers below copy the names pandas prints.
+_qualnames.name_as_pandas(DataFrame, Series)
 _pandas._allow_positional(DataFrame, Series)
 _pandas._refuse_axis_none(DataFrame, Series)
 _attrs.install()
