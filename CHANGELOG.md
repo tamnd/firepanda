@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Mistakes with dates, times and spans read as pandas
+
+An unreadable frequency given to `date_range`, `timedelta_range`, `round`, `floor` or `ceil` gets the words `to_offset` uses, retired aliases like `M` included. A unit nobody has says `Unrecognized unit` for `Timestamp` and `to_datetime`, and `invalid unit abbreviation` for `Timedelta`. Text `Timestamp` cannot read names the first field out of range, hour 24 included, as a `DateParseError`. `.dt` on a column of no instants raises AttributeError, and `.str` on numbers names the kind `infer_dtype` gives. A whole number added to instants or spans, and instants multiplied or divided, are TypeErrors in pandas' words. Localizing a zoned column ends its sentence where pandas does, and an unknown zone is zoneinfo's own `ZoneInfoNotFoundError`.
+
 ### Fixed: A missing label is a KeyError carrying the label
 
 `Index.get_loc`, and `df.at` through it, raise `KeyError('zz')` for a label that is not there, as pandas does, instead of a KeyError holding the core's sentence `index: label is not in the index`.

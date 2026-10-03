@@ -338,10 +338,9 @@ def _span_step(freq: Any) -> tuple[int | None, str]:
         try:
             found = Timedelta(freq)
         except Exception:
-            raise InvalidArgumentError(
-                f"Invalid frequency: {freq}. Failed to parse with error message:"
-                f" ValueError('Invalid frequency: {freq}.')"
-            ) from None
+            from .tseries.frequencies import _mistake
+
+            raise InvalidArgumentError(_mistake(freq)) from None
         return found.value, f"<{found.value} * Nanos>"
     return step, offset
 

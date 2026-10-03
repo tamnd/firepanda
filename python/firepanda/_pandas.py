@@ -75,7 +75,7 @@ from ._scalars import (
     _inward,
     _outward,
     _outward_one,
-    _single_frequency,
+    _rounding_frequency,
     _temporal,
     _zone_name,
 )
@@ -1404,6 +1404,68 @@ def _no_scaling_by_nat(owner: Any, other: Any, op: str, flip: bool) -> None:
         raise TypeError(
             f"unsupported operand type(s) for {_SCALING_SYMBOLS[op]}: 'numpy.ndarray' and 'NaTType'"
         )
+
+
+_ARITHMETIC_SYMBOLS = {"add": "+", "sub": "-"}
+"""The two operators pandas spells out when it refuses a float beside instants."""
+
+
+def _number_kind(value: Any) -> str | None:
+    """`integer` or `floating` for a number or a column of numbers, None for anything else."""
+    if isinstance(value, SeriesMixin):
+        word = _word(value.dtype).lower()
+        if word.startswith(("int", "uint")):
+            return "integer"
+        return "floating" if word.startswith("float") else None
+    if type(value).__name__ in ("bool_", "bool", "timedelta64", "datetime64"):
+        # numpy files its instants and spans under whole numbers, which they are not here.
+        return None
+    if isinstance(value, numbers.Integral):
+        return "integer"
+    return "floating" if isinstance(value, numbers.Real) else None
+
+
+def _instant_by_number(owner: Any, other: Any, op: str, flip: bool) -> None:
+    """Refuses instants or spans met by a number, with the words pandas uses for each case.
+
+    A whole number added to instants or spans is refused because pandas once read
+    it as a count of the frequency and no longer does. Instants are never
+    multiplied or divided. A column of numbers beside a column of instants is
+    refused the same way whichever side it is on.
+
+    Raises:
+        TypeError: With pandas' words.
+    """
+    temporal = ("datetime64", "timedelta64")
+    word = _word(owner.dtype)
+    if isinstance(other, SeriesMixin) and not word.startswith(temporal):
+        if (
+            op in _ARITHMETIC_SYMBOLS
+            and _word(other.dtype).startswith(temporal)
+            and _number_kind(owner) == "integer"
+        ):
+            _instant_by_number(other, owner, op, not flip)
+        return
+    kind = _number_kind(other)
+    if kind is None or not word.startswith(temporal):
+        return
+    array = "DatetimeArray" if word.startswith("datetime64") else "TimedeltaArray"
+    if op in _ARITHMETIC_SYMBOLS and kind == "integer":
+        raise TypeError(
+            "Addition/subtraction of integers and integer-arrays with"
+            f" {array} is no longer supported.  Instead of adding/subtracting `n`,"
+            " use `n * obj.freq`"
+        )
+    if array != "DatetimeArray":
+        return
+    if op in _ARITHMETIC_SYMBOLS and not isinstance(other, SeriesMixin):
+        sides = ("'float'", f"'{array}'") if flip else (f"'{array}'", "'float'")
+        raise TypeError(
+            f"unsupported operand type(s) for {_ARITHMETIC_SYMBOLS[op]}: {sides[0]} and {sides[1]}"
+        )
+    if op in ("mul", "truediv", "floordiv", "mod", "pow"):
+        name = f"__r{op}__" if flip else f"__{op}__"
+        raise TypeError(f"cannot perform {name} with this index type: {array}")
 
 
 def _listed_frame_operand(frame: Any, other: Any, axis: int) -> Any:
@@ -16216,6 +16278,10 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame
 
         other = _listed_frame_operand(self, other, 1)
+        if not isinstance(other, SeriesMixin) and _number_kind(other) is not None:
+            for name, kind in zip(self.columns, self.dtypes.tolist(), strict=True):
+                if _word(kind).startswith(("datetime64", "timedelta64")):
+                    _instant_by_number(self[name], other, op, flip)
         widened = _zero_divided(
             self, other, op, flip, lambda left, right: left._operator(right, op, flip, strict)
         )
@@ -21119,6 +21185,7 @@ class SeriesMixin(_Carries):
         if isinstance(other, BaseOffset) and not _is_spans(self):
             return _offset_operand(self, other, op, flip)
         _no_scaling_by_nat(self, other, op, flip)
+        _instant_by_number(self, other, op, flip)
         other = _temporal_operand(self, _listed_operand(self, other, op))
         scaled = _text_arithmetic(self, other, op, flip)
         if scaled is None:
@@ -21196,6 +21263,7 @@ class SeriesMixin(_Carries):
         if unequal is not None:
             return unequal
         _no_scaling_by_nat(self, other, op, flip)
+        _instant_by_number(self, other, op, flip)
         other = _temporal_operand(self, _listed_operand(self, other, op))
         scaled = None
         if fill_value is None:
@@ -22176,7 +22244,20 @@ class Namespace:
         ):
             # pandas reads the fields of instants held as categories off the instants.
             return self._accessor(_category_values(obj))
+        if (
+            self._accessor.__name__ == "DatetimeProperties"
+            and isinstance(obj, SeriesMixin)
+            and not _temporal_word(_word(obj.dtype))
+        ):
+            raise AttributeError("Can only use .dt accessor with datetimelike values")
         return self._accessor(obj)
+
+
+def _temporal_word(word: str) -> bool:
+    """Whether a dtype's name is one of the instant, span or period types `.dt` reads."""
+    if word.startswith(("datetime64", "timedelta64", "period")):
+        return True
+    return word.endswith("[pyarrow]") and word.startswith(("timestamp", "duration", "date", "time"))
 
 
 _SPAN_COMPONENTS = (
@@ -22444,7 +22525,7 @@ class DatetimeMixin:
                 " the whole frequency vocabulary and firepanda parses the string"
                 " spelling only"
             )
-        freq = _single_frequency(freq)
+        freq = _rounding_frequency(freq)
         if (_is_default(ambiguous) and _is_default(nonexistent)) or self._zone() is None:
             return self._part(kind, freq)
         return self._placed(kind, freq, ambiguous, nonexistent)
@@ -25711,6 +25792,23 @@ def _cat_kind(values: list[Any]) -> str:
     return "mixed"
 
 
+def _inferred_kind(dtype: Any) -> str:
+    """The name `infer_dtype` gives a column of this type, `integer` for any whole number."""
+    word = _word(dtype)
+    lowered = word.lower()
+    for prefix, kind in (
+        (("int", "uint"), "integer"),
+        (("float",), "floating"),
+        (("bool",), "boolean"),
+        (("datetime64",), "datetime64"),
+        (("timedelta64",), "timedelta64"),
+        (("period",), "period"),
+    ):
+        if lowered.startswith(prefix):
+            return kind
+    return word
+
+
 class StringMixin:
     """The hand written half of `StringAccessor`.
 
@@ -25770,20 +25868,25 @@ class StringMixin:
 
         pandas ends the message with a name for what the column holds instead,
         and the name it uses is the one `infer_dtype` gives rather than the
-        dtype: a column of int64 is `integer` there. The sentence is pandas' and
-        the last word is ours, because inventing a second vocabulary for types
-        so that one message can read like pandas would be the wrong trade.
+        dtype: a column of int64 is `integer` there, and here too.
         """
         self._held = None
         self._masked = None
-        if _masked.masked_of(data) == "string":
+        masked = _masked.masked_of(data)
+        if masked == "string":
             self._masked = data
             data = _masked.plain(data)
+        elif masked is not None:
+            raise AttributeError(
+                f"Can only use .str accessor with string values, not {_inferred_kind(masked)}"
+            )
         elif _objects.is_object(data._inner):
             self._held = data
             data = _object_texts(data)
         if not data._inner.string_is_text():
-            raise AttributeError(f"Can only use .str accessor with string values, not {data.dtype}")
+            raise AttributeError(
+                f"Can only use .str accessor with string values, not {_inferred_kind(data.dtype)}"
+            )
         self._series = data
 
     def _text(
@@ -36986,16 +37089,24 @@ def to_datetime(
     if not (isinstance(origin, str) and origin == "unix"):
         arg, origin = _moved_to_origin(arg, origin, unit), "unix"
     options = (errors, dayfirst, yearfirst, utc, format, exact, unit, origin)
-    if isinstance(arg, SeriesMixin):
-        arg = _unarrowed(arg)
-        if _masked.masked_of(arg) is not None:
-            arg = _masked.plain(arg)
-        return _instants(arg, *options)
-    if isinstance(arg, str) or not hasattr(arg, "__iter__"):
-        return _instants([arg], *options).tolist()[0]
-    return DatetimeIndex(
-        _instants(arg, *options), name=arg.name if isinstance(arg, IndexMixin) else None
-    )
+    try:
+        if isinstance(arg, SeriesMixin):
+            arg = _unarrowed(arg)
+            if _masked.masked_of(arg) is not None:
+                arg = _masked.plain(arg)
+            return _instants(arg, *options)
+        if isinstance(arg, str) or not hasattr(arg, "__iter__"):
+            return _instants([arg], *options).tolist()[0]
+        return DatetimeIndex(
+            _instants(arg, *options), name=arg.name if isinstance(arg, IndexMixin) else None
+        )
+    except InvalidArgumentError as error:
+        if unit is None or "is not a resolution" not in str(error):
+            raise
+        if isinstance(arg, SeriesMixin | str) or not hasattr(arg, "__iter__"):
+            # pandas hands a column and a scalar to numpy, which names the unit its own way.
+            raise DTypeError(f'Invalid datetime unit in metadata string "[{unit}]"') from None
+        raise InvalidArgumentError(f"Unrecognized unit {unit}") from None
 
 
 _COARSE_UNITS = {"D": 86400, "h": 3600, "m": 60}
