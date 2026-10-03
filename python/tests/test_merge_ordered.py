@@ -127,6 +127,7 @@ MISTAKES: list[Callable[[Any], Any]] = [
     lambda m: ordered(m, grouped(m), left_by="nope"),
     lambda m: ordered(m, grouped(m), right_by="group"),
     lambda m: ordered(m, grouped(m), on="nope"),
+    lambda m: ordered(m, grouped(m), on="key", how="bogus"),
 ]
 
 
@@ -141,3 +142,9 @@ def test_mistakes_raise_as_pandas_raises(
         build(pd)
     with pytest.raises(type(expected.value), match="^" + re.escape(str(expected.value)) + "$"):
         build(firepanda)
+
+
+def test_a_cross_join_is_no_ordered_merge(firepanda: ModuleType) -> None:
+    """pandas names the method it does not recognize, before it reads a key."""
+    with pytest.raises(ValueError, match=r"^do not recognize join method cross$"):
+        ordered(firepanda, grouped(firepanda), how="cross")

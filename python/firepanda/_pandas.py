@@ -33396,16 +33396,19 @@ def merge(
     if how == "cross":
         return _crossed(left, right, on, left_on, right_on, left_index, right_index, suffixes,
                         indicator, validate, sort)
-    if how in ("left_anti", "right_anti"):
-        return _anti(left, right, how, on, left_on, right_on, left_index, right_index, sort,
-                     suffixes, indicator, validate)
-    if how not in MERGE_HOWS:
+    if how not in (*MERGE_HOWS, "left_anti", "right_anti"):
         if how == "asof":
             raise UnsupportedError(f"merge(how={how!r}) is not written yet")
         raise InvalidArgumentError(
             f"'{how}' is not a valid Merge type: left, right, inner, outer, left_anti,"
             " right_anti, cross, asof"
         )
+    for side, given in (("left_index", left_index), ("right_index", right_index)):
+        if type(given).__name__ not in ("bool", "bool_"):
+            raise InvalidArgumentError(f"{side} parameter must be of type bool, not {type(given)}")
+    if how in ("left_anti", "right_anti"):
+        return _anti(left, right, how, on, left_on, right_on, left_index, right_index, sort,
+                     suffixes, indicator, validate)
     named = _indicator_name(left, right, indicator)
     if named is not None:
         left, right = (
@@ -35037,6 +35040,8 @@ def merge_ordered(
     """
     left = _merge_side(left)
     right = _merge_side(right)
+    if how == "cross":
+        raise InvalidArgumentError("do not recognize join method cross")
 
     def pair(lhs: DataFrame, rhs: DataFrame) -> DataFrame:
         return _ordered_pair(lhs, rhs, on, left_on, right_on, how, suffixes, fill_method)

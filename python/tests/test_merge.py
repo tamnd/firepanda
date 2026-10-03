@@ -155,6 +155,12 @@ MISTAKES: list[Callable[[Any], Any]] = [
     lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", how="cross"),
     lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), how="cross", left_index=True),
     lambda m: m.DataFrame(NUMBERS).join(m.DataFrame(OTHERS), on="k", how="cross"),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), left_index=1, right_index=True),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), right_index="y"),
+    lambda m: m.merge(
+        m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", how="left_anti", left_index="x"
+    ),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), how="bad", left_index="x"),
 ]
 
 
