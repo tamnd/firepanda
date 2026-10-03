@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: An empty column keeps the type it was asked for
+
+A masked, object, Arrow, sparse or period column with no values, or only gaps, answered `str` for its dtype, since those columns write their type into each value. The series now keeps the type asked for by `dtype=` or `astype` while it holds no values, no data or only None reads as `object` as in pandas, an empty masked column sums and counts, and writing a value or a gap into a masked column works where it raised before.
+
 ### Fixed: A group by's window and resample read their settings
 
 `df.groupby(...).rolling(...)`, `expanding()` and `ewm()` now answer `window`, `min_periods`, `center`, `com` and the other settings as values rather than as callables, have `obj`, `ndim` and `exclusions`, and list their members for `dir`. A resample of a group by has `closed`, `label`, `freq`, `origin`, `offset`, `key` and `convention` as pandas gives them, and lists its methods and columns for `dir`.

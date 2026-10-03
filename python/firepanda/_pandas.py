@@ -277,6 +277,58 @@ def _object_kind(inner: Any) -> Any:
     return ArrowDtype(arrow)
 
 
+def _asked_kind(dtype: Any) -> Any:
+    """The type a column of no values answers for the `dtype` asked, or None for its own."""
+    if dtype is None:
+        return None
+    if _is_object_dtype(dtype):
+        return "object"
+    dtype = _arrow_named(dtype)
+    if type(dtype).__name__ == "ArrowDtype":
+        return dtype
+    sparse = _sparse.sparse_dtype(dtype)
+    if sparse is not None:
+        return sparse
+    masked = _masked.masked_name(dtype)
+    if masked is not None:
+        return _masked.masked_dtype(masked)
+    if _is_period_type(dtype):
+        return _period.period_type(dtype)
+    return None
+
+
+def _kept_kind[Column](column: Column, dtype: Any) -> Column:
+    """The column, answering the type asked for while it holds no values.
+
+    An extension column writes its type into each value it holds, so a column
+    with no values, or only gaps, has nowhere to keep it and reads as text or
+    floats. The wrapper keeps the type asked for instead, and `dtype` answers
+    it for as long as the column has no values.
+    """
+    kind = _asked_kind(dtype)
+    inner = column._inner  # type: ignore[attr-defined]
+    if kind is not None and inner.null_count() == inner.length():
+        column._asked_kind = kind  # type: ignore[attr-defined]
+    return column
+
+
+def _plain_floats(data: Any) -> Any:
+    """A series answering `object` only for holding no values, as the floats the core holds.
+
+    pandas reads an object column of gaps as floats in a window, and so does this.
+    """
+    if getattr(data, "_asked_kind", None) == "object" and data._inner.dtype() == "float64":
+        return type(data)._wrap(data._inner)
+    return data
+
+
+def _no_values(data: Any) -> bool:
+    """Whether a series' data is nothing, or a list of nothing but None."""
+    return data is None or (
+        isinstance(data, (list, tuple)) and all(value is None for value in data)
+    )
+
+
 def _word(dtype: Any) -> str:
     """A type as the core spells it, which reads pandas' `str` for text as `string`.
 
@@ -2168,6 +2220,7 @@ def _kept[Answer](owner: Any, answer: Answer, inplace: bool) -> Answer:
     owner._inner = settled._inner
     if hasattr(type(owner), "_typed_name"):
         owner._typed_name = getattr(settled, "_typed_name", None)
+        owner._asked_kind = getattr(settled, "_asked_kind", None)
     return cast("Answer", owner)
 
 
@@ -9437,7 +9490,7 @@ class _Along:
             where = _by_position(key, height)
             if where[0] == "one" and not -height <= where[1] < height:
                 raise OutOfBoundsError("iloc cannot enlarge its target object")
-        owner._inner = _written(owner, where, value, not self._labelled)._inner
+        _rebound(owner, _written(owner, where, value, not self._labelled))
 
 
 class _Point:
@@ -9494,7 +9547,7 @@ class _Point:
             raise OutOfBoundsError(
                 f"index {position} is out of bounds for axis 0 with size {height}"
             )
-        owner._inner = _written(owner, ("one", position), value)._inner
+        _rebound(owner, _written(owner, ("one", position), value))
 
 
 _WRONG_LENGTH = "cannot set using a list-like indexer with a different length than the value"
@@ -9742,6 +9795,36 @@ def _write_positions(where: tuple[Any, ...], height: int) -> list[int]:
     return found
 
 
+def _rebound(owner: Any, answer: Any) -> None:
+    """Puts a written column into the series it was written into, the type it keeps and all."""
+    owner._inner = answer._inner
+    owner._asked_kind = getattr(answer, "_asked_kind", None)
+
+
+def _masked_written(
+    column: Any, name: str, where: tuple[Any, ...], value: Any, by_position: bool
+) -> Any:
+    """`_written` for a masked column, which writes into the lower case column and back.
+
+    The lower case column is read as floats when a gap goes in, since its own
+    type may have nowhere to put one, and the masked type takes the floats back.
+    A value the lower case column refuses is refused in the masked type's name.
+
+    Raises:
+        DTypeError: For a value the column cannot hold, in pandas' words.
+    """
+    lower = _masked.plain(column)
+    single = not (_list_like(value) or _is_numpy(value) or isinstance(value, SeriesMixin))
+    if single and _masked._gapless(value) is None:
+        value = None
+        lower = lower.astype("float64")
+    try:
+        answer = _written(lower, where, value, by_position)
+    except DTypeError:
+        raise _refused(name, value) from None
+    return _masked.as_masked(answer, name)
+
+
 def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool = False) -> Any:
     """The column with `value` written into the rows a read key names, as pandas writes.
 
@@ -9759,6 +9842,9 @@ def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool 
     """
     from ._frame import DataFrame, Series
 
+    masked = _masked.masked_of(column)
+    if masked is not None and masked != "string":
+        return _masked_written(column, masked, where, value, by_position)
     value = _number_unboxed(value)
     printed = _word(column.dtype)
     marks = _write_marks(column, where)
@@ -18873,7 +18959,14 @@ def _unturnable(cond: Any) -> None:
 class SeriesMixin(_Carries):
     """The hand written half of `Series`."""
 
-    __slots__ = ("_carried", "_inner", "_plain_columns", "_row_freq", "_typed_name")
+    __slots__ = (
+        "_asked_kind",
+        "_carried",
+        "_inner",
+        "_plain_columns",
+        "_row_freq",
+        "_typed_name",
+    )
     """The column the core holds, for the reason `DataFrameMixin` gives, a name
     given as a number, which `_named_as` explains, the `attrs` and flags, and
     the frequency of the row labels, which `_attrs.py` passes on."""
@@ -18940,11 +19033,17 @@ class SeriesMixin(_Carries):
             held = _object_cells(data)
             if held is not None:
                 self._inner = type(self)(held, index=index, name=name, dtype="str")._inner
-                _named_as(self, name)
+                _named_as(_kept_kind(self, dtype), name)
                 return
             self._inner = _objectified(type(self)(data, index=index, name=name))._inner
-            _named_as(self, name)
+            _named_as(_kept_kind(self, dtype), name)
             return
+        no_values = _no_values(data) and (data is not None or index is None)
+        if dtype is None and not keyed and no_values and _from_outside():
+            # pandas reads no values, or only None, as objects, which the core holds as floats.
+            dtype_shown = "object"
+        else:
+            dtype_shown = dtype
         index = _written_index(index, keyed and _all_tuples(list(data.keys())))
         if name is None and isinstance(data, IndexMixin):
             # pandas names a column built from an index after the index.
@@ -18975,6 +19074,9 @@ class SeriesMixin(_Carries):
                     data, typed = _numpy_values(data, "Series")
                 elif data is not None and _is_scalar(data):
                     data = [data] * (1 if index is None else len(list(index)))
+                elif data is None and index is not None:
+                    # pandas fills the labels with NaN, a float column.
+                    data = [math.nan] * len(list(index))
                 self._inner = self._made(data, name)
                 if (
                     typed is None
@@ -19021,7 +19123,7 @@ class SeriesMixin(_Carries):
             made = type(self)._wrap(self._inner)
             if (read := _read_as_timed(made, timed)) is not None:
                 self._inner = read._inner
-                _named_as(self, name)
+                _named_as(_kept_kind(self, dtype_shown), name)
                 return
             wanted = None if arrow else _named_dtype(dtype)
             _integers_checked(data, wanted)
@@ -19034,7 +19136,7 @@ class SeriesMixin(_Carries):
                     self._inner = self._inner.cast(wanted, True)
             except Exception as error:
                 raise translate(error) from None
-        _named_as(self, name)
+        _named_as(_kept_kind(self, dtype_shown), name)
 
     @staticmethod
     def _made(data: Any, name: Any) -> Any:
@@ -19128,7 +19230,7 @@ class SeriesMixin(_Carries):
         """
         if isinstance(key, slice) and _counts_rather_than_names(key):
             where = _by_position(key, self._inner.length())
-            self._inner = _written(self, where, value, True)._inner
+            _rebound(self, _written(self, where, value, True))
             return
         _Along(self, True)[key] = value
 
@@ -19948,6 +20050,9 @@ class SeriesMixin(_Carries):
         kind = self._inner.dtype()
         if kind == "string":
             kind = _object_kind(self._inner) or kind
+        asked = getattr(self, "_asked_kind", None)
+        if asked is not None and kind in ("string", "float64"):
+            kind = asked if self._inner.null_count() == self._inner.length() else kind
         return CategoricalDtype._of(self) if kind == "category" else _spelt(kind)
 
     def groupby(
@@ -22229,6 +22334,14 @@ class SeriesMixin(_Carries):
         return _nan_filled(poisoned) if _word(poisoned.dtype) in _FLOATING else poisoned
 
     def _astype(self, dtype: Any, copy: Any, errors: Any) -> Series:
+        """Converts the column and hands back a new one, keeping the type asked for.
+
+        `_kept_kind` says why a column of no values keeps the type on the wrapper.
+        """
+        answer = self._cast_column(dtype, copy, errors)
+        return answer if answer is self else _kept_kind(answer, dtype)
+
+    def _cast_column(self, dtype: Any, copy: Any, errors: Any) -> Series:
         """Converts the column and hands back a new one.
 
         The name is resolved outside the `try`, because `errors="ignore"` means
@@ -24403,7 +24516,7 @@ class WindowMixin(_ReadingMixin):
             # row forever, so it is refused where the rest of them are.
             if step < 1:
                 raise InvalidArgumentError("step must be >= 1")
-        self._data = data
+        self._data = _plain_floats(data)
         self._window = window
         self._min_periods = min_periods
         self._center = center
@@ -25365,7 +25478,7 @@ class EwmMixin(_ReadingMixin):
             not isinstance(min_periods, int) or isinstance(min_periods, bool)
         ):
             raise InvalidArgumentError("min_periods must be an integer")
-        self._data = data
+        self._data = _plain_floats(data)
         self._com = com
         self._span = span
         self._halflife = halflife
