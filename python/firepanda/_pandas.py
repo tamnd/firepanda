@@ -13901,9 +13901,17 @@ class DataFrameMixin(_Carries):
             if callable(aggfunc):
                 answer = _grouped_by_hand(chosen, down, measured, aggfunc, sort, dropna, kwargs)
             else:
-                answer = chosen.groupby(down, sort=sort, dropna=dropna)[measured].agg(
-                    aggfunc, **kwargs
-                )
+                try:
+                    answer = chosen.groupby(down, sort=sort, dropna=dropna)[measured].agg(
+                        aggfunc, **kwargs
+                    )
+                except AttributeError:
+                    if not isinstance(aggfunc, str):
+                        raise
+                    # pandas aggregates the whole frame of values, so it names that.
+                    raise AttributeError(
+                        f"'{aggfunc}' is not a valid function for 'DataFrameGroupBy' object"
+                    ) from None
             printed = _word(answer.dtype)
             for key, value in zip(answer.index.tolist(), answer.tolist(), strict=True):
                 cells[key, name] = value
@@ -33924,6 +33932,9 @@ def get_dummies(
         raise TypeError("Input must be a list-like for parameter `columns`")
     else:
         encoded = list(columns)
+        if any(name not in names for name in encoded):
+            # pandas selects the columns first, so a missing one is its KeyError.
+            data[encoded]
     prefixes = _per_column("prefix", prefix, encoded)
     separators = _per_column("prefix_sep", prefix_sep, encoded)
     kept = [name for name in names if name not in encoded]
@@ -35722,6 +35733,10 @@ def _pivot_margins(
 
     rows = table.index.tolist()
     names = list(table.columns)
+    if not isinstance(margins_name, str):
+        raise InvalidArgumentError("margins_name argument must be a string")
+    if margins_name in rows or (columns is not None and margins_name in names):
+        raise InvalidArgumentError(f'Conflicting name "{margins_name}" in margins')
     if (
         isinstance(index, list | tuple)
         or callable(aggfunc)

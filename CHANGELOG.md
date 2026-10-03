@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Wrong calls name the method as pandas does, and reshaping mistakes read as pandas
+
+Python's own sentence for a call with an argument a method does not take, or without one it needs, starts with the function's qualified name, and firepanda's methods live on mixins pandas does not have. At import every DataFrame and Series method is renamed to what pandas prints: the class for most, `NDFrame` for the ones pandas shares, `IndexOpsMixin` for a few column methods, and the bare name where numpy's checks speak, so `df.head(x=1)` reads "NDFrame.head() got an unexpected keyword argument 'x'". `pivot_table` with an unknown function name and a columns key names the frame group by, its margins refuse a name a label already has or a name that is not text, and `get_dummies` refuses a missing column with the KeyError selecting it gives.
+
 ### Changed: merge checks its index flags and merge_ordered its method as pandas does
 
 `merge` refuses a `left_index` or `right_index` that is not a Boolean with "left_index parameter must be of type bool, not <class 'str'>", after the join method is read and before an anti join starts, which is pandas' order. `merge_ordered(how="cross")` says "do not recognize join method cross".
