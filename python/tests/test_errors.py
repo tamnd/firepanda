@@ -231,8 +231,8 @@ def test_a_bad_argument_names_the_argument(firepanda: ModuleType, tmp_path: Path
     """The other real path, and the reason bindings convert arguments themselves.
 
     Mojo's own `Int(py=value)` says `invalid literal for int() with base 10:
-    'x'`, which is true and names neither the argument nor the function. With
-    three integer arguments a caller cannot tell from it which one was wrong.
+    'x'`, which is true and names neither the argument nor the function. `head`
+    and `tail` read their count before the core does, in pandas' words.
     """
     csv = tmp_path / "one.csv"
     csv.write_text("a\n1\n")
@@ -240,11 +240,13 @@ def test_a_bad_argument_names_the_argument(firepanda: ModuleType, tmp_path: Path
 
     with pytest.raises(TypeError) as caught:
         frame.head("x")
-    assert str(caught.value) == "n must be an integer, got str 'x'"
+    assert str(caught.value) == (
+        "cannot do positional indexing on RangeIndex with these indexers [x] of type str"
+    )
 
     with pytest.raises(TypeError) as caught:
         frame.tail(None)
-    assert str(caught.value) == "n must be an integer, got NoneType None"
+    assert str(caught.value) == "bad operand type for unary -: 'NoneType'"
 
 
 def test_nothing_is_chained_onto_the_translated_error(firepanda: ModuleType) -> None:

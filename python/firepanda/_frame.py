@@ -52,6 +52,7 @@ from ._pandas import (
     _printed,
     _resample,
     _rolling,
+    _row_count,
     _shown_label,
     _values_of,
 )
@@ -2336,14 +2337,14 @@ class DataFrame(DataFrameMixin):
     def head(self, n: int = 5) -> DataFrame:
         """The first n rows."""
         try:
-            return DataFrame._wrap(self._inner.head(n))
+            return DataFrame._wrap(self._inner.head(_row_count(n, False)))
         except Exception as error:
             raise translate(error) from None
 
     def tail(self, n: int = 5) -> DataFrame:
         """The last n rows."""
         try:
-            return DataFrame._wrap(self._inner.tail(n))
+            return DataFrame._wrap(self._inner.tail(_row_count(n, True)))
         except Exception as error:
             raise translate(error) from None
 
@@ -3543,14 +3544,14 @@ class Series(SeriesMixin):
     def head(self, n: int = 5) -> Series:
         """The first n rows."""
         try:
-            return Series._wrap(self._inner.head(n))
+            return Series._wrap(self._inner.head(_row_count(n, False)))
         except Exception as error:
             raise translate(error) from None
 
     def tail(self, n: int = 5) -> Series:
         """The last n rows."""
         try:
-            return Series._wrap(self._inner.tail(n))
+            return Series._wrap(self._inner.tail(_row_count(n, True)))
         except Exception as error:
             raise translate(error) from None
 

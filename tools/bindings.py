@@ -2910,7 +2910,7 @@ FRAME = Exposed(
             name="head",
             kind="method",
             signature="n: int = 5",
-            body="self._inner.head(n)",
+            body="self._inner.head(_row_count(n, False))",
             doc="The first n rows.",
             returns="DataFrame",
             wraps="DataFrame",
@@ -2919,7 +2919,7 @@ FRAME = Exposed(
             name="tail",
             kind="method",
             signature="n: int = 5",
-            body="self._inner.tail(n)",
+            body="self._inner.tail(_row_count(n, True))",
             doc="The last n rows.",
             returns="DataFrame",
             wraps="DataFrame",
@@ -3784,7 +3784,7 @@ SERIES = Exposed(
             name="head",
             kind="method",
             signature="n: int = 5",
-            body="self._inner.head(n)",
+            body="self._inner.head(_row_count(n, False))",
             doc="The first n rows.",
             returns="Series",
             wraps="Series",
@@ -3793,7 +3793,7 @@ SERIES = Exposed(
             name="tail",
             kind="method",
             signature="n: int = 5",
-            body="self._inner.tail(n)",
+            body="self._inner.tail(_row_count(n, True))",
             doc="The last n rows.",
             returns="Series",
             wraps="Series",
@@ -5330,6 +5330,8 @@ def wrapper() -> str:
     # as one of ours, since a bare one crossing the boundary reads as the core's.
     if any("_ddof_number(" in m.body for m in every):
         mixins.add("_ddof_number")
+    if any("_row_count(" in m.body for m in every):
+        mixins.add("_row_count")
     if mixins:
         out.extend(_imported(sorted(mixins, key=_import_order)))
     # The resampler is a class of its own module rather than of this one, so the
