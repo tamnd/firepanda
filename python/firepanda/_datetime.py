@@ -58,6 +58,7 @@ from ._pandas import (
     _on_the_clock,
     _spelled,
     _stamps_out,
+    _unit_known,
     _zone_name,
 )
 from ._scalars import NaT, _rounding_frequency
@@ -534,6 +535,9 @@ class DatetimeIndex(HeldFreq, Index):
         because the normalisation is one pass over the labels and a second
         kernel that had to agree with it would be a second chance to disagree.
         """
+        if bool(self.isna().any()):
+            # pandas reads NaT as a count that is not a whole number of days.
+            return False
         try:
             flattened = self._inner.temporal_part("normalize", "").to_list()
             return list(flattened) == list(self._inner.to_list())
@@ -566,6 +570,7 @@ class DatetimeIndex(HeldFreq, Index):
 
     def as_unit(self, unit: str, round_ok: bool = True) -> DatetimeIndex:
         """The same instants counted in another resolution."""
+        _unit_known(unit)
         if not round_ok:
             _lossless_or_raise(self.to_series(), unit)
         try:

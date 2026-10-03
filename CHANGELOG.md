@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Fields and methods on instant, span and period arrays
+
+`DatetimeArray`, `TimedeltaArray` and `PeriodArray` now have the fields and methods pandas gives them, from `year` and `is_month_end` to `floor`, `total_seconds`, `start_time` and `asfreq`. Numbers and flags come back in numpy with NaN for a gap, and other labels come back as arrays of their own kind. `as_unit` refuses an unknown unit with pandas' message "Supported units are 's', 'ms', 'us', 'ns'", and `DatetimeIndex.is_normalized` is False when a label is NaT.
+
 ### Added: Period index ordinals, interval closed flags and a column group by's dtype
 
 `PeriodIndex` gains `asi8` (the ordinals, the least int64 for a gap), `is_full` and `resolution`, which refuse labels out of order and a weekly or multiple frequency in pandas' words. `IntervalIndex` and `IntervalArray` gain `closed_left`, `closed_right`, `open_left`, `open_right` and `to_tuples(na_tuple=True)`, and `IntervalArray` gains `can_hold_na`. `SeriesGroupBy.dtype` gives the column's type once for each group. A numpy typed array's `repeat` takes axis 0 and raises numpy's AxisError for any other, as pandas does.

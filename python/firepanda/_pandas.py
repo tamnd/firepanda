@@ -1200,6 +1200,12 @@ def _is_numbers(value: Any) -> bool:
 _SPAN_UNITS = ("s", "ms", "us", "ns")
 
 
+def _unit_known(unit: Any) -> None:
+    """Refuses a unit no instant or span column is held in, worded as pandas words it."""
+    if not isinstance(unit, str) or unit not in _SPAN_UNITS:
+        raise InvalidArgumentError("Supported units are 's', 'ms', 'us', 'ns'")
+
+
 def _span_counts(spans: Any, unit: str) -> Any:
     """A series of spans as float counts of a unit, with NaN for a missing span."""
     from ._frame import Series
@@ -22766,6 +22772,7 @@ class DatetimeMixin:
 
     def _as_unit(self, unit: str, round_ok: bool) -> Series:
         """Restates the column in another resolution."""
+        _unit_known(unit)
         if not round_ok:
             if "timedelta" in str(self._series.dtype):
                 raise TypeError(_NO_ROUND_OK)
