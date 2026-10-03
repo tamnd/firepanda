@@ -142,7 +142,7 @@ def test_the_axis_an_index_has_is_the_only_one_it_takes(firepanda):
 
 
 def test_the_numpy_arguments_are_refused_rather_than_dropped(firepanda):
-    with pytest.raises(NotImplementedError, match="numpy compatibility arguments"):
+    with pytest.raises(ValueError, match="the 'axis' parameter is not supported"):
         whole(firepanda).min(None, True, "something")
 
 

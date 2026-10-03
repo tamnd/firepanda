@@ -5866,6 +5866,101 @@ def _zero_widened(divisor: Any) -> Any:
         return divisor.astype(dict.fromkeys(whole, "float64"))
     return None
 
+_NUMPY_DEFAULTS: dict[str, dict[str, Any]] = {
+    "sum": {"dtype": None, "out": None, "axis": None, "keepdims": False, "initial": None},
+    "prod": {"dtype": None, "out": None, "axis": None, "keepdims": False, "initial": None},
+    "mean": {"dtype": None, "out": None, "axis": None, "keepdims": False, "initial": None},
+    "median": {"dtype": None, "out": None, "overwrite_input": False, "keepdims": False},
+    "min": {"axis": None, "dtype": None, "out": None, "keepdims": False},
+    "max": {"axis": None, "dtype": None, "out": None, "keepdims": False},
+    "std": {"dtype": None, "out": None, "keepdims": False},
+    "var": {"dtype": None, "out": None, "keepdims": False},
+    "sem": {"dtype": None, "out": None, "keepdims": False},
+    "skew": {"dtype": None, "out": None, "keepdims": False},
+    "kurt": {"dtype": None, "out": None, "keepdims": False},
+    "all": {"out": None, "keepdims": False},
+    "any": {"out": None, "keepdims": False},
+    "cumsum": {"dtype": None, "out": None},
+    "cumprod": {"dtype": None, "out": None},
+    "cummax": {"dtype": None, "out": None},
+    "cummin": {"dtype": None, "out": None},
+    "argmax": {"out": None},
+    "argmin": {"out": None},
+}
+"""The numpy keywords pandas takes on each reduction, with the one value each may hold.
+
+They are there so that numpy can hand a frame or a series its own keywords,
+and pandas checks that each of them still says nothing. The order is pandas'
+too, because a value passed by position is read as the keyword in its place.
+"""
+
+_INDEX_DEFAULTS: dict[str, dict[str, Any]] = {
+    "all": {"dtype": None, "out": None, "keepdims": False, "axis": None},
+    "any": {"dtype": None, "out": None, "keepdims": False, "axis": None},
+}
+"""An index checks `all` and `any` against numpy's own list, which takes a dtype."""
+
+
+def _numpy_keywords[T](
+    owner: T,
+    fname: str,
+    kwargs: Any,
+    args: Any = (),
+    table: dict[str, dict[str, Any]] | None = None,
+) -> T:
+    """Refuses a numpy keyword that says something, as pandas' validators refuse it.
+
+    It hands `owner` back, so a reduction can check its keywords and go on in
+    one expression.
+
+    Args:
+        owner: The frame, series or index the reduction runs on.
+        fname: The name pandas prints, which for `idxmin` and `argmin` is `argmax`.
+        kwargs: The keywords the signature does not name.
+        args: The values that arrived by position past the named parameters.
+        table: Where to look `fname` up, `_NUMPY_DEFAULTS` unless given.
+
+    Returns:
+        `owner`, once every keyword says nothing.
+
+    Raises:
+        TypeError: For too many values, one given twice, or a keyword numpy does
+            not have on this reduction.
+        InvalidArgumentError: For a numpy keyword that holds anything but its default.
+    """
+    defaults = (table or _NUMPY_DEFAULTS)[fname]
+    if len(args) > len(defaults):
+        raise TypeError(
+            f"{fname}() takes at most {len(defaults) + 1} arguments ({len(args) + 1} given)"
+        )
+    given = dict(zip(defaults, args, strict=False))
+    for key in kwargs:
+        if key in given:
+            raise TypeError(f"{fname}() got multiple values for keyword argument '{key}'")
+    given.update(kwargs)
+    for key in given:
+        if key not in defaults:
+            raise TypeError(f"{fname}() got an unexpected keyword argument '{key}'")
+    for key, value in given.items():
+        default = defaults[key]
+        if (value is None) != (default is None):
+            same = False
+        else:
+            try:
+                same = value == default
+                # numpy's flag is a bool to pandas too, and an array is not one.
+                if type(same).__name__ != "bool":
+                    raise ValueError(same)
+            except ValueError:
+                same = value is default
+        if not same:
+            raise InvalidArgumentError(
+                f"the '{key}' parameter is not supported in the pandas implementation of"
+                f" {fname}()"
+            )
+    return owner
+
+
 def _row_count(n: Any, tail: bool) -> int:
     """The `n` of `head` or `tail` as a count, refused as pandas refuses it.
 
@@ -16519,6 +16614,7 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import Series
 
+        _numpy_keywords(self, "kurt", kwargs)
         if axis is None:
             return self._whole("kurt", 0.0, skipna, numeric_only)
         across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
@@ -21667,6 +21763,7 @@ class SeriesMixin(_Carries):
         with pandas to the last few bits, which is as far as two different
         orders of adding agree.
         """
+        _numpy_keywords(self, "kurt", kwargs)
         _reducing_axis(axis, "Series")
         skipna = _flag("skipna", skipna)
         _numbers_asked(self, "kurt", numeric_only)
@@ -32082,22 +32179,26 @@ class IndexMixin:
 
     def all(self, *args: Any, **kwargs: Any) -> Any:
         """Whether every label is true, a missing label counting as true as numpy counts it."""
+        _numpy_keywords(self, "all", kwargs, args, _INDEX_DEFAULTS)
         answer = all(_missing(label) or bool(label) for label in self.tolist())
         return _numpy_answer(answer, "all", self.dtype)
 
     def any(self, *args: Any, **kwargs: Any) -> Any:
         """Whether any label is true, a missing label counting as true as numpy counts it."""
+        _numpy_keywords(self, "any", kwargs, args, _INDEX_DEFAULTS)
         answer = any(_missing(label) or bool(label) for label in self.tolist())
         return _numpy_answer(answer, "any", self.dtype)
 
     def argmax(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The position of the first largest label."""
         self._one_axis(axis)
+        _numpy_keywords(self, "argmax", kwargs, args)
         return _numpy_answer(int(self.to_series().argmax(skipna=skipna)), "argmax", self.dtype)
 
     def argmin(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The position of the first smallest label."""
         self._one_axis(axis)
+        _numpy_keywords(self, "argmin", kwargs, args)
         return _numpy_answer(int(self.to_series().argmin(skipna=skipna)), "argmin", self.dtype)
 
     def _one_axis(self, axis: Any) -> None:
@@ -32609,34 +32710,27 @@ class IndexMixin:
         method. `axis` and the two catch alls after it are numpy's, since numpy
         calls these on an index and pandas takes what it passes.
         """
-        self._numpy_only(axis, args, kwargs)
+        self._numpy_only("min", axis, args, kwargs)
         return self.to_series().min(skipna=skipna)
 
     def max(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The largest label, which is `min` the other way round."""
-        self._numpy_only(axis, args, kwargs)
+        self._numpy_only("max", axis, args, kwargs)
         return self.to_series().max(skipna=skipna)
 
-    def _numpy_only(self, axis: Any, args: Any, kwargs: Any) -> None:
+    def _numpy_only(self, name: str, axis: Any, args: Any, kwargs: Any) -> None:
         """Holds the numpy compatibility arguments of `min` and `max` at rest.
 
         numpy calls `min` and `max` on whatever it is handed with an axis and a
         few keywords of its own, so pandas takes them and checks that they say
         nothing. This checks the axis by pandas' rule, which lets `None`, `0`
-        and `-1` through because an index has one dimension, and refuses the
-        rest of them outright rather than dropping them, since a caller who
-        passed `out=` meant something by it.
+        and `-1` through because an index has one dimension, and refuses any
+        of the rest that holds something other than its default with pandas'
+        words, since a caller who passed `out=` meant something by it.
         """
         if axis is not None and (axis >= 1 or axis < -1):
-            raise InvalidArgumentError(
-                "firepanda:value: `axis` must be fewer than the number of dimensions (1)"
-            )
-        if args or kwargs:
-            raise UnsupportedError(
-                "the numpy compatibility arguments of min and max are not taken,"
-                " because the only value any of them can hold that means"
-                " anything here is the default it already has"
-            )
+            raise InvalidArgumentError("`axis` must be fewer than the number of dimensions (1)")
+        _numpy_keywords(self, name, kwargs, args)
 
     def nunique(self, dropna: bool = True) -> int:
         """How many distinct labels there are.
