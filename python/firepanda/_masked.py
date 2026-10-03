@@ -141,8 +141,16 @@ def upper_of(lower: str) -> str:
 
 
 def masked_of(column: Any) -> str | None:
-    """The masked type of a series, or None for any other column."""
-    return _objects.masked_name_of(column._inner)
+    """The masked type of a series, or None for any other column.
+
+    A column with no values has nowhere to write its type, and answers the one
+    its wrapper was asked for, as `_kept_kind` keeps it.
+    """
+    name = _objects.masked_name_of(column._inner)
+    if name is None:
+        asked = getattr(column, "_asked_kind", None)
+        name = None if asked is None else masked_name(asked)
+    return name
 
 
 def _gapless(value: Any) -> Any:
@@ -181,7 +189,11 @@ def as_masked(column: Series, name: str) -> Series:
     values = [_gapless(value) for value in _values_of(column._inner)]
     held = [None if value is None else _converted(value, name, source) for value in values]
     cells = _objects.masked_cells(held, name)
-    return Series(cells, dtype="str", index=column.index, name=column.name)
+    answer = Series(cells, dtype="str", index=column.index, name=column.name)
+    if all(value is None for value in held):
+        # No value carries the type, so the wrapper does, as `_kept_kind` says.
+        answer._asked_kind = masked_dtype(name)
+    return answer
 
 
 def plain(column: Series) -> Series:
@@ -193,7 +205,10 @@ def plain(column: Series) -> Series:
     values = _held_values(column._inner)
     if lower == "str":
         return Series(values, dtype="str", index=column.index, name=column.name)
-    if all(value is None for value in values):
+    if not values:
+        empty = Series([], index=column.index, name=column.name)
+        answer = Series._wrap(empty._inner.cast(lower, False))
+    elif all(value is None for value in values):
         answer = Series([0.0] * len(values), index=column.index, name=column.name)
         answer = answer.where(Series([False] * len(values), index=column.index))
     elif lower == "bool" and None in values:
