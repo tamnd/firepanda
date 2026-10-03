@@ -24,6 +24,7 @@ from __future__ import annotations
 from itertools import pairwise
 from typing import Any
 
+from . import _qualnames
 from ._frame import Index, Series
 from .errors import InvalidArgumentError, translate
 
@@ -299,7 +300,9 @@ def _scalar(value: Any) -> Any:
 
 def _kept(name: str) -> Any:
     """`Index.<name>` on a range, its answer kept a range when its labels are an even step."""
-    method = getattr(Index, name)
+    # A copy, so a wrong call names the method as pandas' range does.
+    shown = _qualnames._INDEX_OWN["RangeIndex"].get(name) or f"Index.{name}"
+    method = _qualnames._copied(getattr(Index, name), shown)
 
     def kept(self: RangeIndex, *args: Any, **kwargs: Any) -> Any:
         return _ranged(method(self, *args, **kwargs), self.step)

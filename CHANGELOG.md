@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Wrong calls on an index name the method as pandas does
+
+A wrong keyword on any kind of index now prints the name the same pandas index prints, such as `Index.repeat()`, `RangeIndex.searchsorted()` or `TimelikeOps.floor()`. `take` and `transpose` check numpy's keywords as pandas does instead of refusing or ignoring them, `to_numpy` names the array pandas hands its keywords to, a MultiIndex checks numpy's keywords before its own refusals, and `pct_change` hands `fill_value` and any other keyword to `shift` as pandas does, where before `fill_value` was dropped.
+
 ### Changed: Wrong calls on a group by or a window name the method as pandas does
 
 A wrong call on a group by reads `GroupBy.sum() got an unexpected keyword argument` on a frame's and a column's alike, and the windows read `Rolling.sum`, `Expanding.sum` and `ExponentialMovingWindow.sum` even where firepanda shares one function between them. A group by's `skew` and `kurt` now refuse a keyword they cannot use, `agg` with no function reads as pandas on a window and on a column's group by, a window takes named aggregation (`name=(column, reduction)`), and a RangeIndex answers `all` and `any` without reading numpy's keywords, as pandas' range does.

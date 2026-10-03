@@ -162,6 +162,180 @@ _GROUPED_FRAME = {"apply": "GroupBy.apply", "describe": "GroupBy.describe"}
 _RESAMPLED = {"get_group": "BaseGroupBy.get_group", "quantile": "GroupBy.quantile"}
 
 
+# What each index prints for a wrong call, where it is not `Index.<name>`: the
+# validators print a bare name, and the rest are where pandas defines the method.
+_INDEX_COMMON = {
+    "all": "all",
+    "any": "any",
+    "argmax": "argmax",
+    "argmin": "argmin",
+    "argsort": "argsort",
+    "factorize": "IndexOpsMixin.factorize",
+    "get_level_values": "Index._get_level_values",
+    "isnull": "Index.isna",
+    "item": "IndexOpsMixin.item",
+    "max": "max",
+    "min": "min",
+    "notnull": "Index.notna",
+    "nunique": "IndexOpsMixin.nunique",
+    "searchsorted": "IndexOpsMixin.searchsorted",
+    "to_list": "IndexOpsMixin.tolist",
+    "to_numpy": "to_numpy",
+    "tolist": "IndexOpsMixin.tolist",
+    "transpose": "transpose",
+    "value_counts": "IndexOpsMixin.value_counts",
+}
+# Where an index kind differs from the plain index.
+_INDEX_OWN = {
+    "CategoricalIndex": {
+        "add_categories": "Categorical.add_categories",
+        "as_ordered": "Categorical.as_ordered",
+        "as_unordered": "Categorical.as_unordered",
+        "equals": "CategoricalIndex.equals",
+        "map": "CategoricalIndex.map",
+        "reindex": "CategoricalIndex.reindex",
+        "remove_categories": "Categorical.remove_categories",
+        "remove_unused_categories": "Categorical.remove_unused_categories",
+        "rename_categories": "Categorical.rename_categories",
+        "reorder_categories": "Categorical.reorder_categories",
+        "searchsorted": "NDArrayBackedExtensionArray.searchsorted",
+        "set_categories": "Categorical.set_categories",
+        "to_numpy": "ExtensionArray.to_numpy",
+        "tolist": "ExtensionArray.tolist",
+    },
+    "DatetimeIndex": {
+        "as_unit": "TimelikeOps.as_unit",
+        "ceil": "TimelikeOps.ceil",
+        "day_name": "DatetimeArray.day_name",
+        "delete": "DatetimeTimedeltaMixin.delete",
+        "equals": "DatetimeIndexOpsMixin.equals",
+        "floor": "TimelikeOps.floor",
+        "get_loc": "DatetimeIndex.get_loc",
+        "indexer_at_time": "DatetimeIndex.indexer_at_time",
+        "indexer_between_time": "DatetimeIndex.indexer_between_time",
+        "insert": "DatetimeTimedeltaMixin.insert",
+        "isocalendar": "DatetimeIndex.isocalendar",
+        "mean": "DatetimeIndexOpsMixin.mean",
+        "month_name": "DatetimeArray.month_name",
+        "normalize": "DatetimeArray.normalize",
+        "round": "TimelikeOps.round",
+        "shift": "DatetimeTimedeltaMixin.shift",
+        "slice_indexer": "DatetimeIndex.slice_indexer",
+        "snap": "DatetimeIndex.snap",
+        "std": "DatetimeArray.std",
+        "strftime": "DatetimeIndex.strftime",
+        "to_julian_date": "DatetimeIndex.to_julian_date",
+        "to_period": "DatetimeArray.to_period",
+        "to_pydatetime": "DatetimeArray.to_pydatetime",
+    },
+    "IntervalIndex": {
+        "contains": "IntervalArray.contains",
+        "get_indexer_non_unique": "IntervalIndex.get_indexer_non_unique",
+        "get_loc": "IntervalIndex.get_loc",
+        "memory_usage": "IntervalIndex.memory_usage",
+        "overlaps": "IntervalArray.overlaps",
+        "set_closed": "IntervalArray.set_closed",
+        "to_numpy": "ExtensionArray.to_numpy",
+        "to_tuples": "IntervalArray.to_tuples",
+    },
+    "MultiIndex": {
+        "append": "MultiIndex.append",
+        "astype": "MultiIndex.astype",
+        "copy": "MultiIndex.copy",
+        "delete": "MultiIndex.delete",
+        "drop": "MultiIndex.drop",
+        "dropna": "MultiIndex.dropna",
+        "duplicated": "MultiIndex.duplicated",
+        "equal_levels": "MultiIndex.equal_levels",
+        "equals": "MultiIndex.equals",
+        "fillna": "MultiIndex.fillna",
+        "get_level_values": "MultiIndex.get_level_values",
+        "get_loc": "MultiIndex.get_loc",
+        "get_loc_level": "MultiIndex.get_loc_level",
+        "get_locs": "MultiIndex.get_locs",
+        "get_slice_bound": "MultiIndex.get_slice_bound",
+        "insert": "MultiIndex.insert",
+        "isin": "MultiIndex.isin",
+        "memory_usage": "MultiIndex.memory_usage",
+        "putmask": "MultiIndex.putmask",
+        "remove_unused_levels": "MultiIndex.remove_unused_levels",
+        "rename": "Index.set_names",
+        "reorder_levels": "MultiIndex.reorder_levels",
+        "repeat": "MultiIndex.repeat",
+        "set_codes": "MultiIndex.set_codes",
+        "set_levels": "MultiIndex.set_levels",
+        "slice_locs": "MultiIndex.slice_locs",
+        "sortlevel": "MultiIndex.sortlevel",
+        "swaplevel": "MultiIndex.swaplevel",
+        "to_flat_index": "MultiIndex.to_flat_index",
+        "to_frame": "MultiIndex.to_frame",
+        "truncate": "MultiIndex.truncate",
+        "unique": "MultiIndex.unique",
+        "view": "MultiIndex.view",
+    },
+    "PeriodIndex": {
+        "asfreq": "PeriodIndex.asfreq",
+        "asof_locs": "PeriodIndex.asof_locs",
+        "equals": "DatetimeIndexOpsMixin.equals",
+        "get_loc": "PeriodIndex.get_loc",
+        "mean": "DatetimeIndexOpsMixin.mean",
+        "shift": "PeriodIndex.shift",
+        "strftime": "DatelikeOps.strftime",
+        "to_numpy": "ExtensionArray.to_numpy",
+        "to_timestamp": "PeriodIndex.to_timestamp",
+    },
+    "RangeIndex": {
+        "copy": "RangeIndex.copy",
+        "delete": "RangeIndex.delete",
+        "equals": "RangeIndex.equals",
+        "factorize": "RangeIndex.factorize",
+        "get_loc": "RangeIndex.get_loc",
+        "insert": "RangeIndex.insert",
+        "memory_usage": "RangeIndex.memory_usage",
+        "round": "RangeIndex.round",
+        "searchsorted": "RangeIndex.searchsorted",
+        "sort_values": "RangeIndex.sort_values",
+        "symmetric_difference": "RangeIndex.symmetric_difference",
+        "tolist": "RangeIndex.tolist",
+        "value_counts": "RangeIndex.value_counts",
+    },
+    "TimedeltaIndex": {
+        "as_unit": "DatetimeTimedeltaMixin.as_unit",
+        "ceil": "TimelikeOps.ceil",
+        "delete": "DatetimeTimedeltaMixin.delete",
+        "equals": "DatetimeIndexOpsMixin.equals",
+        "floor": "TimelikeOps.floor",
+        "get_loc": "TimedeltaIndex.get_loc",
+        "insert": "DatetimeTimedeltaMixin.insert",
+        "mean": "DatetimeIndexOpsMixin.mean",
+        "median": "median",
+        "round": "TimelikeOps.round",
+        "shift": "DatetimeTimedeltaMixin.shift",
+        "std": "TimedeltaArray.std",
+        "sum": "TimedeltaArray.sum",
+        "to_pytimedelta": "TimedeltaArray.to_pytimedelta",
+        "total_seconds": "TimedeltaArray.total_seconds",
+    },
+}
+
+
+def name_indexes(*classes: type) -> None:
+    """Names each index's methods as the same pandas index prints them.
+
+    Args:
+        classes: The index classes, each named after the pandas class it stands for.
+    """
+    tables = []
+    for cls in classes:
+        own = _INDEX_OWN.get(cls.__name__, {})
+        names = [name for name in dir(cls) if not name.startswith("_")]
+        table = {
+            name: own.get(name) or _INDEX_COMMON.get(name) or f"Index.{name}" for name in names
+        }
+        tables.append((cls, table))
+    name_each(*tables)
+
+
 def name_as_pandas(frame: type, series: type) -> None:
     """Renames the methods of the two classes to the names pandas prints for them.
 
@@ -222,6 +396,9 @@ def name_each(*classes: tuple[type, dict[str, str]]) -> None:
             _rename(function, next(iter(names.values())))
             continue
         if hasattr(function, "__wrapped__"):
+            # A wrapper is not copied, so it takes the name most of its classes print.
+            shown = list(names.values())
+            _rename(function, max(shown, key=shown.count))
             continue
         # Aliases such as `agg` and `aggregate` stay one function on each class.
         copies: dict[tuple[type, str], types.FunctionType] = {}

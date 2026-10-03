@@ -32,7 +32,14 @@ from typing import Any
 
 from ._frame import DataFrame, Index, Series
 from ._frozen import FrozenList
-from ._pandas import NO_DEFAULT, _list_like, _missing
+from ._pandas import (
+    _INDEX_DEFAULTS,
+    NO_DEFAULT,
+    _list_like,
+    _missing,
+    _numpy_keywords,
+    _to_numpy_keywords,
+)
 from .errors import InvalidArgumentError
 
 __all__ = ["MultiIndex"]
@@ -437,7 +444,7 @@ class MultiIndex:
 
     def transpose(self, *args: Any, **kwargs: Any) -> Any:
         """The index itself, since it has one axis."""
-        return self
+        return _numpy_keywords(self, "transpose", kwargs, args, counted=0)
 
     def ravel(self, order: str = "C") -> Any:
         """The index itself, since it has one axis."""
@@ -481,6 +488,7 @@ class MultiIndex:
         """The rows as a numpy array of tuples."""
         import numpy
 
+        _to_numpy_keywords(object, kwargs)
         rows = numpy.empty(len(self), dtype=object)
         rows[:] = self.tolist()
         return rows
@@ -1758,28 +1766,30 @@ class MultiIndex:
 
     def min(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The smallest row."""
-        return self._extreme(False)
+        return _numpy_keywords(self, "min", kwargs, args)._extreme(False)
 
     def max(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The largest row."""
-        return self._extreme(True)
+        return _numpy_keywords(self, "max", kwargs, args)._extreme(True)
 
     def argmin(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> int:
         """The position of the smallest row."""
-        return self._ascending()[0]
+        return _numpy_keywords(self, "argmin", kwargs, args)._ascending()[0]
 
     def argmax(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> int:
         """The position of the largest row, the first of equals."""
-        rows = self._ascending()
+        rows = _numpy_keywords(self, "argmax", kwargs, args)._ascending()
         best = self._keys()[rows[-1]]
         return next(at for at in rows if self._keys()[at] == best)
 
     def all(self, *args: Any, **kwargs: Any) -> Any:
         """Refused as pandas refuses it."""
+        _numpy_keywords(self, "all", kwargs, args, _INDEX_DEFAULTS)
         raise TypeError("cannot perform all with MultiIndex")
 
     def any(self, *args: Any, **kwargs: Any) -> Any:
         """Refused as pandas refuses it."""
+        _numpy_keywords(self, "any", kwargs, args, _INDEX_DEFAULTS)
         raise TypeError("cannot perform any with MultiIndex")
 
     def round(self, decimals: int = 0) -> Any:

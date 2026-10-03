@@ -5889,6 +5889,8 @@ _NUMPY_DEFAULTS: dict[str, dict[str, Any]] = {
     # A group by hands the keywords of these two to its kernel, which takes none of them.
     "group_skew": {},
     "group_kurt": {},
+    "take": {"out": None, "mode": "raise"},
+    "transpose": {"axes": None},
 }
 """The numpy keywords pandas takes on each reduction, with the one value each may hold.
 
@@ -5904,12 +5906,44 @@ _INDEX_DEFAULTS: dict[str, dict[str, Any]] = {
 """An index checks `all` and `any` against numpy's own list, which takes a dtype."""
 
 
+def _to_numpy_keywords(dtype: Any, kwargs: Any) -> None:
+    """Refuses a keyword `to_numpy` does not have, named as pandas' array for `dtype` names it.
+
+    pandas hands the keywords of a column with an extension type to its array,
+    whose own `to_numpy` refuses them, and refuses them itself for the rest.
+
+    Raises:
+        TypeError: For any keyword at all.
+    """
+    # A masked column's own keywords come through here as well, and are its own.
+    extra = [key for key in kwargs if key not in ("dtype", "copy", "na_value")]
+    if not extra:
+        return
+    word = str(dtype)
+    if word in _MASKED_WORDS:
+        owner = "BaseMaskedArray."
+    elif word in ("str", "string") or word.endswith("[pyarrow]"):
+        owner = "ArrowExtensionArray."
+    elif word == "category" or word.startswith(("period", "interval")) or ", " in word:
+        owner = "ExtensionArray."
+    else:
+        owner = ""
+    raise TypeError(f"{owner}to_numpy() got an unexpected keyword argument '{extra[0]}'")
+
+
+_MASKED_WORDS = frozenset(
+    ["boolean", "Float32", "Float64"]
+    + [f"{kind}{bits}" for kind in ("Int", "UInt") for bits in (8, 16, 32, 64)]
+)
+
+
 def _numpy_keywords[T](
     owner: T,
     fname: str,
     kwargs: Any,
     args: Any = (),
     table: dict[str, dict[str, Any]] | None = None,
+    counted: int = 1,
 ) -> T:
     """Refuses a numpy keyword that says something, as pandas' validators refuse it.
 
@@ -5922,6 +5956,8 @@ def _numpy_keywords[T](
         kwargs: The keywords the signature does not name.
         args: The values that arrived by position past the named parameters.
         table: Where to look `fname` up, `_NUMPY_DEFAULTS` unless given.
+        counted: How many of the method's own arguments pandas adds to the count
+            it prints, one for most, none for `transpose`.
 
     Returns:
         `owner`, once every keyword says nothing.
@@ -5933,9 +5969,9 @@ def _numpy_keywords[T](
     """
     defaults = (table or _NUMPY_DEFAULTS)[fname]
     if len(args) > len(defaults):
-        raise TypeError(
-            f"{fname}() takes at most {len(defaults) + 1} arguments ({len(args) + 1} given)"
-        )
+        most = len(defaults) + counted
+        word = "argument" if most == 1 else "arguments"
+        raise TypeError(f"{fname}() takes at most {most} {word} ({len(args) + counted} given)")
     given = dict(zip(defaults, args, strict=False))
     for key in kwargs:
         if key in given:
@@ -13706,6 +13742,7 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import Series
 
+        _numpy_keywords(self, "transpose", {}, args, counted=0)
         labels = self.index.tolist()
         names = _shown_names(self)
         types = {_word(self[name].dtype) for name in names}
@@ -17860,10 +17897,8 @@ class DataFrameMixin(_Carries):
         """Gathers rows or columns by position, in the order asked for.
 
         `**kwargs` is in the signature because it is in pandas', where it
-        exists only so that `take` can be called with the arguments numpy's
-        `take` has and ignore the ones that do not apply. Passing one here
-        raises, because pandas has nothing left that it accepts through it and
-        a keyword that is quietly dropped is worse than one that is refused.
+        exists only so that `take` can be called with the keywords numpy's
+        `take` has, which are checked to say nothing as pandas checks them.
 
         A negative position counts from the end, which the binding does rather
         than this, because the core reads a negative index as a row that was
@@ -17872,11 +17907,7 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        if kwargs:
-            raise NotImplementedError(
-                f"take does not read {sorted(kwargs)}, because pandas accepts them"
-                " only to ignore them and a dropped keyword is worse than a refused one"
-            )
+        _numpy_keywords(self, "take", kwargs)
         wanted = [int(one) for one in indices]
         try:
             if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
@@ -18536,6 +18567,11 @@ class DataFrameMixin(_Carries):
         """
         _fill_method_none(fill_method)
         across = _axis_number(axis, "DataFrame", 0, (0, 1))
+        if kwargs and (freq is not None or across == 0 or set(kwargs) != {"fill_value"}):
+            # pandas hands the rest to `shift`, which names what it does not take.
+            shifted = self.shift(periods=periods, freq=freq, axis=axis, **kwargs)
+            if freq is None:
+                return self / shifted - 1
         if freq is not None:
             if across == 1:
                 return _changed_by_freq(self.T, periods, freq).T
@@ -19709,7 +19745,7 @@ class SeriesMixin(_Carries):
 
     def transpose(self, *args: Any, **kwargs: Any) -> Series:
         """The column itself, which is its own transpose."""
-        return self
+        return _numpy_keywords(self, "transpose", kwargs, args, counted=0)
 
     def sample(
         self,
@@ -19876,6 +19912,7 @@ class SeriesMixin(_Carries):
         self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT, **kwargs: Any
     ) -> Any:
         """The values as a numpy array, in the type pandas gives this column."""
+        _to_numpy_keywords(self.dtype, kwargs)
         if _written_category(self._inner):
             return _column_to_numpy(_category_values(self), dtype, na_value)
         return _column_to_numpy(self, dtype, na_value)
@@ -22156,6 +22193,11 @@ class SeriesMixin(_Carries):
         """The fractional change between each row and the one before it."""
         _fill_method_none(fill_method)
         _axis_number(axis, "Series", 0, (0,))
+        if kwargs:
+            # pandas hands the rest to `shift`, which names what it does not take.
+            shifted = self.shift(periods=periods, freq=freq, **kwargs)
+            if freq is None:
+                return self / shifted - 1
         if freq is not None:
             return _changed_by_freq(self, periods, freq)
         return self._transformed("pct_change", periods)
@@ -32204,6 +32246,7 @@ class IndexMixin:
         self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT, **kwargs: Any
     ) -> Any:
         """The labels as a numpy array, in the type pandas gives them."""
+        _to_numpy_keywords(self.dtype, kwargs)
         return _column_to_numpy(self.to_series(), dtype, na_value)
 
     def all(self, *args: Any, **kwargs: Any) -> Any:
@@ -32286,7 +32329,7 @@ class IndexMixin:
 
     def transpose(self, *args: Any, **kwargs: Any) -> Index:
         """The index itself, since an index has one dimension."""
-        return self
+        return _numpy_keywords(self, "transpose", kwargs, args, counted=0)
 
     def memory_usage(self, deep: bool = False) -> int:
         """The bytes the labels take, as the column of labels would count them."""
@@ -32609,13 +32652,14 @@ class IndexMixin:
             axis: Accepted and ignored.
             allow_fill: Whether -1 is allowed to mean a missing label.
             fill_value: Whether to fill at all. Its value is not used.
-            **kwargs: Accepted and ignored, as in pandas.
+            **kwargs: numpy's keywords, checked to say nothing as pandas checks them.
 
         Returns:
             An index of the labels at those positions.
         """
         from ._frame import Index
 
+        _numpy_keywords(self, "take", kwargs)
         wanted = [int(i) for i in indices]
         if allow_fill and fill_value is not None:
             if any(i < -1 for i in wanted):
@@ -32859,6 +32903,9 @@ class IndexMixin:
         takes and hands it straight down, so this does the same, and a caller
         who passes something the column refuses gets the column's refusal.
         """
+        for key in kwargs:
+            if key not in ("axis", "kind", "order", "stable"):
+                raise TypeError(f"argsort() got an unexpected keyword argument '{key}'")
         return self.to_series().argsort(*args, **kwargs).tolist()
 
     def _like(self, column: Any) -> Index:
@@ -40130,6 +40177,9 @@ def _masked_through(method: Any, how: str) -> Any:
         name = _masked.masked_of(self)
         if name is None:
             return method(self, *args, **kwargs)
+        if method.__name__ == "to_numpy":
+            # Checked here, since the lower case column would name another array.
+            _to_numpy_keywords(self.dtype, kwargs)
         chosen = how
         if how == "transform":
             # The flags of `isna` and `notna` are plain flags, and a difference keeps the type.

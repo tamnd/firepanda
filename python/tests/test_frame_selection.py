@@ -196,8 +196,8 @@ def test_take_refuses_a_position_past_the_end(firepanda):
         made(firepanda).take([99])
 
 
-def test_take_refuses_a_keyword_pandas_only_accepts_to_ignore(firepanda):
-    with pytest.raises(NotImplementedError):
+def test_take_refuses_a_numpy_keyword_that_says_something(firepanda):
+    with pytest.raises(ValueError, match="the 'mode' parameter is not supported"):
         made(firepanda).take([0], mode="clip")
 
 
