@@ -1354,12 +1354,7 @@ def temporal_tz_localize(
             + String(a.type)
         )
     if not a.type.zone.is_naive():
-        raise Error(
-            "temporal: Already tz-aware, use tz_convert to convert. This column"
-            " is already on "
-            + String(a.type.zone)
-            + ", and tz_convert is the one that reads it against another clock"
-        )
+        raise Error("temporal: Already tz-aware, use tz_convert to convert.")
     var wanted = LogicalType.timestamp(a.type.unit, TimeZone(zone))
     return _back_on_the_clock(AnyArray(copy=a), wanted, policy)
 

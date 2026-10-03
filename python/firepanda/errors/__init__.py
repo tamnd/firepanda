@@ -499,6 +499,10 @@ _PANDAS_WORDS = (
         _re.compile(r"^all columns must be the same length, and .* has \d+ rows where .*$", _re.S),
         "All arrays must be of the same length",
     ),
+    (
+        _re.compile(r"^(Already tz-aware, use tz_convert to convert\.) This column .*$", _re.S),
+        r"\1",
+    ),
 )
 
 
@@ -507,6 +511,10 @@ def _pandas_words(message: str) -> str:
     for pattern, replacement in _PANDAS_WORDS:
         message = pattern.sub(replacement, message)
     return message
+
+
+_NO_ZONE = _re.compile(r"^No time zone found with key [^,\s]+$")
+"""The words the core uses for a zone name the system does not know."""
 
 
 def translate(error: BaseException) -> BaseException:
@@ -535,6 +543,11 @@ def translate(error: BaseException) -> BaseException:
         wanted = BY_KIND.get(kind)
         # The core names its date and time module first, which pandas never does.
         rest = _pandas_words(rest.removeprefix("temporal: "))
+        if _NO_ZONE.match(rest):
+            # pandas lets zoneinfo's own KeyError through for a zone it cannot find.
+            import zoneinfo
+
+            return zoneinfo.ZoneInfoNotFoundError(rest)
         return wanted(rest) if wanted is not None else RuntimeError(message)
 
     # `Exception: TypeError: ...` and the double wrapped `ValueError: TypeError:

@@ -612,7 +612,7 @@ def test_a_list_of_flags_of_the_wrong_length_is_refused(firepanda: ModuleType) -
 
 @both
 def test_a_zone_the_database_does_not_hold_is_refused(firepanda: ModuleType) -> None:
-    with pytest.raises(ValueError, match="No time zone found with key Nowhere/Land"):
+    with pytest.raises(KeyError, match="No time zone found with key Nowhere/Land"):
         stamps(firepanda).dt.tz_localize("Nowhere/Land")
 
 

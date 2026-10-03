@@ -91,6 +91,7 @@ rather than a rule, and a moment that exists should stay usable.
 
 from __future__ import annotations
 
+import calendar
 import datetime as _datetime
 import numbers
 import re
@@ -476,6 +477,45 @@ def _compound_period(freq: str) -> int:
     return -period if sign else period
 
 
+_DATE_FIELDS = re.compile(
+    r"\s*(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2})(?:[T ](\d{1,2})(?::(\d{1,2})(?::(\d{1,2})"
+    r"(?:[.,]\d+)?)?)?)?)?\s*(?:Z|[+-]\d{2}(?::?\d{2})?)?\s*"
+)
+
+
+def _unparsed_moment(text: str) -> InvalidArgumentError:
+    """The error pandas raises for text `Timestamp` cannot read, with its words.
+
+    A date written in the usual order whose month, day, hour, minute or second
+    is out of range is told which field it was, the first one wrong, and
+    anything else is an unknown format.
+
+    Returns:
+        A `DateParseError`, a `ValueError`, for the caller to raise.
+    """
+    from ._row_dates import DateParseError
+
+    if not text.strip():
+        return DateParseError(f"Unable to parse datetime string: {text}")
+    found = _DATE_FIELDS.fullmatch(text)
+    if found is None:
+        return DateParseError(f"Unknown datetime string format, unable to parse: {text}")
+    year, month, day, hour, minute, second = (
+        None if part is None else int(part) for part in found.groups()
+    )
+    if not 1 <= month <= 12:
+        return DateParseError(f"month must be in 1..12, not {month}: {text}")
+    last = calendar.monthrange(year, month)[1]
+    if day is not None and not 1 <= day <= last:
+        return DateParseError(
+            f"day {day} must be in range 1..{last} for month {month} in year {year}: {text}"
+        )
+    for name, value, top in (("hour", hour, 23), ("minute", minute, 59), ("second", second, 59)):
+        if value is not None and value > top:
+            return DateParseError(f"{name} must be in 0..{top}, not {value}: {text}")
+    return DateParseError(f"Unknown datetime string format, unable to parse: {text}")
+
+
 def _single_frequency(freq: Any) -> Any:
     """A frequency of several fixed pieces, `1h30min`, as one count of its finest piece.
 
@@ -493,6 +533,22 @@ def _single_frequency(freq: Any) -> Any:
         (alias for _, alias in re.findall(r"(\d*)([A-Za-z]+)", freq)), key=_FIXED.__getitem__
     )
     return f"{period // _FIXED[finest]}{finest}"
+
+
+def _rounding_frequency(freq: str) -> str:
+    """The frequency `round`, `floor` and `ceil` hand the kernel, unreadable text refused first.
+
+    Text that is no frequency at all, `xx` or the retired `M`, gets the words
+    pandas' `to_offset` uses for it. A real frequency that is not fixed, `ME`,
+    goes on to the kernel, which says why it cannot be rounded to.
+    """
+    freq = _single_frequency(freq)
+    found = _FREQUENCY.match(freq)
+    if found is None or found.group(3) not in _FIXED:
+        from .tseries.frequencies import to_offset
+
+        to_offset(freq)
+    return freq
 
 
 def _zone(tz: Any) -> _datetime.tzinfo | None:
@@ -587,6 +643,24 @@ def _scaled(value: int, unit: str) -> tuple[int, str]:
             " are the four resolutions an Arrow timestamp column carries"
         )
     return value * _UNITS[unit], unit
+
+
+def _no_count_of_frequency(other: Any) -> None:
+    """Refuses a whole number added to a moment, which pandas once read as a count of its freq.
+
+    Raises:
+        TypeError: With pandas' words, for a whole number that is not a flag.
+    """
+    if isinstance(other, numbers.Integral) and type(other).__name__ not in (
+        "bool",
+        "bool_",
+        "timedelta64",
+        "datetime64",
+    ):
+        raise TypeError(
+            "Addition/subtraction of integers and integer-arrays with Timestamp is no longer"
+            " supported.  Instead of adding/subtracting `n`, use `n * obj.freq`"
+        )
 
 
 class Timestamp(_datetime.datetime):
@@ -749,9 +823,11 @@ class Timestamp(_datetime.datetime):
         if isinstance(ts_input, int):
             scale = _ABBREVIATIONS.get(unit, 1) if unit is not None else 1
             if unit is not None and unit not in _ABBREVIATIONS:
-                raise InvalidArgumentError(f"Invalid unit: {unit!r}")
+                raise InvalidArgumentError(f"Unrecognized unit {unit}")
             return ts_input * scale, cls._unit_for(scale), None
         if isinstance(ts_input, float):
+            if unit is not None and unit not in _ABBREVIATIONS:
+                raise InvalidArgumentError(f"Unrecognized unit {unit}")
             scale = _ABBREVIATIONS.get(unit, 1) if unit is not None else 1
             return round(ts_input * scale), "ns", None
         if isinstance(ts_input, _datetime.datetime):
@@ -831,14 +907,14 @@ class Timestamp(_datetime.datetime):
         if fraction is not None and len(digits) > 6:
             cleaned = trimmed[: fraction.start() + 7] + trimmed[fraction.end() :]
         cleaned = _whole_date(_slashed_date(cleaned))
+        fields = _DATE_FIELDS.fullmatch(text)
+        if fields is not None and fields.group(4) == "24":
+            # Python reads hour 24 as the next midnight, which pandas refuses.
+            raise _unparsed_moment(text)
         try:
             made = _datetime.datetime.fromisoformat(cleaned.replace(" ", "T", 1))
-        except ValueError as bad:
-            raise InvalidArgumentError(
-                f"Could not parse {text!r} as a Timestamp. A scalar takes the ISO"
-                " 8601 forms; use firepanda.to_datetime for a column, which reads"
-                " more of them"
-            ) from bad
+        except ValueError:
+            raise _unparsed_moment(text) from None
         nanos = cls._epoch(made)
         if len(digits) > 6:
             nanos += int(digits[6:9].ljust(3, "0"))
@@ -1814,6 +1890,7 @@ class Timestamp(_datetime.datetime):
         if isinstance(other, _datetime.timedelta):
             nanos = other._nanos if isinstance(other, Timedelta) else Timedelta(other)._nanos
             return type(self)._from_nanos(self._total + nanos, self._finer(other), self.tzinfo)
+        _no_count_of_frequency(other)
         return NotImplemented
 
     __radd__ = __add__
@@ -1836,6 +1913,7 @@ class Timestamp(_datetime.datetime):
         if isinstance(other, _datetime.timedelta):
             nanos = other._nanos if isinstance(other, Timedelta) else Timedelta(other)._nanos
             return type(self)._from_nanos(self._total - nanos, self._finer(other), self.tzinfo)
+        _no_count_of_frequency(other)
         return NotImplemented
 
     def __rsub__(self, other: Any) -> Any:
@@ -1954,7 +2032,7 @@ class Timedelta(_datetime.timedelta):
             )
         if isinstance(value, int | float):
             if unit is not None and unit not in _ABBREVIATIONS:
-                raise InvalidArgumentError(f"Invalid unit: {unit!r}")
+                raise InvalidArgumentError(f"invalid unit abbreviation: {unit}")
             scale = _ABBREVIATIONS[unit] if unit is not None else 1
             if isinstance(value, float):
                 return int(value * scale), "ns"

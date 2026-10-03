@@ -84,7 +84,17 @@ _RENAMED = {
 }
 """The aliases pandas 3 no longer takes for an offset, and the ones it asks for instead."""
 
-_MEANT = {"H": "h", "T": "min", "S": "s", "L": "ms", "U": "us", "N": "ns", "A": "Y", "BH": "bh"}
+_MEANT = {
+    "H": "h",
+    "T": "min",
+    "S": "s",
+    "L": "ms",
+    "U": "us",
+    "N": "ns",
+    "A": "Y",
+    "AS": "YS",
+    "BH": "bh",
+}
 """The retired aliases pandas answers with a suggestion instead of a rename."""
 
 _ALIAS = re.compile(r"\s*-?\d*\.?\d*\s*([A-Za-z]+)(-\w+)?\s*")
@@ -104,12 +114,17 @@ def _mistake(freq: str) -> str:
         )
         return f"Invalid frequency: {freq}. Failed to parse with error message: {inner!r}"
     if name in _MEANT:
-        hint = f" Did you mean {_MEANT[name]}?"
+        hint = f" Did you mean {_MEANT[name]}{suffix}?"
         inner = ValueError(
-            f"Invalid frequency: {name}. Failed to parse with error message: KeyError('{name}')."
-            + hint
+            f"Invalid frequency: {name}{suffix}. Failed to parse with error message:"
+            f" KeyError('{name}')." + hint
         )
         return f"Invalid frequency: {freq}. Failed to parse with error message: {inner!r}{hint}"
+    if len(name) > 1 and name[-1] in "sS" and (name[-1] == "s" or not name[:-1].isupper()):
+        # A name ending in a second is read as a count of seconds, and what is left is
+        # not a count, so pandas says only that the frequency is invalid.
+        inner = ValueError(f"Invalid frequency: {name}{suffix}.")
+        return f"Invalid frequency: {freq}. Failed to parse with error message: {inner!r}"
     if suffix and name in ("W", "WOM"):
         inner = ValueError(
             f"Invalid frequency: {freq}. Failed to parse with error message:"

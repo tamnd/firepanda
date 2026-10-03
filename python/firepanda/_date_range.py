@@ -182,10 +182,9 @@ def _frequency(freq: Any) -> tuple[int, bool, str]:
             " length, and firepanda steps by days and less for now"
         )
     if found is None or unit not in _NANOS or found.group(3) is not None:
-        raise InvalidArgumentError(
-            f"Invalid frequency: {freq}. Failed to parse with error message:"
-            f" ValueError('Invalid frequency: {freq}.')"
-        )
+        from .tseries.frequencies import _mistake
+
+        raise InvalidArgumentError(_mistake(freq))
     count = found.group(1)
     length = float(count) * _NANOS[unit] if count else _NANOS[unit]
     if length != int(length):
