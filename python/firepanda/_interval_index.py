@@ -179,6 +179,40 @@ class IntervalIndex(Index):
         """Which ends each interval holds."""
         return str(self._dtype.closed)
 
+    @property
+    def closed_left(self) -> bool:
+        """Whether each interval holds its left end."""
+        return self.closed in ("left", "both")
+
+    @property
+    def closed_right(self) -> bool:
+        """Whether each interval holds its right end."""
+        return self.closed in ("right", "both")
+
+    @property
+    def open_left(self) -> bool:
+        """Whether each interval leaves out its left end."""
+        return not self.closed_left
+
+    @property
+    def open_right(self) -> bool:
+        """Whether each interval leaves out its right end."""
+        return not self.closed_right
+
+    def _tuples(self, na_tuple: bool) -> list[Any]:
+        pairs = zip(self.left.tolist(), self.right.tolist(), strict=True)
+        return [
+            (left, right) if value is not None or na_tuple else float("nan")
+            for value, (left, right) in zip(self._values, pairs, strict=True)
+        ]
+
+    def to_tuples(self, na_tuple: bool = True) -> Index:
+        """Each interval as a pair of its ends, an index of objects.
+
+        A gap is a pair of NaN, or one NaN with `na_tuple` off.
+        """
+        return Index(self._tuples(na_tuple), dtype=object, tupleize_cols=False, name=self.name)
+
     def _ends(self, pick: Any) -> Any:
         found = [None if value is None else pick(value) for value in self._values]
         if _moment_kind(str(self._dtype)):

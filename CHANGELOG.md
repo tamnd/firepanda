@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Period index ordinals, interval closed flags and a column group by's dtype
+
+`PeriodIndex` gains `asi8` (the ordinals, the least int64 for a gap), `is_full` and `resolution`, which refuse labels out of order and a weekly or multiple frequency in pandas' words. `IntervalIndex` and `IntervalArray` gain `closed_left`, `closed_right`, `open_left`, `open_right` and `to_tuples(na_tuple=True)`, and `IntervalArray` gains `can_hold_na`. `SeriesGroupBy.dtype` gives the column's type once for each group. A numpy typed array's `repeat` takes axis 0 and raises numpy's AxisError for any other, as pandas does.
+
 ### Added: Arrays take, delete, insert, repeat and reduce as pandas arrays do
 
 Every array now has `take` (with `allow_fill` and `fill_value`), `delete`, `insert`, `repeat`, `equals`, `ravel`, `transpose` and `T`, keeping its type and refusing out of range positions in pandas' words. Masked, numpy, datetime, timedelta, period and categorical arrays have `reshape` and `swapaxes` for one dimension, with numpy's AxisError for an axis past it. Masked and numpy arrays have `prod`, `std` and `var`, masked ones `round`, numpy, masked and timedelta ones `all` and `any`, and numpy, datetime, timedelta and period ones `median`, with `sem`, `skew` and `kurt` on numpy ones. `Categorical` gains `check_for_ordered`, `set_ordered`, `notna`, `notnull`, `memory_usage` and `describe`, and its `insert` and `take` refuse a value outside the categories as `__setitem__` does. `copy` on a categorical now gives a categorical.
