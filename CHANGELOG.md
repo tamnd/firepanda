@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Changed: ORDER BY with a LIMIT holds about twice the limit, not every row
 
 A sort with a limit above it, the TopN, used to hold every row of its input and pick the best ones at the end. Once it holds more than twice the limit's offset plus length, and more than 65,536 rows, it now keeps the best of what it holds and lets the rest go. `SELECT ... ORDER BY x LIMIT 10` over a billion rows holds tens of thousands of rows instead of a billion. The answer and its tie order are unchanged.
+### Changed: Position keys and numeric_only flags checked as pandas checks them
+
+`iloc` refuses a float, a string or None as a row key with "Cannot index by location index with a non-integer key", and a pair with such a half with pandas' list of the key kinds it takes. `iat` takes only integers, and `head` and `tail` refuse a count that is no whole number in pandas' words. A group by refuses a `numeric_only` that is not a Boolean, while a frame, a window and a rolling reduction read it by its truth, as pandas does.
 
 ### Changed: Mistakes with dates, times and spans read as pandas
 

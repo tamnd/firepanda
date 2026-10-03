@@ -2055,6 +2055,20 @@ function rather than an isinstance call written out twenty three times.
 """
 
 
+def _group_flag(value: Any) -> bool:
+    """Reads `numeric_only` for a grouped reduction, which pandas takes as a real flag only.
+
+    A frame's reductions read it as true or false, the way `if` would, and a
+    grouped one refuses anything that is not a flag with words of its own.
+
+    Raises:
+        ValueError: For anything that is not a flag.
+    """
+    if isinstance(value, bool) or type(value).__name__ == "bool_":
+        return bool(value)
+    raise InvalidArgumentError("numeric_only accepts only Boolean values")
+
+
 _RESET_INDEX_INPLACE = "Cannot reset_index inplace on a Series to create a DataFrame"
 """The one place `inplace` is refused for a reason that is not a shortcoming.
 
@@ -5852,6 +5866,26 @@ def _zero_widened(divisor: Any) -> Any:
         return divisor.astype(dict.fromkeys(whole, "float64"))
     return None
 
+def _row_count(n: Any, tail: bool) -> int:
+    """The `n` of `head` or `tail` as a count, refused as pandas refuses it.
+
+    pandas slices the rows by position with `n`, or with `-n` for `tail`, so a
+    string fails at the minus and anything else that is no whole number fails
+    at the slice, which names a RangeIndex whatever the labels are.
+    """
+    if isinstance(n, numbers.Integral):
+        return int(n)
+    if tail:
+        try:
+            n = -n
+        except TypeError:
+            raise DTypeError(f"bad operand type for unary -: '{type(n).__name__}'") from None
+    raise DTypeError(
+        "cannot do positional indexing on RangeIndex with these indexers"
+        f" [{n}] of type {type(n).__name__}"
+    )
+
+
 def _ddof_number(ddof: Any) -> float:
     """The delta degrees of freedom as the float the reductions take.
 
@@ -8132,7 +8166,24 @@ def _by_position(key: Any, height: int) -> tuple[Any, ...]:
     if isinstance(key, SeriesMixin):
         held: list[Any] = key._inner.to_list()
         return ("gather", [int(one) for one in held])
+    if not isinstance(key, numbers.Integral):
+        raise DTypeError("Cannot index by location index with a non-integer key")
     return ("one", int(key))
+
+
+_LOCATION_KINDS = (
+    "Location based indexing can only have [integer, integer slice (START point is INCLUDED,"
+    " END point is EXCLUDED), listlike of integers, boolean array] types"
+)
+
+
+def _not_a_location(part: Any) -> bool:
+    """Whether one half of an `iloc` pair is a scalar that is no position.
+
+    A float, a string or None is a label at best, and pandas refuses the pair
+    with the list of key kinds `iloc` takes rather than reading it.
+    """
+    return part is None or isinstance(part, (str, bytes, float))
 
 
 def _aligned_mask(index: Any, mask: Any) -> Any:
@@ -8989,6 +9040,12 @@ class _Positional(_Selection):
 
     __slots__ = ()
 
+    def __getitem__(self, key: Any) -> Any:
+        """Refuses a pair with a half that is no position, then reads it."""
+        if isinstance(key, tuple) and any(_not_a_location(part) for part in key):
+            raise InvalidArgumentError(_LOCATION_KINDS)
+        return super().__getitem__(key)
+
     def _rows(self, key: Any, height: int) -> tuple[Any, ...]:
         """Reads a row key as positions."""
         return _by_position(key, height)
@@ -9087,6 +9144,8 @@ class _Cell:
         row, column = key
         inner = self._owner._inner
         if not self._labelled:
+            if not (isinstance(row, numbers.Integral) and isinstance(column, numbers.Integral)):
+                raise InvalidArgumentError("iAt based indexing can only have integer indexers")
             try:
                 return _cell_of(inner, int(row), int(column))
             except Exception as error:
@@ -9264,6 +9323,8 @@ class _Point:
         """Reads one value, by one label or by one position."""
         inner = self._owner._inner
         if not self._labelled:
+            if not isinstance(key, numbers.Integral):
+                raise InvalidArgumentError("iAt based indexing can only have integer indexers")
             try:
                 return _cell_of(inner, int(key))
             except Exception as error:
@@ -16452,7 +16513,7 @@ class DataFrameMixin(_Carries):
             return self._whole("kurt", 0.0, skipna, numeric_only)
         across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         skipna = _flag("skipna", skipna)
-        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        read = self._numeric_part() if bool(numeric_only) else self
         if across:
             return _row_reduced(read, "kurt", 0.0, skipna, 0)
         names = _shown_names(read)
@@ -16541,7 +16602,7 @@ class DataFrameMixin(_Carries):
         _refuses_a_fold(axis, kind)
         across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         skipna = _flag("skipna", skipna)
-        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        read = self._numeric_part() if bool(numeric_only) else self
         if across:
             return _row_reduced(read, kind, param, skipna, min_count)
         if kind == "quantile":
@@ -16588,7 +16649,7 @@ class DataFrameMixin(_Carries):
         from ._frame import Series
 
         skipna = _flag("skipna", skipna)
-        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        read = self._numeric_part() if bool(numeric_only) else self
         numbers = ("int", "uint", "float", "bool")
         if not all(_word(dtype).startswith(numbers) for dtype in read._inner.dtypes()):
             if kind == "kurt":
@@ -16780,7 +16841,7 @@ class DataFrameMixin(_Carries):
                 f"Invalid interpolation: {interpolation}. Interpolation must be in"
                 " {'higher', 'lower', 'nearest'}"
             )
-        data = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        data = self._numeric_part() if bool(numeric_only) else self
         across = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
         labels = list(data.index if across else data.columns)
         for at, label in enumerate(labels):
@@ -16816,9 +16877,9 @@ class DataFrameMixin(_Carries):
         _interpolation_written(interpolation)
         if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
             # pandas takes a quantile across each row as one down the frame turned on its side.
-            read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+            read = self._numeric_part() if bool(numeric_only) else self
             return read.T._quantile(q, 0, False, interpolation, method)
-        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        read = self._numeric_part() if bool(numeric_only) else self
         timed = {_word(dtype).startswith(("datetime64", "timedelta64")) for dtype in read.dtypes}
         if alone and interpolation == "linear" and len(timed) < 2:
             return self._reduce("quantile", wanted[0], axis, True, numeric_only, 0).rename(
@@ -16850,7 +16911,7 @@ class DataFrameMixin(_Carries):
         Kendall's tau and a callable answer 1 for a column against itself, as
         pandas answers without asking them.
         """
-        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        read = self._numeric_part() if bool(numeric_only) else self
         names = list(read._inner.names())
         columns = _as_floats([read[name] for name in names])
         _correlation_method(method)
@@ -17082,7 +17143,7 @@ class DataFrameMixin(_Carries):
         pairwise road, which divides by rows less one whatever `ddof` says and
         makes a pair with fewer than `min_periods` rows NaN. Both are matched.
         """
-        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        read = self._numeric_part() if bool(numeric_only) else self
         names = list(read._inner.names())
         if any(str(read[name].dtype).startswith(("datetime64[", "timedelta64[")) for name in names):
             raise TypeError(
@@ -23877,7 +23938,7 @@ class _ReadingMixin:
         pandas drops the columns that are not numbers, flags and spans
         included, when a window over a frame is asked for `numeric_only`.
         """
-        if not (_flag("numeric_only", numeric_only) and self._over_frame()):
+        if not (bool(numeric_only) and self._over_frame()):
             return None
         return self._over(_window_numbers(self._data))
 
@@ -24322,7 +24383,7 @@ class WindowMixin(_ReadingMixin):
         """
         from ._frame import DataFrame, Series
 
-        if isinstance(self._data, DataFrame) and _flag("numeric_only", numeric_only):
+        if isinstance(self._data, DataFrame) and bool(numeric_only):
             narrowed = self._over(_window_numbers(self._data))
             return narrowed._reduce(kind, False, engine, engine_kwargs, settings)
         if engine is not None and engine != "cython":
@@ -25311,7 +25372,7 @@ class EwmMixin(_ReadingMixin):
         """
         from ._frame import DataFrame, Series
 
-        if isinstance(self._data, DataFrame) and _flag("numeric_only", numeric_only):
+        if isinstance(self._data, DataFrame) and bool(numeric_only):
             narrowed = self._over(_window_numbers(self._data))
             return narrowed._reduce(kind, False, engine, engine_kwargs, settings)
         if engine is not None and engine != "cython":
@@ -27989,7 +28050,7 @@ class GroupByMixin[Answer]:
             # reduction.
             min_count = operator.index(min_count)
         _group_engine(engine)
-        grouped = self._numeric_only(kind) if _flag("numeric_only", numeric_only) else self
+        grouped = self._numeric_only(kind) if _group_flag(numeric_only) else self
         texts = grouped._text_values()
         if texts and kind in _TEXT_REFUSED:
             word = str(grouped._frame[texts[0]].dtype)
@@ -28229,20 +28290,20 @@ class GroupByMixin[Answer]:
                     f"Each 'q' must be between 0 and 1. Got '{float(one)}' instead"
                 )
         wanted, alone = _quantiles_asked(q)
-        if not _flag("numeric_only", numeric_only) and any(
+        if not bool(numeric_only) and any(
             self._frame[name].dtype == "category" for name in self._reduced_names()
         ):
             # pandas' grouped quantile has no kernel for categories, unlike a column's.
             raise TypeError("No matching signature found")
         if alone and interpolation == "linear":
             return self._reduce(
-                "quantile", _quantile_wanted(q, interpolation), numeric_only=numeric_only
+                "quantile", _quantile_wanted(q, interpolation), numeric_only=bool(numeric_only)
             )
         _interpolation_written(interpolation)
-        if _flag("numeric_only", numeric_only):
+        if bool(numeric_only):
             return self._numeric_only("quantile")._quantile(q, interpolation, False)
         if not self._members():
-            return self._reduce("quantile", 0.5, numeric_only=numeric_only)
+            return self._reduce("quantile", 0.5, numeric_only=bool(numeric_only))
         answer = self._each_keyed(lambda rows: rows.quantile(wanted, interpolation=interpolation))
         if alone:
             answer = answer.droplevel(-1)
@@ -28367,7 +28428,7 @@ class GroupByMixin[Answer]:
             raise InvalidArgumentError(
                 f"numpy operations are not valid with groupby. Use .groupby(...).{kind}() instead"
             )
-        if _flag("numeric_only", numeric_only) and getattr(self, "_column", None) is None:
+        if _group_flag(numeric_only) and getattr(self, "_column", None) is None:
             # A group by over one column folds it whatever the flag says, as in pandas.
             return self._numeric_only(kind)._cumulative(kind, False, (), {"skipna": skipna})
         texts = self._text_values()
@@ -29981,7 +30042,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
 
     def _picked_all(self, how: str, skipna: bool, numeric_only: bool) -> DataFrame:
         """`_picked` over every column that is not a key, side by side."""
-        if _flag("numeric_only", numeric_only):
+        if _group_flag(numeric_only):
             return self._numeric_only(f"idx{how}")._picked_all(how, skipna, False)
         out: Any = None
         for name in _shown_names(self._frame):
