@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Arithmetic text cannot do reads as pandas on every route
+
+`diff`, `pct_change`, a frame's `cumprod` and unary minus on text now refuse with the sentence pandas uses, such as "operation 'sub' not supported for dtype 'str' with dtype 'str'", instead of the core's. Text times a column that is not whole numbers says "Can only string multiply by an integer.", and `clip` with a numeric bound on text says "Invalid comparison between dtype=str and int".
+
 ### Changed: ORDER BY with a LIMIT holds about twice the limit, not every row
 
 A sort with a limit above it, the TopN, used to hold every row of its input and pick the best ones at the end. Once it holds more than twice the limit's offset plus length, and more than 65,536 rows, it now keeps the best of what it holds and lets the rest go. `SELECT ... ORDER BY x LIMIT 10` over a billion rows holds tens of thousands of rows instead of a billion. The answer and its tie order are unchanged.

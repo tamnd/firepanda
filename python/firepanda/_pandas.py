@@ -1371,7 +1371,7 @@ def _text_repeated(text: Any, counts: Any) -> Any:
     """Every row of text repeated by a whole number or by a column of them."""
     if isinstance(counts, SeriesMixin):
         if not _word(counts.dtype).lower().startswith(("int", "uint")):
-            return None
+            raise TypeError("Can only string multiply by an integer.")
         name = text.name if text.name == counts.name else None
         if not text.index.equals(counts.index):
             text, counts = text.align(counts)
@@ -7316,6 +7316,8 @@ def _clipping(column: Any, bound: Any, op: str, printed: str, labels: list[Any])
     """
     if bound is NO_DEFAULT:
         return _everywhere(labels, False), column._inner.missing_row()
+    if isinstance(bound, numbers.Number) and _is_text(column):
+        raise DTypeError(f"Invalid comparison between dtype=str and {type(bound).__name__}")
     held, aligned, covered = None, None, None
     try:
         if _single(bound):
