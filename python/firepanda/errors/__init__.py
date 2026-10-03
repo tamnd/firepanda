@@ -489,6 +489,9 @@ BY_BUILTIN_NAME: dict[str, type[BaseException]] = {
 
 # The core says more about a position off the end than pandas does. Each pattern
 # is the core's wording and the replacement is pandas' wording of the same failure.
+_OPERATIONS = {"-": "sub", "/": "truediv", "//": "floordiv", "%": "mod", "**": "pow"}
+"""The name pandas gives the operation behind each symbol the core names."""
+
 _PANDAS_WORDS = (
     (_re.compile(r"^(positional indexers are out-of-bounds); .*$", _re.S), r"\1"),
     (
@@ -502,6 +505,25 @@ _PANDAS_WORDS = (
     (
         _re.compile(r"^(Already tz-aware, use tz_convert to convert\.) This column .*$", _re.S),
         r"\1",
+    ),
+    (
+        _re.compile(r"^binary: (-|/|//|%|\*\*) is not defined on string$"),
+        lambda found: (
+            f"operation '{_OPERATIONS[found.group(1)]}' not supported for dtype 'str'"
+            " with dtype 'str'"
+        ),
+    ),
+    (
+        _re.compile(r"^binary: \* is not defined on string$"),
+        "Can only string multiply by an integer.",
+    ),
+    (
+        _re.compile(r"^cumulative: (\w+) is not defined on string$"),
+        r"operation '\1' not supported for dtype 'str'",
+    ),
+    (
+        _re.compile(r"^unary: - is not defined on string$"),
+        "unary '-' not supported for dtype 'str'",
     ),
 )
 
