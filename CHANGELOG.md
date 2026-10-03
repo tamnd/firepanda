@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: ORDER BY with a LIMIT holds about twice the limit, not every row
+
+A sort with a limit above it, the TopN, used to hold every row of its input and pick the best ones at the end. Once it holds more than twice the limit's offset plus length, and more than 65,536 rows, it now keeps the best of what it holds and lets the rest go. `SELECT ... ORDER BY x LIMIT 10` over a billion rows holds tens of thousands of rows instead of a billion. The answer and its tie order are unchanged.
+
 ### Changed: Mistakes with dates, times and spans read as pandas
 
 An unreadable frequency given to `date_range`, `timedelta_range`, `round`, `floor` or `ceil` gets the words `to_offset` uses, retired aliases like `M` included. A unit nobody has says `Unrecognized unit` for `Timestamp` and `to_datetime`, and `invalid unit abbreviation` for `Timedelta`. Text `Timestamp` cannot read names the first field out of range, hour 24 included, as a `DateParseError`. `.dt` on a column of no instants raises AttributeError, and `.str` on numbers names the kind `infer_dtype` gives. A whole number added to instants or spans, and instants multiplied or divided, are TypeErrors in pandas' words. Localizing a zoned column ends its sentence where pandas does, and an unknown zone is zoneinfo's own `ZoneInfoNotFoundError`.
