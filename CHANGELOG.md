@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: A group by's window and resample read their settings
+
+`df.groupby(...).rolling(...)`, `expanding()` and `ewm()` now answer `window`, `min_periods`, `center`, `com` and the other settings as values rather than as callables, have `obj`, `ndim` and `exclusions`, and list their members for `dir`. A resample of a group by has `closed`, `label`, `freq`, `origin`, `offset`, `key` and `convention` as pandas gives them, and lists its methods and columns for `dir`.
+
 ### Added: Fields and methods on instant, span and period arrays
 
 `DatetimeArray`, `TimedeltaArray` and `PeriodArray` now have the fields and methods pandas gives them, from `year` and `is_month_end` to `floor`, `total_seconds`, `start_time` and `asfreq`. Numbers and flags come back in numpy with NaN for a gap, and other labels come back as arrays of their own kind. `as_unit` refuses an unknown unit with pandas' message "Supported units are 's', 'ms', 'us', 'ns'", and `DatetimeIndex.is_normalized` is False when a label is NaT.

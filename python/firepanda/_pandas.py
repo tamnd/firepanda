@@ -27727,11 +27727,35 @@ class _GroupedWindow:
         self._args = args
         self._kwargs = kwargs
         self._selected = selected
-        if kind == "ewm" and kwargs.get("times") is not None:
+        self._template()
+
+    def _template(self) -> Any:
+        """The same window over no rows, which checks the settings and holds them."""
+        source = self._grouped._source()
+        if self._kind == "ewm" and self._kwargs.get("times") is not None:
             # The instants are checked against every row, and each group reads its own.
-            getattr(grouped._source(), kind)(*args, **kwargs)
-        else:
-            getattr(grouped._source().iloc[:0], kind)(*args, **kwargs)
+            return getattr(source, self._kind)(*self._args, **self._kwargs)
+        return getattr(source.iloc[:0], self._kind)(*self._args, **self._kwargs)
+
+    @property
+    def obj(self) -> Any:
+        """The rows the windows move over, without the keys, as pandas holds them."""
+        source = self._grouped._source()
+        return source if self._selected is None else source[self._selected]
+
+    @property
+    def ndim(self) -> int:
+        """1 over one column and 2 over a frame, as pandas counts."""
+        return int(self.obj.ndim)
+
+    @property
+    def exclusions(self) -> frozenset[Any]:
+        """The columns left out, none since the keys are already out of `obj`."""
+        return frozenset()
+
+    def __dir__(self) -> list[str]:
+        public = (name for name in dir(self._template()) if not name.startswith("_"))
+        return sorted({*public, "exclusions", "ndim", "obj"})
 
     def __getitem__(self, key: Any) -> _GroupedWindow:
         """The same window over one column, or a list of columns, of each group.
@@ -27758,6 +27782,11 @@ class _GroupedWindow:
         if name.startswith("_") or not hasattr(kind[self._kind], name):
             called = kind[self._kind].__name__ + "Groupby"
             raise AttributeError(f"'{called}' object has no attribute '{name}'")
+
+        held = getattr(self._template(), name)
+        if not callable(held):
+            # A setting such as `window` or `com` reads the same on every group's window.
+            return held
 
         def call(*args: Any, **kwargs: Any) -> Any:
             settings = self._kwargs
@@ -27839,6 +27868,58 @@ class _GroupedResampler:
                 raise KeyError(f"Column not found: {name}")
         return _GroupedResampler(self._grouped, self._args, self._kwargs, key)
 
+    def _template(self) -> Any:
+        """The same resample over every row, which holds the settings and the bins."""
+        return self._rows().resample(*self._args, **self._kwargs)
+
+    @property
+    def closed(self) -> str:
+        """The side of each bin its edge belongs to."""
+        return "right" if self._template()._right_closed else "left"
+
+    @property
+    def label(self) -> str:
+        """The edge of each bin that labels it."""
+        return "right" if self._template()._right_label else "left"
+
+    @property
+    def freq(self) -> Any:
+        """The width of the bins, as the offset that steps by it."""
+        return self._template().binner.freq
+
+    @property
+    def origin(self) -> Any:
+        """Where the bins are counted from, a word or an instant."""
+        from ._scalars import Timestamp
+
+        origin = self._kwargs.get("origin", "start_day")
+        return origin if isinstance(origin, str) else Timestamp(origin)
+
+    @property
+    def offset(self) -> Any:
+        """The span the bins are moved by from the origin, None for none."""
+        from ._scalars import Timedelta
+
+        offset = self._kwargs.get("offset")
+        return None if offset is None else Timedelta(offset)
+
+    @property
+    def key(self) -> Any:
+        """The column the instants are read from, None for the row labels."""
+        return self._kwargs.get("on")
+
+    @property
+    def convention(self) -> str:
+        """The end of a period an instant is taken at, which pandas holds as 'e' here."""
+        return "e"
+
+    def __dir__(self) -> list[str]:
+        public = {name for name in dir(self._template()) if not name.startswith("_")}
+        if self._selected is None:
+            public.update(name for name in self._columns() if isinstance(name, str))
+        held = {"closed", "convention", "freq", "key", "label", "ndim", "offset", "origin"}
+        return sorted(public | held)
+
     def _rows(self) -> Any:
         """What each group's rows are cut from, which takes in the keys only when picked."""
         grouped = self._grouped
@@ -27853,10 +27934,15 @@ class _GroupedResampler:
         public = not name.startswith("_")
         if public and self._selected is None and name in self._columns():
             return self[name]
-        if not public or not hasattr(Resampler, name):
+        template = self._template() if public else None
+        if not public or not (hasattr(Resampler, name) or hasattr(template, name)):
             raise AttributeError(
                 f"'DatetimeIndexResamplerGroupby' object has no attribute {name!r}"
             )
+        held = getattr(template, name)
+        if not callable(held):
+            # A setting such as `freq` or `closed`, or the labels every group is cut by.
+            return held
 
         def call(*args: Any, **kwargs: Any) -> Any:
             if name == "interpolate":
