@@ -3772,7 +3772,9 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
             " answers a Series rather than a value and that is a different shape"
         )
     if not 0.0 <= float(q) <= 1.0:
-        raise InvalidArgumentError(f"Each 'q' must be between 0 and 1. Got '{q}' instead")
+        raise InvalidArgumentError(
+            f"Each 'q' must be between 0 and 1. Got '{float(q)}' instead"
+        )
     return float(q)
 
 
@@ -5692,6 +5694,136 @@ def _fill_values(value: Any, held: Any) -> dict[str, Any]:
         return {str(key): what for key, what in pairs if str(key) in there}
     return dict.fromkeys(names, value)
 
+
+_TOP_REFUSED = frozenset({"str", "object", "category", "string"})
+"""The column types pandas' `nlargest` and `nsmallest` refuse to rank."""
+
+_TOP_STOOD_IN = frozenset({"bool", "boolean"})
+"""The flag types they rank as numbers, which the kernel does not, along with
+every nullable number type, whose names start with a capital I, U or F."""
+
+def _top_dtype_held(column: Series, method: str) -> None:
+    """Refuses a column `nlargest` or `nsmallest` cannot rank, in a column's words."""
+    printed = str(column.dtype)
+    if printed in _TOP_REFUSED:
+        raise DTypeError(f"Cannot use method {method!r} with dtype {printed}")
+
+_PLAIN_WHOLE = frozenset(
+    {"int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"}
+)
+"""The whole number types without a gap of their own, which numpy divides."""
+
+
+def _zero_divided(left: Any, right: Any, op: str, flip: bool, again: Any) -> Any:
+    """A floor division or a remainder of whole numbers by a zero, as pandas answers it.
+
+    The kernel answers a gap for a whole number divided by zero, which is what
+    a nullable type does. A plain whole number type has no gap, so pandas gives
+    the answer a float would, infinity with the dividend's sign for `//` and NaN
+    for `%` and for nought over nought, and the column comes back as floats. The
+    divisor is made floats wherever it holds a zero and the operator is run
+    again, which leaves a column or a constant with no zero in it whole, as
+    pandas leaves it. A frame divided by a column is left alone, since the
+    column's values are spread across the frame's columns and only some of them
+    would want widening.
+
+    Returns:
+        The answer, or None when there is nothing to widen.
+    """
+    if op not in ("floordiv", "mod"):
+        return None
+    dividend, divisor = (right, left) if flip else (left, right)
+    if not _plain_whole(dividend):
+        return None
+    if _is_frame(dividend) and isinstance(divisor, SeriesMixin):
+        return None
+    widened = _zero_widened(divisor)
+    if widened is None:
+        return None
+    answer = again(widened, right) if flip else again(left, widened)
+    # pandas divides as whole numbers and then makes floats, so a zero answer
+    # is never the negative zero a float division gives for `0 // -2`, and
+    # adding a zero turns a negative zero into a positive one.
+    if isinstance(answer, SeriesMixin):
+        return answer + 0.0
+    whole = [
+        name
+        for name, kind in zip(dividend.columns.tolist(), dividend.dtypes.tolist(), strict=True)
+        if str(kind) in _PLAIN_WHOLE
+    ] if isinstance(dividend, DataFrameMixin) else answer.columns.tolist()
+    return answer.assign(**{str(name): answer[name] + 0.0 for name in whole})
+
+
+def _plain_whole(value: Any) -> bool:
+    """Whether a side of a division is whole numbers numpy would divide."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, SeriesMixin):
+        return str(value.dtype) in _PLAIN_WHOLE
+    if isinstance(value, DataFrameMixin):
+        printed = [str(kind) for kind in value.dtypes.tolist()]
+        return any(kind in _PLAIN_WHOLE for kind in printed) and all(
+            kind in _PLAIN_WHOLE or kind in ("float32", "float64") for kind in printed
+        )
+    return False
+
+
+def _zero_widened(divisor: Any) -> Any:
+    """The divisor as floats wherever it holds a whole zero, or None if it holds none."""
+    if isinstance(divisor, bool):
+        return None
+    if isinstance(divisor, int):
+        return float(divisor) if divisor == 0 else None
+    if isinstance(divisor, SeriesMixin):
+        if str(divisor.dtype) in _PLAIN_WHOLE and bool((divisor == 0).any()):
+            return divisor.astype("float64")
+        return None
+    if isinstance(divisor, DataFrameMixin):
+        # pandas divides a frame a block at a time, and its whole number columns
+        # sit in one block, so a zero in any of them makes all of them floats.
+        kinds = zip(divisor.columns.tolist(), divisor.dtypes.tolist(), strict=True)
+        whole = [name for name, kind in kinds if str(kind) in _PLAIN_WHOLE]
+        if not any(bool((divisor[name] == 0).any()) for name in whole):
+            return None
+        return divisor.astype(dict.fromkeys(whole, "float64"))
+    return None
+
+def _ddof_number(ddof: Any) -> float:
+    """The delta degrees of freedom as the float the reductions take.
+
+    A string that is not a number is refused with the words `float` uses, as
+    pandas refuses it, and as a ValueError of ours, since a bare one is the
+    class an untagged failure of the core arrives as.
+    """
+    try:
+        return float(ddof)
+    except ValueError as error:
+        raise InvalidArgumentError(str(error)) from None
+
+def _fill_shape(value: Any, kind: str) -> None:
+    """Refuses a `fillna` value that holds several values in a shape pandas will not read.
+
+    A list or a tuple gets the same words from a frame and a column, and any
+    other run of values gets the words the class it was handed to uses. A dict,
+    a column and a frame are the shapes that name what goes where, and they are
+    read elsewhere.
+    """
+    if not _list_like(value) or _is_object(value):
+        return
+    shown = type(value).__name__
+    if kind == "Index":
+        raise DTypeError(f"'value' must be a scalar, passed: {shown}")
+    if isinstance(value, list | tuple):
+        raise DTypeError(
+            f'"value" parameter must be a scalar or dict, but you passed a "{shown}"'
+        )
+    if kind == "DataFrame":
+        raise InvalidArgumentError(f"invalid fill value with a {type(value)}")
+    raise DTypeError(
+        f'"value" parameter must be a scalar, dict or Series, but you passed a "{shown}"'
+    )
 
 def _is_object(value: Any) -> bool:
     """Whether the fill value is a whole column or frame rather than a value.
@@ -14117,6 +14249,7 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame, Series
 
         inplace = _flag("inplace", inplace)
+        _fill_shape(value, "DataFrame")
         across = _axis_number(axis, "DataFrame", 0, (0, 1))
         most = _limit_wanted(limit)
         held = _shown_names(self)
@@ -16083,6 +16216,11 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame
 
         other = _listed_frame_operand(self, other, 1)
+        widened = _zero_divided(
+            self, other, op, flip, lambda left, right: left._operator(right, op, flip, strict)
+        )
+        if widened is not None:
+            return widened
         try:
             if isinstance(other, DataFrameMixin):
                 if strict:
@@ -16158,6 +16296,16 @@ class DataFrameMixin(_Carries):
             sides = _one_side_filled(self, other, fill_value)
             if sides is not None:
                 return sides[0]._named(sides[1], op, axis, None, None, flip)
+        if number == 1 or not isinstance(other, SeriesMixin):
+            widened = _zero_divided(
+                self,
+                other,
+                op,
+                flip,
+                lambda left, right: left._named(right, op, axis, None, fill_value, flip),
+            )
+            if widened is not None:
+                return widened
         try:
             if isinstance(other, DataFrameMixin):
                 answer = self._inner.binary_frame(other._inner, op, flip, fill_value)
@@ -17764,7 +17912,7 @@ class DataFrameMixin(_Carries):
         Returns:
             A new frame of the kept rows, best first.
         """
-        from ._frame import DataFrame
+        from ._frame import DataFrame, Series
 
         wanted = operator.index(n)
         if keep not in ("first", "last", "all"):
@@ -17775,10 +17923,22 @@ class DataFrameMixin(_Carries):
         else:
             written = list(columns)
         names = list(dict.fromkeys(_names.held_all(written)))
+        method = "nlargest" if largest else "nsmallest"
+        stand_in = False
+        for name in names:
+            printed = str(Series._wrap(self._inner.column(name)).dtype)
+            if printed in _TOP_REFUSED:
+                raise DTypeError(
+                    f"Column {_names.shown(name)!r} has dtype {printed},"
+                    f" cannot use method {method!r} with this dtype"
+                )
+            stand_in = stand_in or printed in _TOP_STOOD_IN or printed[:1] in "IUF"
 
         try:
             if not names:
                 return DataFrame._wrap(self._inner.slice_rows(0, 0))
+            if stand_in and len(names) == 1:
+                return self._top_stood_in(wanted, names[0], keep, largest)
             if len(names) > 1:
                 return self._top_stepped(wanted, names, keep, largest)
             if keep == "all":
@@ -17788,6 +17948,22 @@ class DataFrameMixin(_Carries):
             raise
         except Exception as error:
             raise translate(error) from None
+
+    def _top_stood_in(self, n: int, name: Any, keep: Any, largest: bool) -> DataFrame:
+        """The `n` best rows of a flag column or a nullable number column.
+
+        The kernel ranks plain numbers, so the column is ranked as floats beside
+        each row's position, a gap becoming NaN where it is ranked as pandas
+        ranks a gap, and the rows are taken by those positions. A whole number
+        past two to the fifty third loses its last digits as a float, which can
+        reorder two such values that are within a few of each other.
+        """
+        from ._frame import DataFrame, Series
+
+        floats = Series._wrap(self._inner.column(name)).astype("float64").tolist()
+        ranked = DataFrame({"v": floats, "p": list(range(len(floats)))})
+        places = ranked._top_rows(n, "v", keep, largest)["p"].tolist()
+        return self.iloc[[int(place) for place in places]]
 
     def _top_all(self, n: int, name: Any, largest: bool) -> DataFrame:
         """The `n` best rows of one column and every row tied with the last of them.
@@ -19710,10 +19886,12 @@ class SeriesMixin(_Carries):
 
     def nlargest(self, n: int = 5, keep: Any = "first") -> Series:
         """The largest values, in order, with ties settled by a rule."""
+        _top_dtype_held(self, "nlargest")
         return self._through(lambda frame: frame.nlargest(n, _carried(self._inner.label()), keep))
 
     def nsmallest(self, n: int = 5, keep: Any = "first") -> Series:
         """The smallest values, in order, with ties settled by a rule."""
+        _top_dtype_held(self, "nsmallest")
         return self._through(lambda frame: frame.nsmallest(n, _carried(self._inner.label()), keep))
 
     def reset_index(
@@ -19917,6 +20095,7 @@ class SeriesMixin(_Carries):
         from ._frame import Series
 
         inplace = _flag("inplace", inplace)
+        _fill_shape(value, "Series")
         _axis_number(axis, "Series", 0, (0,))
         most = _limit_wanted(limit)
         if most:
@@ -20948,6 +21127,11 @@ class SeriesMixin(_Carries):
             return scaled
         if strict and isinstance(other, SeriesMixin) and _labels_differ(self, other, 0):
             raise InvalidArgumentError("Can only compare identically-labeled Series objects")
+        widened = _zero_divided(
+            self, other, op, flip, lambda left, right: left._operator(right, op, flip, strict)
+        )
+        if widened is not None:
+            return widened
         try:
             if isinstance(other, SeriesMixin):
                 if strict:
@@ -21024,6 +21208,15 @@ class SeriesMixin(_Carries):
             sides = _one_side_filled(self, other, fill_value)
             if sides is not None:
                 return sides[0]._named(sides[1], op, axis, None, None, flip)
+        widened = _zero_divided(
+            self,
+            other,
+            op,
+            flip,
+            lambda left, right: left._named(right, op, axis, None, fill_value, flip),
+        )
+        if widened is not None:
+            return widened
         try:
             if isinstance(other, SeriesMixin):
                 answer = self._inner.binary_series(other._inner, op, flip, fill_value)
@@ -21186,6 +21379,10 @@ class SeriesMixin(_Carries):
         """
         from ._frame import Series
 
+        if not label and isinstance(axis, int) and axis not in (0, -1):
+            # `argmax` is numpy's spelling, and an axis past the one there is
+            # gets numpy's words, where `idxmax` gets pandas' words.
+            raise InvalidArgumentError("`axis` must be fewer than the number of dimensions (1)")
         _axis_number(axis, "Series", 0, (0,))
         rows = self._inner.length()
         if rows == 0:
@@ -27926,7 +28123,7 @@ class GroupByMixin[Answer]:
         for one in q if isinstance(q, (list, tuple)) else [q]:
             if isinstance(one, (int, float)) and not 0.0 <= one <= 1.0:
                 raise InvalidArgumentError(
-                    f"Each 'q' must be between 0 and 1. Got '{one}' instead"
+                    f"Each 'q' must be between 0 and 1. Got '{float(one)}' instead"
                 )
         wanted, alone = _quantiles_asked(q)
         if not _flag("numeric_only", numeric_only) and any(
@@ -31737,6 +31934,7 @@ class IndexMixin:
 
     def fillna(self, value: Any) -> Index:
         """The labels with each missing one replaced by `value`."""
+        _fill_shape(value, "Index")
         return self._like(self.to_series().fillna(value))
 
     def where(self, cond: Any, other: Any = None) -> Index:
@@ -32722,12 +32920,12 @@ MERGE_HOWS = ("inner", "left", "right", "outer")
 
 MERGE_VALIDATE = {
     "1:1": ("one-to-one", True, True),
-    "one_to_one": ("one-to-one", True, True),
     "1:m": ("one-to-many", True, False),
-    "one_to_many": ("one-to-many", True, False),
     "m:1": ("many-to-one", False, True),
-    "many_to_one": ("many-to-one", False, True),
     "m:m": ("many-to-many", False, False),
+    "one_to_one": ("one-to-one", True, True),
+    "one_to_many": ("one-to-many", True, False),
+    "many_to_one": ("many-to-one", False, True),
     "many_to_many": ("many-to-many", False, False),
 }
 """What each `validate` word checks: its name in the message, and whether the

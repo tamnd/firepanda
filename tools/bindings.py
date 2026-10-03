@@ -713,7 +713,7 @@ def _reductions(py: str) -> tuple[Member, ...]:
                     f"*, axis: Any = {'0' if frame else 'None'}, skipna: bool = True,"
                     " ddof: int = 1, numeric_only: bool = False" + tail
                 ),
-                body=f'self._reduce("{name}", float(ddof), axis, skipna, numeric_only, 0)',
+                body=f'self._reduce("{name}", _ddof_number(ddof), axis, skipna, numeric_only, 0)',
                 doc=f"{what} Over the {over}s. {plural}".strip(),
                 returns=gives,
             )
@@ -2143,7 +2143,7 @@ def _group_members(py: str) -> tuple[Member, ...]:
         "plain": 'self._reduce("{name}", 0.0, numeric_only, skipna)',
         "nunique": "self._nunique(dropna)",
         "spread": 'self._spread("{name}", ddof, numeric_only, skipna, engine, engine_kwargs)',
-        "sem": 'self._reduce("sem", float(ddof), numeric_only, skipna)',
+        "sem": 'self._reduce("sem", _ddof_number(ddof), numeric_only, skipna)',
         "skew": 'self._reduce("{name}", 0.0, numeric_only, skipna)',
         "quantile": "self._quantile(q, interpolation, numeric_only)",
         "product": 'self._reduce("prod", 0.0, numeric_only, skipna, min_count)',
@@ -5326,6 +5326,10 @@ def wrapper() -> str:
     for accessor in ("_Positional", "_Labelled", "_Cell", "_Along", "_Point"):
         if any(f"{accessor}(" in m.body for m in every):
             mixins.add(accessor)
+    # A ddof that is not a number is pandas' ValueError, which has to be raised
+    # as one of ours, since a bare one crossing the boundary reads as the core's.
+    if any("_ddof_number(" in m.body for m in every):
+        mixins.add("_ddof_number")
     if mixins:
         out.extend(_imported(sorted(mixins, key=_import_order)))
     # The resampler is a class of its own module rather than of this one, so the

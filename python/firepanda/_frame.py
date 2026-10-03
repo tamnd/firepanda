@@ -39,6 +39,7 @@ from ._pandas import (
     _arrow_inner,
     _Cell,
     _column_labels,
+    _ddof_number,
     _ewm,
     _expanding,
     _grouped,
@@ -1823,7 +1824,7 @@ class DataFrameGroupBy(DataFrameGroupByMixin):
         a key.
         """
         try:
-            return self._reduce("sem", float(ddof), numeric_only, skipna)
+            return self._reduce("sem", _ddof_number(ddof), numeric_only, skipna)
         except Exception as error:
             raise translate(error) from None
 
@@ -2101,7 +2102,7 @@ class SeriesGroupBy(SeriesGroupByMixin):
     ) -> DataFrame | Series:
         """The standard error of the mean within each group. Over the column."""
         try:
-            return self._reduce("sem", float(ddof), numeric_only, skipna)
+            return self._reduce("sem", _ddof_number(ddof), numeric_only, skipna)
         except Exception as error:
             raise translate(error) from None
 
@@ -2783,7 +2784,7 @@ class DataFrame(DataFrameMixin):
         One value per column.
         """
         try:
-            return self._reduce("std", float(ddof), axis, skipna, numeric_only, 0)
+            return self._reduce("std", _ddof_number(ddof), axis, skipna, numeric_only, 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -2800,7 +2801,7 @@ class DataFrame(DataFrameMixin):
         per column.
         """
         try:
-            return self._reduce("var", float(ddof), axis, skipna, numeric_only, 0)
+            return self._reduce("var", _ddof_number(ddof), axis, skipna, numeric_only, 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -2817,7 +2818,7 @@ class DataFrame(DataFrameMixin):
         columns. One value per column.
         """
         try:
-            return self._reduce("sem", float(ddof), axis, skipna, numeric_only, 0)
+            return self._reduce("sem", _ddof_number(ddof), axis, skipna, numeric_only, 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -3849,7 +3850,7 @@ class Series(SeriesMixin):
     ) -> Any:
         """The sample standard deviation, normalised by N-1 by default. Over the rows."""
         try:
-            return self._reduce("std", float(ddof), axis, skipna, numeric_only, 0)
+            return self._reduce("std", _ddof_number(ddof), axis, skipna, numeric_only, 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -3864,7 +3865,7 @@ class Series(SeriesMixin):
     ) -> Any:
         """The unbiased variance, normalised by N-1 by default. Over the rows."""
         try:
-            return self._reduce("var", float(ddof), axis, skipna, numeric_only, 0)
+            return self._reduce("var", _ddof_number(ddof), axis, skipna, numeric_only, 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -3881,7 +3882,7 @@ class Series(SeriesMixin):
         rows.
         """
         try:
-            return self._reduce("sem", float(ddof), axis, skipna, numeric_only, 0)
+            return self._reduce("sem", _ddof_number(ddof), axis, skipna, numeric_only, 0)
         except Exception as error:
             raise translate(error) from None
 
