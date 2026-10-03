@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Arrays take, delete, insert, repeat and reduce as pandas arrays do
+
+Every array now has `take` (with `allow_fill` and `fill_value`), `delete`, `insert`, `repeat`, `equals`, `ravel`, `transpose` and `T`, keeping its type and refusing out of range positions in pandas' words. Masked, numpy, datetime, timedelta, period and categorical arrays have `reshape` and `swapaxes` for one dimension, with numpy's AxisError for an axis past it. Masked and numpy arrays have `prod`, `std` and `var`, masked ones `round`, numpy, masked and timedelta ones `all` and `any`, and numpy, datetime, timedelta and period ones `median`, with `sem`, `skew` and `kurt` on numpy ones. `Categorical` gains `check_for_ordered`, `set_ordered`, `notna`, `notnull`, `memory_usage` and `describe`, and its `insert` and `take` refuse a value outside the categories as `__setitem__` does. `copy` on a categorical now gives a categorical.
+
 ### Changed: Wrong calls on an index name the method as pandas does
 
 A wrong keyword on any kind of index now prints the name the same pandas index prints, such as `Index.repeat()`, `RangeIndex.searchsorted()` or `TimelikeOps.floor()`. `take` and `transpose` check numpy's keywords as pandas does instead of refusing or ignoring them, `to_numpy` names the array pandas hands its keywords to, a MultiIndex checks numpy's keywords before its own refusals, and `pct_change` hands `fill_value` and any other keyword to `shift` as pandas does, where before `fill_value` was dropped.

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ._array import FirepandaArray
+from ._array import FirepandaArray, _Shaped
 from .errors import DTypeError, InvalidArgumentError
 
 if TYPE_CHECKING:
@@ -204,7 +204,7 @@ def _categorical_column(
     return column
 
 
-class Categorical(FirepandaArray):
+class Categorical(_Shaped, FirepandaArray):
     """Values drawn from a list of categories, as pandas' `Categorical`.
 
     With no categories given they are the values seen, in sorted order, as in
@@ -212,6 +212,7 @@ class Categorical(FirepandaArray):
     """
 
     __slots__ = ()
+    _numpy_backed = True
 
     def __init__(
         self,
@@ -298,8 +299,6 @@ class Categorical(FirepandaArray):
         Raises:
             TypeError: For a value not among the categories, in pandas' words.
         """
-        from ._pandas import _missing
-
         values = self._column.tolist()
         places = range(len(values))
         if isinstance(key, int):
@@ -313,19 +312,82 @@ class Categorical(FirepandaArray):
                 chosen = [places[at] for at in list(key)]
             many = isinstance(value, list | tuple | FirepandaArray)
             new = list(value) if many else [value] * len(chosen)
-        categories = self.categories.tolist()
-        for item in new:
-            if not _missing(item) and item not in categories:
-                raise DTypeError(
-                    f"Cannot setitem on a Categorical with a new category ({item}), "
-                    "set the categories first"
-                )
+        _known(new, self.categories.tolist())
         for at, item in zip(chosen, new, strict=True):
             values[at] = item
-        self._column = Categorical(values, categories=categories, ordered=self.ordered)._column
+        self._column = self._from_values(values)._column
 
     def _again(self, column: Series) -> Categorical:
         return Categorical._held_by(column)
+
+    def _from_values(self, values: list[Any]) -> Categorical:
+        """A categorical of the same categories over `values`, each one of them or a gap.
+
+        Raises:
+            TypeError: For a value not among the categories, in pandas' words.
+        """
+        categories = self.categories.tolist()
+        _known(values, categories)
+        return Categorical(values, categories=categories, ordered=self.ordered)
+
+    def check_for_ordered(self, op: str) -> None:
+        """Nothing for ordered categories, which `op` needs.
+
+        Raises:
+            TypeError: For categories in no order, in pandas' words.
+        """
+        if not self.ordered:
+            raise DTypeError(
+                f"Categorical is not ordered for operation {op}\n"
+                "you can use .as_ordered() to change the Categorical to an ordered one\n"
+            )
+
+    def set_ordered(self, value: Any) -> Categorical:
+        """The same values with the categories in order or not, as `value` says.
+
+        Raises:
+            TypeError: For a `value` that is not a bool, in pandas' words.
+        """
+        if not isinstance(value, bool):
+            raise DTypeError("'ordered' must either be 'True' or 'False'")
+        return self.as_ordered() if value else self.as_unordered()
+
+    def notna(self) -> Any:
+        """Whether each value is present, as numpy bools."""
+        import numpy
+
+        return ~numpy.asarray(self.isna(), dtype=bool)
+
+    def notnull(self) -> Any:
+        """Whether each value is present, the same as `notna`."""
+        return self.notna()
+
+    def memory_usage(self, deep: bool = False) -> int:
+        """The bytes of the codes and of the categories."""
+        return int(self.codes.nbytes) + int(self.categories.memory_usage(deep=deep))
+
+    def describe(self) -> Any:
+        """How many values each category holds and what share, gaps on a row of their own."""
+        from ._category_index import CategoricalIndex
+        from ._frame import DataFrame
+        from ._pandas import _missing
+
+        values = self._column.tolist()
+        categories = self.categories.tolist()
+        counts = [
+            sum(1 for value in values if not _missing(value) and value == c) for c in categories
+        ]
+        labels = list(categories)
+        gaps = sum(1 for value in values if _missing(value))
+        if gaps:
+            labels.append(None)
+            counts.append(gaps)
+        size = len(values)
+        index = CategoricalIndex(
+            labels, categories=categories, ordered=self.ordered, name="categories"
+        )
+        freqs = [count / size if size else float("nan") for count in counts]
+        return DataFrame({"counts": counts, "freqs": freqs}, index=index)
 
     def map(self, mapper: Any, na_action: Any = None) -> Any:
         """`mapper` applied to each category, a categorical when no two meet, else an index."""
@@ -442,6 +504,18 @@ class Categorical(FirepandaArray):
 
             return f"[{shown}]{tail}\n{_text_categories(self._column)}"
         return f"[{shown}]{tail}\nCategories ({len(held)}, {kind}): [{levels}]"
+
+
+def _known(values: list[Any], categories: list[Any]) -> None:
+    """Refuse a value that is neither a gap nor one of `categories`, in pandas' words."""
+    from ._pandas import _missing
+
+    for item in values:
+        if not _missing(item) and item not in categories:
+            raise DTypeError(
+                f"Cannot setitem on a Categorical with a new category ({item}), "
+                "set the categories first"
+            )
 
 
 def _holds_gap(values: list[Any]) -> bool:
