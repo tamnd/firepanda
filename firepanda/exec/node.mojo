@@ -7257,7 +7257,9 @@ struct Group(Movable):
 
         It can when it is the one key, which the map and the grouping kernels
         group on its codes, or when nothing reads it but a count of rows. A
-        tuple of keys is written out as bytes and wants the strings.
+        tuple of keys can when it goes to `LastingTuple`, which writes a coded
+        key as its code, and nothing is held, because the held keys are
+        grouped again at the end by kernels that want the strings.
 
         Args:
             column: The input column's position.
@@ -7267,7 +7269,8 @@ struct Group(Movable):
         """
         for k in range(len(self.keys)):
             if self.keys[k] == column and len(self.keys) > 1:
-                return False
+                if not self._fast or len(self._kept) > 0:
+                    return False
         for t in range(len(self._source)):
             if (
                 self._source[t] == column

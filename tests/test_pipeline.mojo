@@ -2143,6 +2143,51 @@ def test_a_coded_key_with_a_null_groups_as_the_strings_do() raises:
     assert_equal(read_back(out, "total")[1], 8, "a is rows two and six")
 
 
+def test_a_tuple_with_a_coded_key_reads_the_codes() raises:
+    """A coded key beside a number key goes into the tuple map as its codes,
+    and the groups and their keys are the ones the strings give."""
+    var codes = Array[DType.int32](7)
+    var picked: List[Int32] = [1, 0, 2, 1, 3, 0, 1]
+    for i in range(7):
+        codes[i] = picked[i]
+    var col = AnyArray.dictionary_encoded(
+        codes^,
+        strings_from_list(["", "a", "b", "a phrase too long to inline"]),
+    )
+    var s = ChunkedArray(LogicalType.STRING)
+    s.append(col.slice(0, 4))
+    s.append(col.slice(4, 7))
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3, 4]))
+    n.append(numbers([5, 6, 7]))
+    var k = ChunkedArray(LogicalType.INT64)
+    k.append(numbers([1, 1, 1, 2]))
+    k.append(numbers([1, 1, 2]))
+    var columns = List[ChunkedArray]()
+    columns.append(s^)
+    columns.append(n^)
+    columns.append(k^)
+    var fields = List[Field]()
+    fields.append(Field("s", LogicalType.STRING))
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("k", LogicalType.INT64))
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SIZE, "c"))
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    var keys: List[Int] = [0, 2]
+    var pipeline = Pipeline(DataFrame(Schema(fields^), columns^))
+    pipeline.add(Node(Group(keys^, aggs^)))
+    assert_true(pipeline.coded_columns()[0], "the key stays coded")
+    var out = pipeline^.run()
+    assert_equal(read_back(out, "c"), [1, 2, 1, 2, 1], "first seen first")
+    assert_equal(read_back(out, "total"), [1, 8, 3, 11, 5], "summed per group")
+    assert_false(out.column("s").values.is_coded(), "the key goes out as text")
+    assert_equal(out.column("s").text(0), "a")
+    assert_equal(out.column("s").text(3), "a")
+    assert_equal(out.column("s").text(4), "a phrase too long to inline")
+    assert_equal(read_back(out, "k"), [1, 1, 1, 2, 1])
+
+
 def big_frame() raises -> DataFrame:
     """Six values near 1.9e18, in chunks of two, three and one.
 

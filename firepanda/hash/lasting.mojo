@@ -1564,6 +1564,15 @@ struct LastingTuple(Movable):
     var gaps: List[Bool]
     """Per key column, whether any chunk so far has had a null in it."""
 
+    var coded: List[Bool]
+    """Per key column, whether the tuples hold its four byte code rather than
+    its text, which they do while every chunk shares the first one's
+    categories."""
+
+    var templates: List[AnyArray]
+    """Per key column, no rows over the first chunk's categories, which is what
+    a coded key's codes are read back through."""
+
     var groups: Int
     """Ordinals handed out so far."""
 
@@ -1573,6 +1582,8 @@ struct LastingTuple(Movable):
         self.types = List[LogicalType]()
         self.widths = List[Int]()
         self.gaps = List[Bool]()
+        self.coded = List[Bool]()
+        self.templates = List[AnyArray]()
         self.groups = 0
 
     def __len__(self) -> Int:
@@ -1604,6 +1615,17 @@ struct LastingTuple(Movable):
         """
         if rows <= 0:
             return
+        # A coded key goes in as its code, which is four bytes where its text
+        # would be five and up and spares the scan decoding it. That holds
+        # while the chunks share the first one's categories. A chunk that
+        # brings others moves the map over to text first.
+        if len(self.types) > 0:
+            for k in range(len(at)):
+                if self.coded[k] and not same_categories(
+                    self.templates[k], columns[at[k]]
+                ):
+                    self._uncode()
+                    break
 
         # Two passes on the cores, one to size every row's bytes and one to
         # write them, with the running total between them the only serial part.
@@ -1612,9 +1634,18 @@ struct LastingTuple(Movable):
         var width = List[Int](capacity=len(at))
         var gaps = List[Bool](capacity=len(at))
         var texts = List[StringArray](capacity=len(at))
+        # What each key is read from: the column, or a coded key's codes.
+        var sources = List[AnyArray](capacity=len(at))
+        var opening = len(self.types) == 0
         for k in range(len(at)):
             ref col = columns[at[k]]
             gaps.append(col.null_count() > 0)
+            if col.is_coded() and (opening or self.coded[k]):
+                width.append(4)
+                texts.append(StringBuilder().finish())
+                sources.append(col.code_column())
+                continue
+            sources.append(AnyArray(copy=col))
             if not col.is_flat():
                 width.append(0)
                 var flat = col.decoded()
@@ -1625,11 +1656,19 @@ struct LastingTuple(Movable):
             else:
                 width.append(dtype_size(col.dtype()))
                 texts.append(StringBuilder().finish())
-        if len(self.types) == 0:
+        if opening:
             for k in range(len(at)):
-                self.types.append(columns[at[k]].type)
+                ref col = columns[at[k]]
+                self.types.append(col.type)
                 self.widths.append(width[k])
                 self.gaps.append(False)
+                self.coded.append(col.is_coded())
+                if col.is_coded():
+                    self.templates.append(
+                        col.with_codes(AnyArray(Array[DType.int32](0)))
+                    )
+                else:
+                    self.templates.append(AnyArray(Array[DType.int32](0)))
         for k in range(len(at)):
             if gaps[k]:
                 self.gaps[k] = True
@@ -1651,7 +1690,7 @@ struct LastingTuple(Movable):
             for i in range(begin, stop):
                 sized[i] = Int64(fixed)
             for k in range(keys):
-                ref col = columns[at[k]]
+                ref col = sources[k]
                 var gap = gaps[k]
                 if width[k] == 0:
                     ref text = texts[k]
@@ -1683,7 +1722,7 @@ struct LastingTuple(Movable):
 
         def write(begin: Int, stop: Int) raises {imm}:
             for k in range(keys):
-                ref col = columns[at[k]]
+                ref col = sources[k]
                 var gap = gaps[k]
                 var w = width[k]
                 if w == 0:
@@ -1785,11 +1824,12 @@ struct LastingTuple(Movable):
                         read[g] += Int64(1 + w)
 
                 parallel_morsels(fixed, groups, LASTING_TEXT_MORSEL)
-                out.append(
-                    AnyArray(
-                        ColumnData(values^, validity^, groups), self.types[k]
-                    )
+                var made = AnyArray(
+                    ColumnData(values^, validity^, groups), self.types[k]
                 )
+                if self.coded[k]:
+                    made = self.templates[k].with_codes(made^).decoded()
+                out.append(made^)
                 continue
 
             # Text is two passes, one for how much payload each morsel's long
@@ -1857,5 +1897,25 @@ struct LastingTuple(Movable):
         self.types = List[LogicalType]()
         self.widths = List[Int]()
         self.gaps = List[Bool]()
+        self.coded = List[Bool]()
+        self.templates = List[AnyArray]()
         self.groups = 0
         return out^
+
+    def _uncode(mut self) raises:
+        """Moves a map holding codes onto one holding every key as text.
+
+        The tuples seen so far are distinct and in ordinal order, so handing
+        them back to an empty map gives each the ordinal it already had, and the
+        rows already folded under those ordinals stay where they are.
+
+        Raises:
+            If the keys cannot be read back or written again.
+        """
+        var held = self.groups
+        var seen = self.take_keys()
+        var at = List[Int](capacity=len(seen))
+        for k in range(len(seen)):
+            at.append(k)
+        var ignored = Array[DType.uint32](held)
+        self.ordinals(seen, at, held, ignored)
