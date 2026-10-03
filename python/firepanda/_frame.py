@@ -1833,14 +1833,18 @@ class DataFrameGroupBy(DataFrameGroupByMixin):
     def skew(self, skipna: bool = True, numeric_only: bool = False, **kwargs: Any) -> DataFrame:
         """The skewness within each group. Over every column that is not a key."""
         try:
-            return self._reduce("skew", 0.0, numeric_only, skipna)
+            return _numpy_keywords(self, "group_skew", kwargs)._reduce(
+                "skew", 0.0, numeric_only, skipna
+            )
         except Exception as error:
             raise translate(error) from None
 
     def kurt(self, skipna: bool = True, numeric_only: bool = False, **kwargs: Any) -> DataFrame:
         """The excess kurtosis within each group. Over every column that is not a key."""
         try:
-            return self._reduce("kurt", 0.0, numeric_only, skipna)
+            return _numpy_keywords(self, "group_kurt", kwargs)._reduce(
+                "kurt", 0.0, numeric_only, skipna
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2113,7 +2117,9 @@ class SeriesGroupBy(SeriesGroupByMixin):
     ) -> DataFrame | Series:
         """The skewness within each group. Over the column."""
         try:
-            return self._reduce("skew", 0.0, numeric_only, skipna)
+            return _numpy_keywords(self, "group_skew", kwargs)._reduce(
+                "skew", 0.0, numeric_only, skipna
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2122,7 +2128,9 @@ class SeriesGroupBy(SeriesGroupByMixin):
     ) -> DataFrame | Series:
         """The excess kurtosis within each group. Over the column."""
         try:
-            return self._reduce("kurt", 0.0, numeric_only, skipna)
+            return _numpy_keywords(self, "group_kurt", kwargs)._reduce(
+                "kurt", 0.0, numeric_only, skipna
+            )
         except Exception as error:
             raise translate(error) from None
 
