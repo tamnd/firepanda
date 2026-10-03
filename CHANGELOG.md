@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: merge checks its index flags and merge_ordered its method as pandas does
+
+`merge` refuses a `left_index` or `right_index` that is not a Boolean with "left_index parameter must be of type bool, not <class 'str'>", after the join method is read and before an anti join starts, which is pandas' order. `merge_ordered(how="cross")` says "do not recognize join method cross".
+
 ### Changed: Arithmetic text cannot do reads as pandas on every route
 
 `diff`, `pct_change`, a frame's `cumprod` and unary minus on text now refuse with the sentence pandas uses, such as "operation 'sub' not supported for dtype 'str' with dtype 'str'", instead of the core's. Text times a column that is not whole numbers says "Can only string multiply by an integer.", and `clip` with a numeric bound on text says "Invalid comparison between dtype=str and int".
