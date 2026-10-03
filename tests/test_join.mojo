@@ -2148,7 +2148,8 @@ def test_a_tall_side_against_a_sparse_short_side_pairs_in_one_pass() raises:
     Twice: a thousand right keys three hundred apart, which get a direct table
     with a sieve, and twenty thousand a hundred apart, whose range is too wide
     for a direct table and which get a hashed one with a sieve. Either way the
-    pairing is one walk of the left. Every third right key is held twice, which
+    pairing is one walk of the left. Some left keys fall outside the right
+    side's range on both ends. Every third right key is held twice, which
     takes the walk through a bucket rather than a single row, and the pairs have
     to come out in left row order and in right row order within a left row, as
     the ordinary route gives them.
@@ -2163,7 +2164,10 @@ def test_a_tall_side_against_a_sparse_short_side_pairs_in_one_pass() raises:
         var right = one_column(Series("k", small^))
         var tall = Array[DType.int64](tall_rows)
         for i in range(tall_rows):
-            tall[i] = Int64((i * 7_919) % (short_rows * apart))
+            # A few keys run past either end of the short side's range,
+            # which the sieve has to turn away before it reads a bit.
+            var reach = (short_rows + 20) * apart
+            tall[i] = Int64((i * 7_919) % reach - 10 * apart)
         var left = one_column(Series("k", tall^))
         var paired = join_indices(
             left.column_refs(),
@@ -2190,7 +2194,7 @@ def test_a_tall_side_against_a_sparse_short_side_pairs_in_one_pass() raises:
         var expected_right = List[Int]()
         for i in range(tall_rows):
             var v = Int(probed[i])
-            if v % apart != 0 or v // apart > short_rows:
+            if v < 0 or v % apart != 0 or v // apart > short_rows:
                 continue
             var slot = v // apart
             if first[slot] >= 0:

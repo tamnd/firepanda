@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: A sparse join looks up only the rows its sieve passes
+
+When a tall table joins a short one on a sparse key, the walk over the tall side used to test the sieve and do the lookup in one loop, so every row paid a branch on a bit the predictor could not learn. The walk now runs the sieve first, branch free, and writes down the rows that pass, then looks up only those. On a shared eight core box q17 is 17% faster and q8 and q10 are 7 to 12% faster at the best run. On a busy six core VM the same build is 10% faster on q17 and within noise either way on q3, q5, q8 and q10, so the gain depends on the machine.
+
 ### Fixed: Columns of different lengths say what pandas says
 
 `DataFrame({"a": [1, 2, 3], "b": [1]})` now raises `All arrays must be of the same length`, which is pandas' wording, instead of naming the short column and both row counts. The core's message is changed too, and until the extension is rebuilt the error boundary rewrites the old wording.
