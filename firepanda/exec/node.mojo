@@ -1368,6 +1368,10 @@ struct Limit(Movable):
         return Chunk(cut^, take)
 
 
+comptime TOPN_FLOOR = 1 << 16
+"""How many rows a bounded sort holds before it starts letting rows go."""
+
+
 struct Sort(Movable):
     """Holds every row, orders them on a set of keys, emits chunks again.
 
@@ -1410,11 +1414,17 @@ struct Sort(Movable):
     one ordinary sort when the bound covers the input, so a bound that bounds
     nothing costs nothing.
 
-    A bounded sort still holds every row that arrives. What the bound saves is
-    the permutation and the gathers, not the memory, and holding a heap per
-    chunk instead would be a third operator rather than a flag on this one. The
-    gathers are where a wide sort spends its time, so that is the half worth
-    having first.
+    A bounded sort is also a TopN in memory. Once it holds more than twice the
+    bound, and more than `floor` rows, it asks `top_rows` for the best `bound`
+    of what it holds and lets the rest go, so it never holds much more than
+    twice the bound plus a chunk however long the input is. The compaction
+    is a sort of what it held, so it runs once per bound's worth of rows and
+    costs what one more sort over twice the bound costs. It cannot change the
+    answer: a row it lets go has `bound` rows ahead of it already, and
+    `top_rows` breaks a tie by row number, so the rows it keeps stay ahead of
+    the ones that arrive after them exactly as they would have. The floor
+    keeps a small bound from compacting on every chunk, which would be many
+    small sorts where one would do.
     """
 
     var keys: List[Int]
@@ -1451,12 +1461,22 @@ struct Sort(Movable):
     var width: Int
     """The number of columns, known once `bind` has run."""
 
+    var rows: Int
+    """How many rows are held now."""
+
+    var peak: Int
+    """The most rows held at once, which a bound keeps near twice itself."""
+
+    var floor: Int
+    """How many rows a bounded sort holds before it compacts at all."""
+
     def __init__(
         out self,
         var keys: List[Int],
         var descending: List[Bool],
         var nulls_first: List[Bool],
         bound: Int = -1,
+        floor: Int = TOPN_FLOOR,
     ) raises:
         """Constructs a sort.
 
@@ -1468,6 +1488,7 @@ struct Sort(Movable):
                 Consumed.
             bound: How many rows from the top the operator above needs, which is
                 a limit's offset plus its length. The default is every row.
+            floor: How many rows a bounded sort may hold before it compacts.
 
         Raises:
             If there are no keys, if the flag lists are a different length from
@@ -1501,6 +1522,9 @@ struct Sort(Movable):
         self.output = List[AnyArray]()
         self.ran = False
         self.width = 0
+        self.rows = 0
+        self.peak = 0
+        self.floor = floor
 
     def bind(mut self, var input: Schema) raises -> Schema:
         """Records the input schema, which is also the output one.
@@ -1567,13 +1591,54 @@ struct Sort(Movable):
                 )
             )
         self.sizes.append(len(chunk))
+        self.rows += len(chunk)
         var backwards = chunk^.into_columns()
         var forwards = List[AnyArray](capacity=len(backwards))
         while len(backwards) > 0:
             forwards.append(backwards.pop())
         for i in range(self.width):
             self.held[i].append(forwards.pop())
+        self.peak = max(self.peak, self.rows)
+        if (
+            self.bound >= 0
+            and self.width > 0
+            and self.rows > max(2 * self.bound, self.floor)
+        ):
+            self._compact()
         return None
+
+    def _compact(mut self) raises:
+        """Keeps the best `bound` rows held and lets the rest go.
+
+        They are kept best first, which is the order they would have come out
+        in, and a later compaction or the final one reads them ahead of the
+        rows that arrive after, which is where their row numbers put them.
+
+        Raises:
+            If a key column's dtype is not one firepanda can sort.
+        """
+        var backwards = List[AnyArray](capacity=self.width)
+        while len(self.held) > 0:
+            backwards.append(self.held.pop().combine())
+        var flat = List[AnyArray](capacity=self.width)
+        while len(backwards) > 0:
+            flat.append(backwards.pop())
+        var best = top_rows(
+            borrow_columns(flat),
+            self.keys,
+            self.rows,
+            self.descending,
+            self.nulls_first,
+            self.bound,
+        )
+        var rows = List[Int](capacity=len(best))
+        for i in range(len(best)):
+            rows.append(Int(best[i]))
+        for i in range(self.width):
+            var kept = ChunkedArray(self.input[i].dtype)
+            kept.append(take_any(flat[i], rows))
+            self.held.append(kept^)
+        self.rows = len(rows)
 
     def finish(mut self) raises -> Optional[Chunk]:
         """Orders the rows the first time, then hands them back in chunks.

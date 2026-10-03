@@ -5473,6 +5473,73 @@ def test_a_bounded_sort_cuts_its_answer_at_the_chunks_it_was_given() raises:
     assert_equal(out.columns[0].num_chunks(), 2, "two of the three")
 
 
+def _topn(bound: Int, floor: Int, descending: Bool) raises -> Sort:
+    """A sort fed forty chunks of five rows directly, `k` with many ties."""
+    var sort = Sort([0], [descending], [False], bound=bound, floor=floor)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("id", LogicalType.INT64))
+    _ = sort.bind(Schema(fields^))
+    for c in range(40):
+        var k = List[Int64]()
+        var id = List[Int64]()
+        for i in range(c * 5, c * 5 + 5):
+            k.append(Int64((i * 37) % 50))
+            id.append(Int64(i))
+        var columns = List[AnyArray]()
+        columns.append(numbers(k))
+        columns.append(numbers(id))
+        _ = sort.process(Chunk(columns^))
+    return sort^
+
+
+def _drained(mut sort: Sort) raises -> List[Int64]:
+    """The ids a sort hands back, in order."""
+    var out = List[Int64]()
+    while True:
+        var chunk = sort.finish()
+        if not chunk:
+            break
+        var id = chunk.value().column(1).as_typed[DType.int64]()
+        for i in range(len(id)):
+            out.append(id[i])
+    return out^
+
+
+def test_a_bounded_sort_holds_about_twice_its_bound() raises:
+    # Two hundred rows go in and a bound of seven keeps the held rows to
+    # twice that plus the chunk that tipped it over, and the answer is the
+    # first seven of the full sort, ties in the order they arrived.
+    var sort = _topn(7, 0, True)
+    assert_true(sort.peak <= 2 * 7 + 5, "held " + String(sort.peak))
+    var got = _drained(sort)
+    var want: List[Int64] = [27, 77, 127, 177, 4, 54, 104]
+    assert_equal(len(got), 7, "rows")
+    for i in range(7):
+        assert_equal(got[i], want[i], "row " + String(i))
+
+
+def test_a_compacting_sort_answers_what_a_whole_sort_does() raises:
+    var whole = _topn(-1, 0, False)
+    var every = _drained(whole)
+    assert_equal(whole.peak, 200, "an unbounded sort holds everything")
+    for bound in [0, 1, 4, 9, 50, 199, 200]:
+        var sort = _topn(bound, 0, False)
+        var got = _drained(sort)
+        assert_equal(len(got), bound, "rows at " + String(bound))
+        for i in range(bound):
+            assert_equal(got[i], every[i], String(bound, " row ", i))
+    var want: List[Int64] = [0, 50, 100, 150, 23, 73, 123, 173, 46]
+    for i in range(9):
+        assert_equal(every[i], want[i], "row " + String(i))
+
+
+def test_a_bounded_sort_under_its_floor_holds_everything() raises:
+    var sort = _topn(3, 1000, True)
+    assert_equal(sort.peak, 200, "no compaction below the floor")
+    assert_equal(len(_drained(sort)), 3, "and the same three")
+
+
 def test_a_sort_bounded_at_a_number_that_is_not_one_is_refused() raises:
     with assert_raises(contains="is not a number of rows to keep"):
         _ = Sort([0], [True], [False], bound=-2)
