@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: A missing label is a KeyError carrying the label
+
+`Index.get_loc`, and `df.at` through it, raise `KeyError('zz')` for a label that is not there, as pandas does, instead of a KeyError holding the core's sentence `index: label is not in the index`.
+
 ### Changed: A sparse join looks up only the rows its sieve passes
 
 When a tall table joins a short one on a sparse key, the walk over the tall side used to test the sieve and do the lookup in one loop, so every row paid a branch on a bit the predictor could not learn. The walk now runs the sieve first, branch free, and writes down the rows that pass, then looks up only those. On a shared eight core box q17 is 17% faster and q8 and q10 are 7 to 12% faster at the best run. On a busy six core VM the same build is 10% faster on q17 and within noise either way on q3, q5, q8 and q10, so the gain depends on the machine.

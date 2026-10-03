@@ -31284,7 +31284,12 @@ class IndexMixin:
         try:
             found = list(self._inner.get_loc(key))
         except Exception as error:
-            raise translate(error) from None
+            translated = translate(error)
+            if isinstance(translated, KeyError) and "label is not in the index" in str(error):
+                # pandas' KeyError carries the label alone, which is what a
+                # caller catching it reads back out of `args`.
+                raise ColumnNotFoundError(key) from None
+            raise translated from None
         if len(found) == 1:
             return found[0]
         run = found[-1] - found[0] + 1 == len(found)
