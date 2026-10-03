@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `DISTINCT ON` a computed key
+
+`SELECT DISTINCT ON (qty % 2) qty FROM sales` runs. Until now it was refused,
+because only a column could be a key. The key is computed as a column of its own,
+used to decide which rows to keep, and dropped before the answer comes back, the
+way a computed `ORDER BY` key is. An `ORDER BY` still decides which row of each
+key survives.
+
 ### Added: the prepared statement cache
 
 A query run a second time skips the parse, the binding and the optimizer and goes
