@@ -18,6 +18,7 @@ without doing the same.
 from __future__ import annotations
 
 import inspect
+import types
 
 _SHARED = {
     "abs": "NDFrame.abs",
@@ -118,6 +119,48 @@ _SERIES = {
     "value_counts": "IndexOpsMixin.value_counts",
 }
 
+# What a group by of either kind prints, from pandas' GroupBy and BaseGroupBy.
+_GROUPED = {
+    "all": "GroupBy.all",
+    "any": "GroupBy.any",
+    "bfill": "GroupBy.bfill",
+    "count": "GroupBy.count",
+    "cumcount": "GroupBy.cumcount",
+    "diff": "GroupBy.diff",
+    "ewm": "GroupBy.ewm",
+    "expanding": "GroupBy.expanding",
+    "ffill": "GroupBy.ffill",
+    "first": "GroupBy.first",
+    "get_group": "BaseGroupBy.get_group",
+    "head": "GroupBy.head",
+    "last": "GroupBy.last",
+    "max": "GroupBy.max",
+    "mean": "GroupBy.mean",
+    "median": "GroupBy.median",
+    "min": "GroupBy.min",
+    "ngroup": "GroupBy.ngroup",
+    "ohlc": "GroupBy.ohlc",
+    "pct_change": "GroupBy.pct_change",
+    "pipe": "BaseGroupBy.pipe",
+    "prod": "GroupBy.prod",
+    "quantile": "GroupBy.quantile",
+    "rank": "GroupBy.rank",
+    "resample": "GroupBy.resample",
+    "rolling": "GroupBy.rolling",
+    "sample": "GroupBy.sample",
+    "sem": "GroupBy.sem",
+    "shift": "GroupBy.shift",
+    "size": "GroupBy.size",
+    "std": "GroupBy.std",
+    "sum": "GroupBy.sum",
+    "tail": "GroupBy.tail",
+    "var": "GroupBy.var",
+}
+
+_GROUPED_FRAME = {"apply": "GroupBy.apply", "describe": "GroupBy.describe"}
+
+_RESAMPLED = {"get_group": "BaseGroupBy.get_group", "quantile": "GroupBy.quantile"}
+
 
 def name_as_pandas(frame: type, series: type) -> None:
     """Renames the methods of the two classes to the names pandas prints for them.
@@ -145,8 +188,70 @@ def name_as_pandas(frame: type, series: type) -> None:
     for function, names in wanted.values():
         if len(names) != 1:
             continue
-        shown = names.pop()
-        # A decorated method raises from the function it wraps, so that is named too.
-        while function is not None:
-            function.__qualname__ = shown  # type: ignore[attr-defined]
-            function = getattr(function, "__wrapped__", None)
+        _rename(function, names.pop())
+
+
+# The second name pandas gives a method, which prints the first.
+_ALIASES = {"agg": "aggregate"}
+
+
+def name_each(*classes: tuple[type, dict[str, str]]) -> None:
+    """Renames the methods of related classes, each to the name pandas prints on it.
+
+    A method not in a class's table is named after the class, which is what
+    pandas prints for the group bys and the windows. A method firepanda defines
+    once on a mixin that pandas names differently on two of the classes, such as
+    `Rolling.sum` and `Expanding.sum`, is copied onto each class under its own
+    name, so the one function is not asked to have two.
+
+    Args:
+        classes: Each class with its table of the names that differ from the default.
+    """
+    wanted: dict[int, tuple[types.FunctionType, dict[tuple[type, str], str]]] = {}
+    for cls, table in classes:
+        for name in dir(cls):
+            if name.startswith("_"):
+                continue
+            function = inspect.getattr_static(cls, name)
+            if not inspect.isfunction(function) or not function.__module__.startswith("firepanda"):
+                continue
+            shown = table.get(name) or f"{cls.__name__}.{_ALIASES.get(name, name)}"
+            wanted.setdefault(id(function), (function, {}))[1][cls, name] = shown
+    for function, names in wanted.values():
+        if len(set(names.values())) == 1:
+            _rename(function, next(iter(names.values())))
+            continue
+        if hasattr(function, "__wrapped__"):
+            continue
+        # Aliases such as `agg` and `aggregate` stay one function on each class.
+        copies: dict[tuple[type, str], types.FunctionType] = {}
+        for (cls, name), shown in names.items():
+            if (cls, shown) not in copies:
+                copies[cls, shown] = _copied(function, shown)
+            setattr(cls, name, copies[cls, shown])
+
+
+def _rename(function: object, shown: str) -> None:
+    """Names `function`, and whatever it wraps, as pandas names it."""
+    # A decorated method raises from the function it wraps, so that is named too.
+    while function is not None:
+        function.__qualname__ = shown  # type: ignore[attr-defined]
+        function = getattr(function, "__wrapped__", None)
+
+
+def _copied(function: types.FunctionType, shown: str) -> types.FunctionType:
+    """A second function with the same code and everything else, under another name."""
+    copy = types.FunctionType(
+        function.__code__,
+        function.__globals__,
+        function.__name__,
+        function.__defaults__,
+        function.__closure__,
+    )
+    copy.__kwdefaults__ = function.__kwdefaults__
+    copy.__dict__.update(function.__dict__)
+    copy.__doc__ = function.__doc__
+    copy.__module__ = function.__module__
+    copy.__annotations__ = function.__annotations__
+    copy.__qualname__ = shown
+    return copy

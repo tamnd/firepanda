@@ -252,6 +252,14 @@ class RangeIndex(Index):
         """Where the largest label is, a Python int as pandas answers for a range."""
         return _scalar(super().argmax(*args, **kwargs))
 
+    def all(self, *args: Any, **kwargs: Any) -> bool:
+        """Whether no label is zero. pandas' range takes numpy's keywords here unread."""
+        return 0 not in self._range_of()
+
+    def any(self, *args: Any, **kwargs: Any) -> bool:
+        """Whether some label is not zero, taking numpy's keywords unread as `all` does."""
+        return any(self._range_of())
+
 
 def _ranges_met(mine: range, theirs: range) -> range:
     """Where two ranges meet, by pandas' own arithmetic for `RangeIndex.intersection`."""

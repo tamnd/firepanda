@@ -2158,7 +2158,10 @@ def _group_members(py: str) -> tuple[Member, ...]:
         "nunique": "self._nunique(dropna)",
         "spread": 'self._spread("{name}", ddof, numeric_only, skipna, engine, engine_kwargs)',
         "sem": 'self._reduce("sem", _ddof_number(ddof), numeric_only, skipna)',
-        "skew": 'self._reduce("{name}", 0.0, numeric_only, skipna)',
+        "skew": (
+            '_numpy_keywords(self, "group_{name}", kwargs)._reduce("{name}", 0.0, numeric_only,'
+            " skipna)"
+        ),
         "quantile": "self._quantile(q, interpolation, numeric_only)",
         "product": 'self._reduce("prod", 0.0, numeric_only, skipna, min_count)',
         "truth": 'self._reduce("{name}", 0.0, False, skipna)',

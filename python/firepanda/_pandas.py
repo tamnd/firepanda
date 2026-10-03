@@ -5886,6 +5886,9 @@ _NUMPY_DEFAULTS: dict[str, dict[str, Any]] = {
     "cummin": {"dtype": None, "out": None},
     "argmax": {"out": None},
     "argmin": {"out": None},
+    # A group by hands the keywords of these two to its kernel, which takes none of them.
+    "group_skew": {},
+    "group_kurt": {},
 }
 """The numpy keywords pandas takes on each reduction, with the one value each may hold.
 
@@ -24068,7 +24071,24 @@ class _ReadingMixin:
         """
         from ._frame import DataFrame
 
+        named = bool(kwargs) and all(isinstance(given, tuple) for given in kwargs.values())
+        if func is None and not named:
+            raise TypeError("Must provide 'func' or tuples of '(column, aggfunc).")
         data = self._data
+        if func is None:
+            # pandas' named aggregation, `name=(column, reduction)`, a column a name.
+            if not isinstance(data, DataFrame):
+                raise SpecificationError("nested renamer is not supported")
+            labels = _shown_names(data)
+            missing = [column for column, _ in kwargs.values() if column not in labels]
+            if missing:
+                raise KeyError(f"Label(s) {missing!r} do not exist")
+            return DataFrame(
+                {
+                    name: self.aggregate({column: how})[column]
+                    for name, (column, how) in kwargs.items()
+                }
+            )
         if isinstance(func, str):
             found = getattr(self, func, None) if not func.startswith("_") else None
             if not callable(found) or func in ("aggregate", "agg", "pipe"):
@@ -28751,7 +28771,16 @@ class GroupByMixin[Answer]:
                 " the named reductions are answered with their defaults"
             )
         if func is None:
-            if not kwargs:
+            if getattr(self, "_column", None) is not None:
+                # A group by over one column takes `name=function`, each a name or a function.
+                if not kwargs:
+                    raise TypeError("Must provide 'func' or named aggregation **kwargs.")
+                for given in kwargs.values():
+                    if not isinstance(given, str) and not callable(given):
+                        raise TypeError(
+                            f"func is expected but received {type(given).__name__} in **kwargs."
+                        )
+            elif not kwargs:
                 raise TypeError("Must provide 'func' or tuples of '(column, aggfunc).")
             return self._gathered(self._named_plan(kwargs))
         if isinstance(func, str):

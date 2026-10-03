@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: Wrong calls on a group by or a window name the method as pandas does
+
+A wrong call on a group by reads `GroupBy.sum() got an unexpected keyword argument` on a frame's and a column's alike, and the windows read `Rolling.sum`, `Expanding.sum` and `ExponentialMovingWindow.sum` even where firepanda shares one function between them. A group by's `skew` and `kurt` now refuse a keyword they cannot use, `agg` with no function reads as pandas on a window and on a column's group by, a window takes named aggregation (`name=(column, reduction)`), and a RangeIndex answers `all` and `any` without reading numpy's keywords, as pandas' range does.
+
 ### Fixed: numpy's keywords on a reduction are checked as pandas checks them
 
 `sum`, `mean`, `std`, `all`, `cumsum`, `argmax` and the rest of the reductions on a frame, a series and an index take numpy's `out`, `dtype`, `keepdims` and friends only while they hold their defaults, and refuse anything else with pandas' words: `the 'out' parameter is not supported in the pandas implementation of sum()`. A keyword numpy does not have on that reduction is a TypeError naming it, where before it was dropped without a word.

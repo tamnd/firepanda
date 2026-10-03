@@ -40,8 +40,10 @@ from . import (
     _assign,  # noqa: F401  (gives the axes and names their setters)
     _attrs,
     _firepanda,
+    _frame,
     _pandas,
     _qualnames,
+    _resample,
     api,
     arrays,
     compat,
@@ -289,6 +291,14 @@ that gets caught.
 
 # First, so the wrappers below copy the names pandas prints.
 _qualnames.name_as_pandas(DataFrame, Series)
+_qualnames.name_each(
+    (_frame.DataFrameGroupBy, {**_qualnames._GROUPED, **_qualnames._GROUPED_FRAME}),
+    (_frame.SeriesGroupBy, _qualnames._GROUPED),
+)
+_qualnames.name_each((_frame.Rolling, {}), (_frame.Expanding, {}))
+_qualnames.name_each((_frame.ExponentialMovingWindow, {}))
+_qualnames.name_each((_resample.Resampler, _qualnames._RESAMPLED))
+_pandas._NthSelector.__call__.__qualname__ = "GroupByNthSelector.__call__"
 _pandas._allow_positional(DataFrame, Series)
 _pandas._refuse_axis_none(DataFrame, Series)
 _attrs.install()
