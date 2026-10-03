@@ -719,21 +719,203 @@ class ArrowExtensionArray(FirepandaArray):
         return "<NA>" if _gap(value) else _pprinted(value)
 
 
-class DatetimeArray(_Shaped, _Middle, FirepandaArray):
+def _from_index(value: Any) -> Any:
+    """An index's answer as the array gives it: numbers and flags in numpy, other labels as
+    an array of their own, a table counted from 0 and a list as a numpy array of objects."""
+    from ._frame import DataFrame, Index
+
+    if isinstance(value, DataFrame):
+        return value.reset_index(drop=True)
+    if isinstance(value, Index):
+        kind = str(value.dtype)
+        return value.to_numpy() if kind in _NO_GAP or kind.startswith("float") else value.array
+    if isinstance(value, list):
+        import numpy
+
+        made = numpy.empty(len(value), dtype=object)
+        for place, item in enumerate(value):
+            made[place] = item
+        return made
+    return value
+
+
+def _field(name: str, doc: str) -> property:
+    """A field the array reads from the index of its own kind."""
+    return property(lambda self: _from_index(getattr(self._index(), name)), doc=doc)
+
+
+class _Fields:
+    """The fields and methods an instant, span or period array shares with its index."""
+
+    __slots__ = ()
+    _column: Series
+
+    def _index(self) -> Any:
+        raise NotImplementedError
+
+    def _asked(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        return _from_index(getattr(self._index(), name)(*args, **kwargs))
+
+    asi8 = _field("asi8", "The values as int64 counts, the least int64 for a gap.")
+
+
+class _Stepped(_Fields):
+    """The frequency fields instants and spans share, which periods hold in their type."""
+
+    __slots__ = ()
+
+    freq = _field("freq", "The step between the values, None when it is not kept.")
+    inferred_freq = _field("inferred_freq", "The step the values are evenly spaced by, if any.")
+
+
+class DatetimeArray(_Stepped, _Shaped, _Middle, FirepandaArray):
     """Instants, which is `pandas.arrays.DatetimeArray`."""
 
     __slots__ = ()
     _numpy_backed = True
 
+    def _index(self) -> Any:
+        from ._datetime import DatetimeIndex
+
+        return DatetimeIndex(self._column)
+
+    year = _field("year", "The year of each instant.")
+    month = _field("month", "The month of each instant, 1 for January.")
+    day = _field("day", "The day of the month of each instant.")
+    hour = _field("hour", "The hour of each instant.")
+    minute = _field("minute", "The minute of each instant.")
+    second = _field("second", "The second of each instant.")
+    microsecond = _field("microsecond", "The microseconds past the second of each instant.")
+    nanosecond = _field("nanosecond", "The nanoseconds past the microsecond of each instant.")
+    quarter = _field("quarter", "The quarter of the year of each instant.")
+    dayofweek = day_of_week = weekday = _field("dayofweek", "The weekday, 0 for Monday.")
+    dayofyear = day_of_year = _field("dayofyear", "The day of the year of each instant.")
+    days_in_month = daysinmonth = _field("days_in_month", "How many days each month has.")
+    is_month_start = _field("is_month_start", "Whether each instant is a month's first day.")
+    is_month_end = _field("is_month_end", "Whether each instant is a month's last day.")
+    is_quarter_start = _field("is_quarter_start", "Whether each is a quarter's first day.")
+    is_quarter_end = _field("is_quarter_end", "Whether each is a quarter's last day.")
+    is_year_start = _field("is_year_start", "Whether each instant is a year's first day.")
+    is_year_end = _field("is_year_end", "Whether each instant is a year's last day.")
+    is_leap_year = _field("is_leap_year", "Whether each instant's year is a leap year.")
+    is_normalized = _field("is_normalized", "Whether every instant is at midnight.")
+    date = _field("date", "The date of each instant, NaT for a gap.")
+    time = _field("time", "The time of day of each instant, NaT for a gap.")
+    timetz = _field("timetz", "The time of day with its zone, NaT for a gap.")
+    tz = _field("tz", "The time zone, None when the instants have none.")
+    tzinfo = _field("tzinfo", "The time zone, the same as `tz`.")
+    unit = _field("unit", "The unit the instants are counted in.")
+    resolution = _field("resolution", "The finest unit any instant needs.")
+
+    def normalize(self) -> Any:
+        """Each instant at the midnight that starts its day."""
+        return self._asked("normalize")
+
+    def day_name(self, locale: Any = None) -> Any:
+        """The weekday's name for each instant."""
+        return self._asked("day_name", locale)
+
+    def month_name(self, locale: Any = None) -> Any:
+        """The month's name for each instant."""
+        return self._asked("month_name", locale)
+
+    def isocalendar(self) -> Any:
+        """The ISO year, week and day of each instant, as a table."""
+        return self._asked("isocalendar")
+
+    def floor(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
+        """Each instant rounded down to a multiple of `freq`."""
+        return self._asked("floor", freq, ambiguous=ambiguous, nonexistent=nonexistent)
+
+    def ceil(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
+        """Each instant rounded up to a multiple of `freq`."""
+        return self._asked("ceil", freq, ambiguous=ambiguous, nonexistent=nonexistent)
+
+    def round(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
+        """Each instant rounded to the nearest multiple of `freq`."""
+        return self._asked("round", freq, ambiguous=ambiguous, nonexistent=nonexistent)
+
+    def as_unit(self, unit: str, round_ok: bool = True) -> Any:
+        """The instants counted in another unit."""
+        return self._asked("as_unit", unit, round_ok=round_ok)
+
+    def to_pydatetime(self) -> Any:
+        """The instants as Python datetimes in a numpy array of objects."""
+        return self._asked("to_pydatetime")
+
+    def to_period(self, freq: Any = None) -> Any:
+        """The period of `freq` each instant falls in."""
+        return self._asked("to_period", freq)
+
+    def to_julian_date(self) -> Any:
+        """The Julian date of each instant."""
+        return self._asked("to_julian_date")
+
+    def strftime(self, date_format: str) -> Any:
+        """Each instant written by a format, a gap for NaT."""
+        return self._asked("strftime", date_format)
+
+    def tz_localize(self, tz: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
+        """The wall times read in a time zone."""
+        return self._asked("tz_localize", tz, ambiguous=ambiguous, nonexistent=nonexistent)
+
+    def tz_convert(self, tz: Any) -> Any:
+        """The same instants as another time zone's wall times."""
+        return self._asked("tz_convert", tz)
+
+    def std(self, *, axis: Any = None, ddof: int = 1, skipna: bool = True, **kwargs: Any) -> Any:
+        """The spread of the instants, as a span."""
+        return self._index().std(axis=axis, ddof=ddof, skipna=skipna)
+
     def _shown(self, value: Any) -> str:
         return "'NaT'" if _gap(value) else f"'{value}'"
 
 
-class TimedeltaArray(_Shaped, _Truth, _Middle, FirepandaArray):
+class TimedeltaArray(_Stepped, _Shaped, _Truth, _Middle, FirepandaArray):
     """Spans, which is `pandas.arrays.TimedeltaArray`."""
 
     __slots__ = ()
     _numpy_backed = True
+
+    def _index(self) -> Any:
+        from ._timedelta import TimedeltaIndex
+
+        return TimedeltaIndex(self._column)
+
+    days = _field("days", "The whole days of each span, rounded toward minus infinity.")
+    seconds = _field("seconds", "The seconds past the whole days of each span.")
+    microseconds = _field("microseconds", "The microseconds past the second of each span.")
+    nanoseconds = _field("nanoseconds", "The nanoseconds past the microsecond of each span.")
+    components = _field("components", "Each span's days down to nanoseconds, as a table.")
+    unit = _field("unit", "The unit the spans are counted in.")
+
+    def total_seconds(self) -> Any:
+        """Each span in seconds, NaN for a gap."""
+        return self._asked("total_seconds")
+
+    def to_pytimedelta(self) -> Any:
+        """The spans as Python timedeltas in a numpy array of objects."""
+        return self._asked("to_pytimedelta")
+
+    def floor(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
+        """Each span rounded down to a multiple of `freq`."""
+        return self._asked("floor", freq)
+
+    def ceil(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
+        """Each span rounded up to a multiple of `freq`."""
+        return self._asked("ceil", freq)
+
+    def round(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
+        """Each span rounded to the nearest multiple of `freq`."""
+        return self._asked("round", freq)
+
+    def as_unit(self, unit: str, round_ok: bool = True) -> Any:
+        """The spans counted in another unit."""
+        return self._asked("as_unit", unit, round_ok=round_ok)
+
+    def std(self, *, axis: Any = None, ddof: int = 1, skipna: bool = True, **kwargs: Any) -> Any:
+        """The spread of the spans."""
+        return self._index().std(axis=axis, ddof=ddof, skipna=skipna)
 
     def _formatter(self, values: list[Any]) -> Any:
         present = [value for value in values if not _gap(value)]
@@ -747,11 +929,46 @@ class TimedeltaArray(_Shaped, _Truth, _Middle, FirepandaArray):
         return shown
 
 
-class PeriodArray(_Shaped, _Middle, FirepandaArray):
+class PeriodArray(_Fields, _Shaped, _Middle, FirepandaArray):
     """Periods, which is `pandas.arrays.PeriodArray`."""
 
     __slots__ = ()
     _numpy_backed = True
+
+    def _index(self) -> Any:
+        from ._period_index import PeriodIndex
+
+        return PeriodIndex(self._column)
+
+    year = _field("year", "The year of each period.")
+    month = _field("month", "The month of each period, 1 for January.")
+    day = _field("day", "The day of the month each period ends on.")
+    hour = _field("hour", "The hour of each period.")
+    minute = _field("minute", "The minute of each period.")
+    second = _field("second", "The second of each period.")
+    quarter = _field("quarter", "The quarter of the year of each period.")
+    qyear = _field("qyear", "The fiscal year each period's quarter falls in.")
+    week = weekofyear = _field("week", "The ISO week of the year of each period.")
+    dayofweek = day_of_week = weekday = _field("dayofweek", "The weekday, 0 for Monday.")
+    dayofyear = day_of_year = _field("dayofyear", "The day of the year of each period.")
+    days_in_month = daysinmonth = _field("days_in_month", "How many days each month has.")
+    is_leap_year = _field("is_leap_year", "Whether each period's year is a leap year.")
+    start_time = _field("start_time", "The first instant of each period.")
+    end_time = _field("end_time", "The last instant of each period.")
+    freq = _field("freq", "The frequency, as the offset that steps by it.")
+    freqstr = _field("freqstr", "The frequency, as its string.")
+
+    def to_timestamp(self, freq: Any = None, how: str = "start") -> Any:
+        """Each period as an instant, at its start or its end."""
+        return self._asked("to_timestamp", freq=freq, how=how)
+
+    def asfreq(self, freq: Any = None, how: str = "E") -> Any:
+        """Each period as the one of another frequency at its start or its end."""
+        return self._asked("asfreq", freq, how=how)
+
+    def strftime(self, date_format: str) -> Any:
+        """Each period written by a format, a gap for NaT."""
+        return self._asked("strftime", date_format)
 
     def median(self, *, axis: Any = None, skipna: bool = True, **kwargs: Any) -> Any:
         """The middle period, the earlier of the two middle ones' midpoint for an even count."""
